@@ -11,11 +11,11 @@ use crate::{
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
     Hsla, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
-    KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite,
-    MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
-    Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage,
-    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
+    KeystrokeEvent, LayoutId, LayoutStats, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
+    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
+    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
+    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
     SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
     StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextInputConfiguration,
@@ -28,7 +28,7 @@ use crate::{
 use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer};
 use crate::interactive::TouchEvent;
 use anyhow::{Context as _, Result, anyhow};
-use collections::{FxHashMap, FxHashSet};
+use collections::{FxHashMap, FxHashSet, FxHasher};
 #[cfg(target_os = "macos")]
 use core_video::pixel_buffer::CVPixelBuffer;
 use derive_more::{Deref, DerefMut};
@@ -998,6 +998,29 @@ pub(crate) struct Frame {
     pub(crate) tab_stops: TabStopMap,
 }
 
+/// One level of [`Window::push_layout_key`]'s path stack.
+struct LayoutKeyFrame {
+    /// Hash of the path from the root of the element tree to this element.
+    key: u64,
+    /// How many children without an [`ElementId`] have been entered so far,
+    /// which is what identifies the next one.
+    next_unidentified_child: u32,
+}
+
+/// Mixes `value` into `state`, well enough that path hashes built out of small
+/// child indices do not collide in practice.
+///
+/// This is the finalizer from SplitMix64 applied to the combined value.
+fn mix(state: u64, value: u64) -> u64 {
+    let mut z = state
+        .rotate_left(27)
+        .wrapping_add(value)
+        .wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct PrepaintStateIndex {
     hitboxes_index: usize,
@@ -1160,6 +1183,13 @@ pub struct Window {
     rem_size_override_stack: SmallVec<[Pixels; 8]>,
     pub(crate) viewport_size: Size<Pixels>,
     layout_engine: Option<TaffyLayoutEngine>,
+    /// Running hashes of the path from the root of the element tree down to the
+    /// element currently requesting layout. See [`Window::push_layout_key`].
+    layout_key_stack: SmallVec<[LayoutKeyFrame; 32]>,
+    /// How many element trees have been laid out this frame. Window roots,
+    /// prompts, drags and tooltips each start a tree of their own and need keys
+    /// that do not collide with each other.
+    layout_root_index: u32,
     pub(crate) root: Option<AnyView>,
     pub(crate) element_id_stack: SmallVec<[ElementId; 32]>,
     pub(crate) text_style_stack: Vec<TextStyleRefinement>,
@@ -2025,6 +2055,8 @@ impl Window {
             rem_size_override_stack: SmallVec::new(),
             viewport_size: content_size,
             layout_engine: Some(TaffyLayoutEngine::new()),
+            layout_key_stack: SmallVec::new(),
+            layout_root_index: 0,
             root: None,
             element_id_stack: SmallVec::default(),
             text_style_stack: Vec::new(),
@@ -3223,7 +3255,9 @@ impl Window {
                 });
         }
 
-        self.layout_engine.as_mut().unwrap().clear();
+        self.layout_engine.as_mut().unwrap().end_frame();
+        debug_assert!(self.layout_key_stack.is_empty());
+        self.layout_root_index = 0;
         self.text_system().finish_frame();
         self.next_frame.finish(&mut self.rendered_frame);
 
@@ -4938,7 +4972,10 @@ impl Window {
         let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
 
+        let key = self.layout_key();
+
         self.layout_engine.as_mut().unwrap().request_layout(
+            key,
             style,
             rem_size,
             scale_factor,
@@ -4963,10 +5000,159 @@ impl Window {
 
         let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
-        self.layout_engine
+        let key = self.layout_key();
+        let (layout_id, _) = self
+            .layout_engine
             .as_mut()
             .unwrap()
-            .request_measured_layout(style, rem_size, scale_factor, measure)
+            .request_measured_layout(
+                key,
+                style,
+                rem_size,
+                scale_factor,
+                // Nothing is known about what this measurement depends on, so it is
+                // re-run every frame.
+                None,
+                Rc::new(()) as Rc<dyn Any>,
+                |_| Box::new(measure),
+            );
+        layout_id
+    }
+
+    /// Like [`Window::request_measured_layout`], but tells the layout engine
+    /// what the measurement depends on so it can be skipped when nothing has.
+    ///
+    /// `measure_key` must cover every input that can change the measured size —
+    /// and *only* those inputs, since anything else folded into it costs a
+    /// needless relayout. While the key is unchanged, the node is left clean and
+    /// Taffy may answer its size from cache without calling the measurement.
+    ///
+    /// Measurements in GPUI generally do double duty, producing artifacts the
+    /// element later paints from. Those live in `state`: when a skipped
+    /// measurement means nothing was produced this frame, the state that went
+    /// with the previous one is returned instead, and the caller should adopt it.
+    pub fn request_measured_layout_cached<S, F>(
+        &mut self,
+        style: Style,
+        measure_key: u64,
+        state: Rc<S>,
+        build_measure: impl FnOnce(&Rc<S>) -> F,
+    ) -> (LayoutId, Rc<S>)
+    where
+        S: 'static,
+        F: FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
+            + 'static,
+    {
+        self.invalidator.debug_assert_prepaint();
+
+        let rem_size = self.rem_size();
+        let scale_factor = self.scale_factor();
+        let key = self.layout_key();
+        let (layout_id, state) = self
+            .layout_engine
+            .as_mut()
+            .unwrap()
+            .request_measured_layout(
+                key,
+                style,
+                rem_size,
+                scale_factor,
+                Some(measure_key),
+                state as Rc<dyn Any>,
+                |state| {
+                    let state = state
+                        .clone()
+                        .downcast::<S>()
+                        .expect("layout state type is checked before it is handed back");
+                    Box::new(build_measure(&state))
+                },
+            );
+        let state = state
+            .downcast::<S>()
+            .expect("layout state type is checked before it is handed back");
+        (layout_id, state)
+    }
+
+    /// The key identifying the element currently requesting layout, used to
+    /// match it up with the Taffy node it had on the previous frame.
+    ///
+    /// `None` while no element tree is being walked — layout requested from the
+    /// prepaint phase, as uniform lists do when sizing their items, arrives
+    /// here. Those nodes are not reused.
+    fn layout_key(&self) -> Option<u64> {
+        self.layout_key_stack.last().map(|frame| frame.key)
+    }
+
+    /// Begins an element, deriving the key its layout node is matched by across
+    /// frames.
+    ///
+    /// The key is the hash of the path from the root: each element mixes either
+    /// its [`ElementId`], when it has one, or its index among its unidentified
+    /// siblings. Identified elements therefore keep their node when siblings are
+    /// inserted or reordered around them, while unidentified ones are matched
+    /// purely by position, which is the same bargain the element state map makes.
+    ///
+    /// Because the parent's key is always mixed in, a key encodes the whole
+    /// ancestor path, and a node can never be matched to an element that has
+    /// moved to a different parent.
+    pub(crate) fn push_layout_key(&mut self, id: Option<&ElementId>) {
+        const ROOT_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
+        let key = match self.layout_key_stack.last_mut() {
+            Some(parent) => {
+                let component = match id {
+                    Some(id) => {
+                        let mut hasher = FxHasher::default();
+                        id.hash(&mut hasher);
+                        // Kept distinct from the positional case so that an
+                        // element identified by index 3 and one identified by
+                        // `ElementId` hashing to 3 do not collide.
+                        mix(hasher.finish(), 1)
+                    }
+                    None => {
+                        let index = parent.next_unidentified_child;
+                        parent.next_unidentified_child += 1;
+                        mix(index as u64, 2)
+                    }
+                };
+                mix(parent.key, component)
+            }
+            None => {
+                let index = self.layout_root_index;
+                self.layout_root_index += 1;
+                mix(ROOT_SEED, index as u64)
+            }
+        };
+        self.layout_key_stack.push(LayoutKeyFrame {
+            key,
+            next_unidentified_child: 0,
+        });
+    }
+
+    /// Ends the element most recently begun by [`Window::push_layout_key`].
+    pub(crate) fn pop_layout_key(&mut self) {
+        self.layout_key_stack.pop();
+    }
+
+    /// Counters describing the work the layout engine has performed since the
+    /// last call to [`Window::reset_layout_stats`].
+    ///
+    /// Useful for confirming that a change actually reduced layout work rather
+    /// than only moving it around: `nodes_reused` against `nodes_created` shows
+    /// how much of the tree survived the frame, and `style_writes` shows how
+    /// much of it was dirtied again anyway.
+    pub fn layout_stats(&self) -> LayoutStats {
+        self.layout_engine.as_ref().unwrap().stats()
+    }
+
+    /// Zeroes the counters reported by [`Window::layout_stats`].
+    pub fn reset_layout_stats(&mut self) {
+        self.layout_engine.as_mut().unwrap().reset_stats();
+    }
+
+    /// How many layout nodes this window is currently holding on to.
+    pub fn layout_node_count(&self) -> usize {
+        self.layout_engine.as_ref().unwrap().node_count()
     }
 
     /// Compute the layout for the given id within the given available space.
@@ -7490,10 +7676,11 @@ mod tests {
         AnyWindowHandle, AppContext as _, Bounds, Context, DispatchPhase, DragMoveEvent, Empty,
         ExternalDragPayload, ExternalPaths, FileDragPaths, FileDropEvent, FocusHandle,
         InputEvent as _, InteractiveElement as _, IntoElement, KeyDownEvent, Keystroke,
-        LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels,
-        PlatformInput, Point, Render, RequestFrameOptions, StatefulInteractiveElement as _, Styled,
-        TestAppContext, TouchDragEvent, TouchEvent, TouchId, TouchPhase, Window, WindowAppearance,
-        WindowOptions, canvas, div, point, px, size,
+        LayoutStats, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
+        Pixels, PlatformInput, Point, Render, RequestFrameOptions, SharedString,
+        StatefulInteractiveElement as _, Styled, TestAppContext, TouchDragEvent, TouchEvent,
+        TouchId, TouchPhase, Window, WindowAppearance, WindowHandle, WindowOptions, canvas, div,
+        point, px, size,
     };
 
     /// Visibility transitions reach observers exactly once each, with the new
@@ -8640,5 +8827,266 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    /// Drives the retained-layout tests.
+    ///
+    /// The shape, the styling and the text of the tree are each controllable on
+    /// their own, and every row records the bounds its trailing probe resolved
+    /// to, so a frame assembled out of retained nodes can be compared against
+    /// the frame a fresh tree produces for the same inputs.
+    struct RetainedLayoutView {
+        rows: usize,
+        row_width: Pixels,
+        label: SharedString,
+        probes: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+    }
+
+    impl Render for RetainedLayoutView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let probes = self.probes.clone();
+            probes.borrow_mut().clear();
+            let label = self.label.clone();
+            let row_width = self.row_width;
+            div()
+                .flex()
+                .flex_col()
+                .children((0..self.rows).map(move |_| {
+                    let probes = probes.clone();
+                    div()
+                        .flex()
+                        .flex_row()
+                        .w(row_width)
+                        .h(px(20.))
+                        .child(label.clone())
+                        .child(
+                            canvas(
+                                move |bounds, _, _| probes.borrow_mut().push(bounds),
+                                |_, _, _, _| {},
+                            )
+                            .flex_1()
+                            .h_full(),
+                        )
+                }))
+        }
+    }
+
+    /// Draws one frame and returns the layout work it took.
+    fn draw_frame(cx: &mut TestAppContext, window: AnyWindowHandle) -> LayoutStats {
+        cx.update_window(window, |_, window, cx| {
+            window.reset_layout_stats();
+            window.draw(cx).clear(cx);
+            window.layout_stats()
+        })
+        .unwrap()
+    }
+
+    /// Applies a change to the view and returns the layout work that followed.
+    ///
+    /// Notifying a view can draw a frame of its own before the explicit one
+    /// here, so the counters start before the change rather than before the
+    /// draw; otherwise the work the change caused would be measured a frame too
+    /// late, once the tree had already settled.
+    fn change_and_draw(
+        cx: &mut TestAppContext,
+        window: WindowHandle<RetainedLayoutView>,
+        change: impl FnOnce(&mut RetainedLayoutView),
+    ) -> LayoutStats {
+        cx.update_window(window.into(), |_, window, _| window.reset_layout_stats())
+            .unwrap();
+        window
+            .update(cx, |view, _, cx| {
+                change(view);
+                cx.notify();
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.layout_stats()
+        })
+        .unwrap()
+    }
+
+    fn retained_layout_window(
+        cx: &mut TestAppContext,
+        probes: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+    ) -> WindowHandle<RetainedLayoutView> {
+        cx.add_window(move |_, _| RetainedLayoutView {
+            rows: 4,
+            row_width: px(200.),
+            label: "ab".into(),
+            probes,
+        })
+    }
+
+    #[test]
+    fn an_unchanged_frame_reuses_every_layout_node_and_writes_to_none() {
+        let mut cx = TestAppContext::single();
+        let probes = Rc::new(RefCell::new(Vec::new()));
+        let window = retained_layout_window(&mut cx, probes.clone());
+
+        draw_frame(&mut cx, window.into());
+        let first = probes.borrow().clone();
+
+        let stats = draw_frame(&mut cx, window.into());
+        assert_eq!(
+            stats.nodes_created, 0,
+            "an unchanged frame should not allocate a single node"
+        );
+        assert!(stats.nodes_reused > 0);
+        assert_eq!(
+            stats.style_writes, 0,
+            "writing a style dirties the node and its ancestors, undoing the point of retaining it"
+        );
+        assert_eq!(stats.children_writes, 0);
+        assert_eq!(stats.measure_rebinds, 0);
+        assert_eq!(
+            &first,
+            &*probes.borrow(),
+            "a frame laid out from retained nodes must land in the same place as the frame before it"
+        );
+    }
+
+    #[test]
+    fn a_retained_frame_follows_a_style_change() {
+        let mut cx = TestAppContext::single();
+        let probes = Rc::new(RefCell::new(Vec::new()));
+        let window = retained_layout_window(&mut cx, probes.clone());
+
+        draw_frame(&mut cx, window.into());
+        let before = probes.borrow()[0];
+
+        change_and_draw(&mut cx, window, |view| view.row_width = px(400.));
+        let after = probes.borrow()[0];
+
+        assert_eq!(
+            after.size.width - before.size.width,
+            px(200.),
+            "the probe fills what is left of the row, so widening the row must widen it too"
+        );
+    }
+
+    #[test]
+    fn a_retained_frame_follows_a_text_change() {
+        let mut cx = TestAppContext::single();
+        let probes = Rc::new(RefCell::new(Vec::new()));
+        let window = retained_layout_window(&mut cx, probes.clone());
+
+        draw_frame(&mut cx, window.into());
+        let before = probes.borrow()[0];
+
+        let stats = change_and_draw(&mut cx, window, |view| {
+            view.label = "abcdefghijklmnop".into()
+        });
+        let after = probes.borrow()[0];
+
+        assert!(
+            stats.measure_rebinds > 0,
+            "changed text must invalidate the measurement it is cached under: {stats:?}"
+        );
+        assert!(
+            after.origin.x > before.origin.x,
+            "longer text should push the probe further along the row, \
+             got {before:?} then {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_retained_frame_follows_a_structural_change() {
+        let mut cx = TestAppContext::single();
+        let probes = Rc::new(RefCell::new(Vec::new()));
+        let window = retained_layout_window(&mut cx, probes.clone());
+
+        draw_frame(&mut cx, window.into());
+        assert_eq!(probes.borrow().len(), 4);
+        let row_height = probes.borrow()[1].origin.y - probes.borrow()[0].origin.y;
+
+        change_and_draw(&mut cx, window, |view| view.rows = 7);
+        assert_eq!(probes.borrow().len(), 7);
+        assert_eq!(
+            probes.borrow()[6].origin.y - probes.borrow()[0].origin.y,
+            row_height * 6.,
+            "rows added to a retained tree must stack like the ones already there"
+        );
+
+        let stats = change_and_draw(&mut cx, window, |view| view.rows = 2);
+        assert_eq!(probes.borrow().len(), 2);
+        assert!(
+            stats.nodes_freed > 0,
+            "nodes that left the tree must be released rather than accumulated: {stats:?}"
+        );
+    }
+
+    /// The window root is the one node whose style Taffy does not hold as the
+    /// element wrote it, because an `auto` size is rewritten to fill the
+    /// viewport. Retaining that node means the rewrite has to stay recoverable
+    /// across frames, or the root silently stops following the window.
+    #[test]
+    fn a_retained_auto_sized_root_keeps_filling_a_resized_window() {
+        let mut cx = TestAppContext::single();
+        let child_bounds = Rc::new(Cell::new(Bounds::default()));
+        let window = cx.add_window({
+            let child_bounds = child_bounds.clone();
+            move |_, _| RootView {
+                explicit_size: false,
+                child_bounds,
+            }
+        });
+        let handle: AnyWindowHandle = window.into();
+
+        for resized_size in [
+            size(px(800.), px(600.)),
+            size(px(640.), px(480.)),
+            size(px(1024.), px(768.)),
+            // Back to a size already seen, to catch a stale record of the
+            // previous fill rather than of the request behind it.
+            size(px(800.), px(600.)),
+        ] {
+            cx.simulate_window_resize(handle, resized_size);
+            draw_frame(&mut cx, handle);
+            assert_eq!(
+                child_bounds.get().size,
+                resized_size,
+                "an auto-sized root must still fill the window after it is resized"
+            );
+        }
+
+        // And a frame that changes nothing must leave the stretched root alone
+        // rather than rewriting it and dirtying the whole tree.
+        let stats = draw_frame(&mut cx, handle);
+        assert_eq!(
+            stats.style_writes, 0,
+            "a settled auto-sized root should not be restyled every frame: {stats:?}"
+        );
+    }
+
+    #[test]
+    fn retaining_layout_nodes_does_not_grow_the_tree_over_time() {
+        let mut cx = TestAppContext::single();
+        let probes = Rc::new(RefCell::new(Vec::new()));
+        let window = retained_layout_window(&mut cx, probes.clone());
+
+        for frame in 0..12 {
+            // Oscillate the shape so nodes are created and released repeatedly
+            // rather than settling.
+            change_and_draw(&mut cx, window, |view| view.rows = 2 + frame % 5);
+        }
+
+        let live = cx
+            .update_window(window.into(), |_, window, _| window.layout_node_count())
+            .unwrap();
+        change_and_draw(&mut cx, window, |view| view.rows = 2);
+        let settled = cx
+            .update_window(window.into(), |_, window, _| window.layout_node_count())
+            .unwrap();
+
+        assert!(
+            settled <= live,
+            "the tree should shrink back down, held {live} nodes and settled at {settled}"
+        );
+        assert!(
+            settled < 40,
+            "two rows should not need {settled} layout nodes"
+        );
     }
 }

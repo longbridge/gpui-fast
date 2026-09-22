@@ -297,7 +297,12 @@ impl<E: Element> Drawable<E> {
     fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
         match mem::take(&mut self.phase) {
             ElementDrawPhase::Start => {
-                let global_id = self.element.id().map(|element_id| {
+                let element_id = self.element.id();
+                // Opens this element's level of the layout key path, which is
+                // how its Taffy node is matched up with the one it had on the
+                // previous frame.
+                window.push_layout_key(element_id.as_ref());
+                let global_id = element_id.map(|element_id| {
                     window.element_id_stack.push(element_id);
                     GlobalElementId(Arc::from(&*window.element_id_stack))
                 });
@@ -328,6 +333,7 @@ impl<E: Element> Drawable<E> {
                 if global_id.is_some() {
                     window.element_id_stack.pop();
                 }
+                window.pop_layout_key();
 
                 self.phase = ElementDrawPhase::RequestLayout {
                     layout_id,

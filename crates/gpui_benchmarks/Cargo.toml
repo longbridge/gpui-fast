@@ -1,0 +1,29 @@
+[package]
+name = "gpui_benchmarks"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license = "Apache-2.0"
+description = "Benchmarks for GPUI's layout engine"
+
+[lib]
+path = "src/gpui_benchmarks.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+gpui = { workspace = true, features = ["bench-support"] }
+gpui_platform = { workspace = true, features = ["bench-support", "wayland", "x11"] }
+
+[package.metadata.cargo-shear]
+ignored = ["gpui_platform"]
+
+[[bench]]
+name = "layout"
+harness = false
