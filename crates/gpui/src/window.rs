@@ -1201,6 +1201,9 @@ pub struct Window {
     /// The layout key of the element currently being prepainted, which anything
     /// it lays out from there hangs off. See [`Window::push_layout_key`].
     layout_prepaint_scope: u64,
+    /// Measurement reuses recorded while the layout engine was moved out of the
+    /// window, waiting to be folded into its statistics.
+    pub(crate) pending_measure_reuses: u64,
     pub(crate) root: Option<AnyView>,
     pub(crate) element_id_stack: SmallVec<[ElementId; 32]>,
     pub(crate) text_style_stack: Vec<TextStyleRefinement>,
@@ -2069,6 +2072,7 @@ impl Window {
             layout_key_stack: SmallVec::new(),
             layout_root_index: 0,
             layout_prepaint_scope: LAYOUT_ROOT_SEED,
+            pending_measure_reuses: 0,
             root: None,
             element_id_stack: SmallVec::default(),
             text_style_stack: Vec::new(),
@@ -5184,6 +5188,15 @@ impl Window {
     /// Zeroes the counters reported by [`Window::layout_stats`].
     pub fn reset_layout_stats(&mut self) {
         self.layout_engine.as_mut().unwrap().reset_stats();
+    }
+
+    /// Records that a measurement answered from a result the element already
+    /// had, for [`Window::layout_stats`].
+    ///
+    /// Measurements run with the layout engine moved out of the window, so this
+    /// is tallied here and folded in once layout is done.
+    pub(crate) fn record_measure_reuse(&mut self) {
+        self.pending_measure_reuses += 1;
     }
 
     /// How many layout nodes this window is currently holding on to.

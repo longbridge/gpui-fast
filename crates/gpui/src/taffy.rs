@@ -61,6 +61,18 @@ pub struct LayoutStats {
     pub children_writes: u64,
     /// Measure closures bound onto a node in a way that dirties it.
     pub measure_rebinds: u64,
+    /// Times Taffy actually invoked a measurement. A node can be measured more
+    /// than once in a layout — for its intrinsic size and then for its final
+    /// one — so this runs ahead of the number of measured nodes.
+    pub measure_calls: u64,
+    /// Time spent inside those measurements, which is time `compute_layout_time`
+    /// also counts. The difference between the two is Taffy's own solving.
+    pub measure_time: Duration,
+    /// Measurements that answered from a result the element had already
+    /// computed, rather than computing a new one. Taffy probes a node more than
+    /// once per layout, so the gap between this and `measure_calls` is what the
+    /// probing actually costs.
+    pub measure_reuses: u64,
     /// Calls to [`TaffyLayoutEngine::compute_layout`].
     pub compute_layout_calls: u64,
     /// Time spent inside Taffy's own layout computation.
@@ -609,6 +621,10 @@ impl TaffyLayoutEngine {
             transform(available_space.height),
         );
 
+        // Accumulated outside `self` because the closure below borrows the tree.
+        let mut measure_calls = 0;
+        let mut measure_time = Duration::ZERO;
+
         let compute_started_at = Instant::now();
         self.taffy
             .compute_layout_with_measure(
@@ -618,6 +634,7 @@ impl TaffyLayoutEngine {
                     let Some(node_context) = node_context else {
                         return taffy::geometry::Size::default();
                     };
+                    let measure_started_at = Instant::now();
 
                     let known_dimensions = Size {
                         width: known_dimensions.width.map(|e| Pixels(e / scale_factor)),
@@ -639,12 +656,17 @@ impl TaffyLayoutEngine {
 
                     let measured_size: Size<Pixels> =
                         (node_context.measure)(known_dimensions, available_space, window, cx);
+                    measure_calls += 1;
+                    measure_time += measure_started_at.elapsed();
                     snap_measured_size_to_device_pixels(measured_size, scale_factor).into()
                 },
             )
             .expect(EXPECT_MESSAGE);
         self.stats.compute_layout_calls += 1;
         self.stats.compute_layout_time += compute_started_at.elapsed();
+        self.stats.measure_calls += measure_calls;
+        self.stats.measure_time += measure_time;
+        self.stats.measure_reuses += std::mem::take(&mut window.pending_measure_reuses);
     }
 
     // Pixel snapping

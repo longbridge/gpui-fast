@@ -19,13 +19,7 @@ fn run(cx: &mut BenchAppContext, rows: usize, mutation: Mutation, label: &str) {
     run_keyed(cx, rows, mutation, false, label)
 }
 
-fn run_keyed(
-    cx: &mut BenchAppContext,
-    rows: usize,
-    mutation: Mutation,
-    keyed: bool,
-    label: &str,
-) {
+fn run_keyed(cx: &mut BenchAppContext, rows: usize, mutation: Mutation, keyed: bool, label: &str) {
     let mut window = cx.add_empty_window();
     let view = window.update(|window, cx| {
         window.replace_root(cx, |_, _| QuoteTable::new(rows, mutation).keyed(keyed))

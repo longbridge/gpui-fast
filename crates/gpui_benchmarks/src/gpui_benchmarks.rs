@@ -65,7 +65,9 @@ impl Row {
 
     /// Rewrites the numeric cells the way a quote feed would.
     fn retick(&mut self, tick: u64) {
-        let seed = tick.wrapping_mul(2_654_435_761).wrapping_add(self.symbol.len() as u64);
+        let seed = tick
+            .wrapping_mul(2_654_435_761)
+            .wrapping_add(self.symbol.len() as u64);
         let price = 10.0 + (seed % 90_000) as f64 / 1000.0;
         let change = (seed % 2_000) as f64 / 100.0 - 10.0;
         self.last = format!("{price:.3}").into();
@@ -198,7 +200,11 @@ impl Render for QuoteTable {
                     .py_2()
                     .border_b_1()
                     .border_color(BORDER)
-                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Watchlist"))
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Watchlist"),
+                    )
                     .child(div().flex_1())
                     .children(["All", "HK", "US", "A"].map(|label| {
                         div()
@@ -231,7 +237,13 @@ impl Render for QuoteTable {
                             .child(div().text_xs().text_color(FG_MUTED).child(row.name.clone())),
                     )
                     // Content-sized: text here genuinely participates in layout.
-                    .child(div().flex_1().text_xs().text_color(FG_MUTED).child(row.name.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(FG_MUTED)
+                            .child(row.name.clone()),
+                    )
                     // Fixed-width columns: text here cannot move anything.
                     .child(div().w(px(96.)).text_right().child(row.last.clone()))
                     .child(
@@ -276,14 +288,27 @@ pub fn report_layout_stats(label: &str, stats: gpui::LayoutStats) {
          nodes/frame       {:>9.1} created  {:>9.1} reused  ({reuse_pct:.1}% reused)\n    \
          writes/frame      {:>9.1} style    {:>9.1} children  {:>9.1} measure-rebind\n    \
          style compares    {:>9.1}/frame\n    \
-         taffy compute     {:>9.1}µs/frame ({:.1} calls/frame)",
+         measure calls     {:>9.1}/frame  {:>9.1}µs/frame ({:.0}% answered from a kept result)\n    \
+         taffy compute     {:>9.1}µs/frame ({:.1} calls/frame), of which {:.0}% is measuring",
         per_frame(stats.nodes_created),
         per_frame(stats.nodes_reused),
         per_frame(stats.style_writes),
         per_frame(stats.children_writes),
         per_frame(stats.measure_rebinds),
         per_frame(stats.style_compares),
+        per_frame(stats.measure_calls),
+        stats.measure_time.as_secs_f64() * 1e6 / frames as f64,
+        if stats.measure_calls == 0 {
+            0.0
+        } else {
+            100.0 * stats.measure_reuses as f64 / stats.measure_calls as f64
+        },
         stats.compute_layout_time.as_secs_f64() * 1e6 / frames as f64,
         per_frame(stats.compute_layout_calls),
+        if stats.compute_layout_time.is_zero() {
+            0.0
+        } else {
+            100.0 * stats.measure_time.as_secs_f64() / stats.compute_layout_time.as_secs_f64()
+        },
     );
 }
