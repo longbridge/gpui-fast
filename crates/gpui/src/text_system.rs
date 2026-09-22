@@ -1216,3 +1216,66 @@ pub fn font_name_with_fallbacks_shared<'a>(
         _ => name,
     }
 }
+
+/// Rewrites the decorations of lines that [`WindowTextSystem::shape_text`]
+/// already shaped, leaving the shaping itself untouched.
+///
+/// Shaping is the expensive half and the only half that decides how much space
+/// the text takes; decorations — colors, underlines, strikethroughs — only
+/// decide how it is painted. Recoloring text is therefore a matter of replacing
+/// these runs rather than shaping it all over again.
+///
+/// `runs` must still split `lines` exactly as they were split when shaped: the
+/// same lengths, the same fonts, and decoration changing in the same places.
+/// That last one matters as much as the others, because `shape_text` splits its
+/// font runs wherever decoration changes and shapes each separately. Callers
+/// establish it by comparing a key over those inputs before calling; see
+/// `shaping_key` in `elements::text`.
+pub(crate) fn update_decoration_runs(lines: &mut [WrappedLine], runs: &[TextRun]) {
+    let mut runs = runs.iter().filter(|run| run.len > 0).cloned().peekable();
+
+    for line in lines.iter_mut() {
+        let line_len = line.text.len();
+        line.decoration_runs.clear();
+
+        let mut offset = 0;
+        while offset < line_len {
+            let Some(run) = runs.peek_mut() else {
+                log::warn!("`TextRun`s do not cover the entire shaped text");
+                break;
+            };
+            let len_within_line = cmp::min(line_len - offset, run.len);
+
+            if let Some(last_run) = line.decoration_runs.last_mut()
+                && last_run.color == run.color
+                && last_run.underline == run.underline
+                && last_run.strikethrough == run.strikethrough
+                && last_run.background_color == run.background_color
+            {
+                last_run.len += len_within_line as u32;
+            } else {
+                line.decoration_runs.push(DecorationRun {
+                    len: len_within_line as u32,
+                    color: run.color,
+                    background_color: run.background_color,
+                    underline: run.underline,
+                    strikethrough: run.strikethrough,
+                });
+            }
+
+            run.len -= len_within_line;
+            if run.len == 0 {
+                runs.next();
+            }
+            offset += len_within_line;
+        }
+
+        // Skip the `\n` that separated this line from the next.
+        if let Some(run) = runs.peek_mut() {
+            run.len -= 1;
+            if run.len == 0 {
+                runs.next();
+            }
+        }
+    }
+}

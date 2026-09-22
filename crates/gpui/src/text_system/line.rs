@@ -20,7 +20,7 @@ pub struct GlyphRasterData {
 }
 
 /// Set the text decoration for a run of text.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DecorationRun {
     /// The length of the run in utf-8 bytes.
     pub len: u32,

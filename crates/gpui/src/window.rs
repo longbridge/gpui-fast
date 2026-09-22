@@ -7710,13 +7710,13 @@ mod tests {
 
     use crate::{
         AnyWindowHandle, AppContext as _, Bounds, Context, DispatchPhase, DragMoveEvent, Empty,
-        ExternalDragPayload, ExternalPaths, FileDragPaths, FileDropEvent, FocusHandle,
+        ExternalDragPayload, ExternalPaths, FileDragPaths, FileDropEvent, FocusHandle, Hsla,
         InputEvent as _, InteractiveElement as _, IntoElement, KeyDownEvent, Keystroke,
         LayoutStats, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
         Pixels, PlatformInput, Point, Render, RequestFrameOptions, SharedString,
         StatefulInteractiveElement as _, Styled, TestAppContext, TouchDragEvent, TouchEvent,
         TouchId, TouchPhase, Window, WindowAppearance, WindowHandle, WindowOptions, canvas, div,
-        point, px, size,
+        hsla, point, px, size,
     };
 
     /// Visibility transitions reach observers exactly once each, with the new
@@ -8880,6 +8880,7 @@ mod tests {
         /// `keyed` is set, and by their position otherwise.
         row_ids: Vec<u64>,
         keyed: bool,
+        text_color: Hsla,
     }
 
     impl Render for RetainedLayoutView {
@@ -8890,6 +8891,7 @@ mod tests {
             let row_width = self.row_width;
             let keyed = self.keyed;
             let row_ids = self.row_ids.clone();
+            let text_color = self.text_color;
             div()
                 .flex()
                 .flex_col()
@@ -8904,6 +8906,7 @@ mod tests {
                         .flex_row()
                         .w(row_width + px((row_id % 5) as f32 * 10.))
                         .h(px(20.))
+                        .text_color(text_color)
                         .child(label.clone())
                         .child(
                             canvas(
@@ -8969,6 +8972,7 @@ mod tests {
             probes,
             row_ids: (0..4).collect(),
             keyed: false,
+            text_color: hsla(0.0, 0.0, 0.1, 1.0),
         })
     }
 
@@ -9072,6 +9076,46 @@ mod tests {
         assert!(
             stats.nodes_freed > 0,
             "nodes that left the tree must be released rather than accumulated: {stats:?}"
+        );
+    }
+
+    /// Recoloring text changes nothing about how much space it takes, so it has
+    /// no business invalidating a measurement. It only does when the color is
+    /// baked into the shaped lines, which is why decoration is replaced on them
+    /// in place instead.
+    #[test]
+    fn recoloring_text_leaves_the_layout_alone() {
+        let mut cx = TestAppContext::single();
+        let probes = Rc::new(RefCell::new(Vec::new()));
+        let window = retained_layout_window(&mut cx, probes.clone());
+        draw_frame(&mut cx, window.into());
+        let before = probes.borrow().clone();
+
+        let stats = change_and_draw(&mut cx, window, |view| {
+            view.text_color = hsla(0.6, 0.9, 0.5, 1.0)
+        });
+
+        assert_eq!(
+            stats.measure_rebinds, 0,
+            "a color cannot change how much room the text needs: {stats:?}"
+        );
+        assert_eq!(
+            stats.style_writes, 0,
+            "colors are not part of a Taffy style in the first place: {stats:?}"
+        );
+        assert_eq!(
+            &before,
+            &*probes.borrow(),
+            "recolored text should land exactly where it did before"
+        );
+
+        // Lengthening it, on the other hand, has to.
+        let stats = change_and_draw(&mut cx, window, |view| {
+            view.label = "abcdefghijklmnop".into()
+        });
+        assert!(
+            stats.measure_rebinds > 0,
+            "changed text must still invalidate its measurement: {stats:?}"
         );
     }
 

@@ -1,9 +1,10 @@
 use crate::{
     ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
-    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
-    TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
-    WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
+    HighlightStyle, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size,
+    StrikethroughStyle, TextOverflow, TextRun, TextStyle, TooltipId, TruncateFrom, UnderlineStyle,
+    WhiteSpace, Window, WrappedLine, WrappedLineLayout, register_tooltip_mouse_handlers,
+    set_tooltip_on_window,
 };
 use anyhow::Context as _;
 use collections::FxHasher;
@@ -618,6 +619,9 @@ pub struct TextLayout(Rc<RefCell<Option<TextLayoutInner>>>);
 struct TextLayoutInner {
     len: usize,
     lines: SmallVec<[WrappedLine; 1]>,
+    /// What the decorations currently painted onto `lines` were built from, so
+    /// a recolor can be recognised and applied without reshaping.
+    decoration_key: u64,
     line_height: Pixels,
     wrap_width: Option<Pixels>,
     truncate_width: Option<Pixels>,
@@ -625,18 +629,35 @@ struct TextLayoutInner {
     bounds: Option<Bounds<Pixels>>,
 }
 
-/// Hashes everything the stored text layout depends on.
+/// The decorations of a run, which are what shaping splits font runs on.
+fn decoration_of(
+    run: &TextRun,
+) -> (
+    Hsla,
+    Option<Hsla>,
+    Option<UnderlineStyle>,
+    Option<StrikethroughStyle>,
+) {
+    (
+        run.color,
+        run.background_color,
+        run.underline,
+        run.strikethrough,
+    )
+}
+
+/// Hashes everything the *shape* of the text depends on.
 ///
-/// This has to cover painting as well as measurement. Shaping bakes colors,
-/// underlines and strikethroughs into the lines it produces, so a run that only
-/// changes color still invalidates what is stored, even though the text would
-/// occupy exactly the same space. Narrowing this to the size-affecting inputs
-/// alone would make recoloring free, but only once decoration is separated from
-/// the shaped lines.
+/// Decoration values are deliberately absent, but the places decoration
+/// *changes* are not. Shaping runs against font runs that are split wherever
+/// decoration changes, so whether a color boundary falls between two characters
+/// decides whether they are allowed to kern or ligate. Recoloring within the
+/// same boundaries leaves the geometry alone and can be applied to the shaped
+/// lines in place; moving a boundary cannot.
 ///
-/// Wrap width is deliberately absent: it comes from the space Taffy offers the
-/// node, which Taffy already keys its own cache on.
-fn measure_key(
+/// Wrap width is also absent: it comes from the space Taffy offers the node,
+/// which Taffy already keys its own cache on.
+fn shaping_key(
     text: &SharedString,
     runs: &[TextRun],
     text_style: &TextStyle,
@@ -664,10 +685,24 @@ fn measure_key(
             affix.hash(&mut hasher);
         }
     }
-    runs.len().hash(&mut hasher);
-    for run in runs {
+    let mut previous = None;
+    for run in runs.iter().filter(|run| run.len > 0) {
         run.len.hash(&mut hasher);
         run.font.hash(&mut hasher);
+        // Whether shaping may join this run to the one before it.
+        previous
+            .replace(decoration_of(run))
+            .is_some_and(|previous| previous == decoration_of(run))
+            .hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Hashes the decoration values, which decide only how shaped text is painted.
+fn decoration_key(runs: &[TextRun]) -> u64 {
+    let mut hasher = FxHasher::default();
+    for run in runs.iter().filter(|run| run.len > 0) {
+        run.len.hash(&mut hasher);
         run.color.hash(&mut hasher);
         run.background_color.hash(&mut hasher);
         run.underline.hash(&mut hasher);
@@ -697,12 +732,30 @@ impl TextLayout {
         } else {
             vec![text_style.to_run(text.len())]
         };
-        let measure_key = measure_key(&text, &runs, &text_style, font_size, line_height);
+        let shaping_key = shaping_key(&text, &runs, &text_style, font_size, line_height);
+        let decoration_key = decoration_key(&runs);
+        // Truncated text is shaped from a rewritten string whose runs no longer
+        // line up with these, so its decorations cannot be replaced in place.
+        let truncating = text_style.text_overflow.is_some();
+
         let (layout_id, state) = window.request_measured_layout_cached(
             Default::default(),
-            measure_key,
+            shaping_key,
             self.0.clone(),
             |state| {
+                // Lines are in here only when the shaping still stands, in
+                // which case recoloring is a matter of replacing what is
+                // painted over them. Doing it here rather than through a
+                // measurement is the point: a measurement would have had to
+                // dirty the node, and the whole tree above it, to run.
+                if !truncating
+                    && let Some(layout) = state.borrow_mut().as_mut()
+                    && layout.decoration_key != decoration_key
+                {
+                    crate::text_system::update_decoration_runs(&mut layout.lines, &runs);
+                    layout.decoration_key = decoration_key;
+                }
+
                 let element_state = TextLayout(state.clone());
 
                 move |known_dimensions, available_space, window, cx| {
@@ -808,6 +861,7 @@ impl TextLayout {
                         element_state.0.borrow_mut().replace(TextLayoutInner {
                             lines: Default::default(),
                             len: 0,
+                            decoration_key,
                             line_height,
                             wrap_width,
                             truncate_width,
@@ -827,6 +881,7 @@ impl TextLayout {
                     element_state.0.borrow_mut().replace(TextLayoutInner {
                         lines,
                         len,
+                        decoration_key,
                         line_height,
                         wrap_width,
                         truncate_width,
@@ -1358,6 +1413,101 @@ mod tests {
         let _ = div().child("String".to_string());
         let _ = div().child(Cow::Borrowed("Cow"));
         let _ = div().child(SharedString::from("SharedString"));
+    }
+
+    /// Replacing decorations in place has to land exactly where reshaping the
+    /// same text with the same runs would have. If it does not, recolored text
+    /// paints with the wrong colors on the wrong characters, and nothing in the
+    /// layout would give it away.
+    #[test]
+    fn replacing_decorations_in_place_lands_where_reshaping_would() {
+        use crate::{AppContext as _, Empty, TestAppContext, hsla, px};
+
+        let mut cx = TestAppContext::single();
+        let window = cx.add_window(|_, _| Empty);
+        cx.update_window(window.into(), |_, window, _| {
+            let text = SharedString::from("hello\nworld wide");
+            let font = window.text_style().font();
+            let run = |len, color| TextRun {
+                len,
+                font: font.clone(),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let red = hsla(0.0, 1.0, 0.5, 1.0);
+            let blue = hsla(0.6, 1.0, 0.5, 1.0);
+            let green = hsla(0.3, 1.0, 0.5, 1.0);
+
+            // Same lengths and same boundaries, different colors.
+            let before = [run(6, red), run(10, blue)];
+            let after = [run(6, green), run(10, red)];
+
+            let font_size = px(14.);
+            let system = window.text_system();
+            let mut recolored = system
+                .shape_text(text.clone(), font_size, &before, None, None)
+                .unwrap();
+            let reshaped = system
+                .shape_text(text.clone(), font_size, &after, None, None)
+                .unwrap();
+            crate::text_system::update_decoration_runs(&mut recolored, &after);
+
+            assert_eq!(recolored.len(), reshaped.len());
+            for (recolored, reshaped) in recolored.iter().zip(reshaped.iter()) {
+                assert_eq!(recolored.text, reshaped.text);
+                assert_eq!(recolored.decoration_runs, reshaped.decoration_runs);
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn recoloring_keeps_the_shaping_key_but_moving_a_boundary_does_not() {
+        use crate::{FontStyle, FontWeight, hsla, px};
+
+        let text = SharedString::from("abcd");
+        let font = crate::Font {
+            family: "Test".into(),
+            features: Default::default(),
+            fallbacks: None,
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+        };
+        let run = |len, color| TextRun {
+            len,
+            font: font.clone(),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let red = hsla(0.0, 1.0, 0.5, 1.0);
+        let blue = hsla(0.6, 1.0, 0.5, 1.0);
+        let green = hsla(0.3, 1.0, 0.5, 1.0);
+        let style = TextStyle::default();
+        let key = |runs: &[TextRun]| shaping_key(&text, runs, &style, px(14.), px(18.));
+
+        let two_colors = [run(2, red), run(2, blue)];
+        let two_other_colors = [run(2, green), run(2, red)];
+        let one_color = [run(2, red), run(2, red)];
+
+        assert_eq!(
+            key(&two_colors),
+            key(&two_other_colors),
+            "recoloring runs that still differ from each other cannot move a glyph"
+        );
+        assert_ne!(
+            key(&two_colors),
+            key(&one_color),
+            "runs that used to be shaped apart and now shape together can kern across the join"
+        );
+        assert_ne!(
+            decoration_key(&two_colors),
+            decoration_key(&two_other_colors),
+            "the colors themselves did change, and what is painted has to follow"
+        );
     }
 
     #[test]
