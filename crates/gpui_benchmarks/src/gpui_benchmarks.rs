@@ -8,7 +8,8 @@
 //! engine has the most room to exploit.
 
 use gpui::{
-    Context, Hsla, IntoElement, ParentElement, Render, SharedString, Styled, Window, div, hsla, px,
+    Context, Hsla, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled,
+    Window, div, hsla, px,
 };
 
 /// How a frame differs from the one before it.
@@ -25,11 +26,18 @@ pub enum Mutation {
     /// Cell text changes. Styles and tree shape are untouched, but the measured
     /// size of some leaves may differ.
     Text,
-    /// Rows are added and removed, changing the shape of the tree.
+    /// Rows are added and removed at the end, changing the shape of the tree
+    /// without disturbing the rows already in it.
     Rows,
+    /// Rows are added and removed at the *front*, so every remaining row shifts
+    /// position. Rows keyed only by position are rebuilt wholesale; rows
+    /// carrying a stable [`ElementId`](gpui::ElementId) should not be.
+    RowsAtHead,
 }
 
 struct Row {
+    /// Stable across the row's life, independent of where it currently sits.
+    id: u64,
     symbol: SharedString,
     name: SharedString,
     last: SharedString,
@@ -41,6 +49,7 @@ struct Row {
 impl Row {
     fn new(index: usize) -> Self {
         let mut row = Row {
+            id: index as u64,
             symbol: SharedString::default(),
             name: SharedString::default(),
             last: SharedString::default(),
@@ -86,7 +95,13 @@ pub struct QuoteTable {
     rows: Vec<Row>,
     base_row_count: usize,
     tick: u64,
+    next_row_id: u64,
     mutation: Mutation,
+    /// Whether each row carries an [`ElementId`](gpui::ElementId) of its own.
+    ///
+    /// Without one a row is identified by its index among its siblings, which
+    /// is only stable while nothing is inserted ahead of it.
+    keyed: bool,
 }
 
 impl QuoteTable {
@@ -96,8 +111,24 @@ impl QuoteTable {
             rows: (0..row_count).map(Row::new).collect(),
             base_row_count: row_count,
             tick: 0,
+            next_row_id: row_count as u64,
             mutation,
+            keyed: false,
         }
+    }
+
+    /// Gives every row an `ElementId` derived from its own identity rather than
+    /// from where it currently sits.
+    pub fn keyed(mut self, keyed: bool) -> Self {
+        self.keyed = keyed;
+        self
+    }
+
+    fn new_row(&mut self) -> Row {
+        let mut row = Row::new(self.rows.len());
+        row.id = self.next_row_id;
+        self.next_row_id += 1;
+        row
     }
 
     /// Advances the model by one frame's worth of change.
@@ -124,7 +155,18 @@ impl QuoteTable {
                     self.rows.pop();
                 }
                 while self.rows.len() < target {
-                    self.rows.push(Row::new(self.rows.len()));
+                    let row = self.new_row();
+                    self.rows.push(row);
+                }
+            }
+            Mutation::RowsAtHead => {
+                let target = self.base_row_count - (self.tick % 8) as usize;
+                while self.rows.len() > target {
+                    self.rows.remove(0);
+                }
+                while self.rows.len() < target {
+                    let row = self.new_row();
+                    self.rows.insert(0, row);
                 }
             }
         }
@@ -170,7 +212,7 @@ impl Render for QuoteTable {
             )
             .children(self.rows.iter().map(|row| {
                 let tone = if row.up { UP } else { DOWN };
-                div()
+                let row_element = div()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -205,7 +247,12 @@ impl Render for QuoteTable {
                             .text_right()
                             .text_color(FG_MUTED)
                             .child(row.volume.clone()),
-                    )
+                    );
+                if self.keyed {
+                    row_element.id(("row", row.id)).into_any_element()
+                } else {
+                    row_element.into_any_element()
+                }
             }))
     }
 }

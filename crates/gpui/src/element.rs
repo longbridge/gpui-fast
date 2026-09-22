@@ -263,12 +263,16 @@ enum ElementDrawPhase<RequestLayoutState, PrepaintState> {
     Start,
     RequestLayout {
         layout_id: LayoutId,
+        /// The key this element's layout node was matched by, kept so that
+        /// anything laid out during its prepaint can be keyed underneath it.
+        layout_key: u64,
         global_id: Option<GlobalElementId>,
         inspector_id: Option<InspectorElementId>,
         request_layout: RequestLayoutState,
     },
     LayoutComputed {
         layout_id: LayoutId,
+        layout_key: u64,
         global_id: Option<GlobalElementId>,
         inspector_id: Option<InspectorElementId>,
         available_space: Size<AvailableSpace>,
@@ -301,7 +305,7 @@ impl<E: Element> Drawable<E> {
                 // Opens this element's level of the layout key path, which is
                 // how its Taffy node is matched up with the one it had on the
                 // previous frame.
-                window.push_layout_key(element_id.as_ref());
+                let layout_key = window.push_layout_key(element_id.as_ref());
                 let global_id = element_id.map(|element_id| {
                     window.element_id_stack.push(element_id);
                     GlobalElementId(Arc::from(&*window.element_id_stack))
@@ -337,6 +341,7 @@ impl<E: Element> Drawable<E> {
 
                 self.phase = ElementDrawPhase::RequestLayout {
                     layout_id,
+                    layout_key,
                     global_id,
                     inspector_id,
                     request_layout,
@@ -351,12 +356,14 @@ impl<E: Element> Drawable<E> {
         match mem::take(&mut self.phase) {
             ElementDrawPhase::RequestLayout {
                 layout_id,
+                layout_key,
                 global_id,
                 inspector_id,
                 mut request_layout,
             }
             | ElementDrawPhase::LayoutComputed {
                 layout_id,
+                layout_key,
                 global_id,
                 inspector_id,
                 mut request_layout,
@@ -407,6 +414,10 @@ impl<E: Element> Drawable<E> {
                 }
 
                 let node_id = window.next_frame.dispatch_tree.push_node();
+                // Elements this one lays out from here — list items, most of
+                // all — get keyed under it rather than under whatever happens
+                // to be laid out around them.
+                let enclosing_scope = window.enter_prepaint_layout_scope(layout_key);
                 let mut prepaint = self.element.prepaint(
                     global_id.as_ref(),
                     inspector_id.as_ref(),
@@ -415,6 +426,7 @@ impl<E: Element> Drawable<E> {
                     window,
                     cx,
                 );
+                window.exit_prepaint_layout_scope(enclosing_scope);
                 window.next_frame.dispatch_tree.pop_node();
 
                 if pushed_a11y_node {
@@ -515,6 +527,7 @@ impl<E: Element> Drawable<E> {
         let layout_id = match mem::take(&mut self.phase) {
             ElementDrawPhase::RequestLayout {
                 layout_id,
+                layout_key,
                 global_id,
                 inspector_id,
                 request_layout,
@@ -522,6 +535,7 @@ impl<E: Element> Drawable<E> {
                 window.compute_layout(layout_id, available_space, cx);
                 self.phase = ElementDrawPhase::LayoutComputed {
                     layout_id,
+                    layout_key,
                     global_id,
                     inspector_id,
                     available_space,
@@ -531,6 +545,7 @@ impl<E: Element> Drawable<E> {
             }
             ElementDrawPhase::LayoutComputed {
                 layout_id,
+                layout_key,
                 global_id,
                 inspector_id,
                 available_space: prev_available_space,
@@ -541,6 +556,7 @@ impl<E: Element> Drawable<E> {
                 }
                 self.phase = ElementDrawPhase::LayoutComputed {
                     layout_id,
+                    layout_key,
                     global_id,
                     inspector_id,
                     available_space,

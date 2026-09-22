@@ -1007,6 +1007,14 @@ struct LayoutKeyFrame {
     next_unidentified_child: u32,
 }
 
+/// Where layout key paths start.
+const LAYOUT_ROOT_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// Separates the elements laid out during an element's prepaint from that same
+/// element's children, which are keyed from the same point during request
+/// layout and would otherwise land on the same keys.
+const LAYOUT_PREPAINT_SALT: u64 = 0x5BF0_3635_931A_2E77;
+
 /// Mixes `value` into `state`, well enough that path hashes built out of small
 /// child indices do not collide in practice.
 ///
@@ -1186,10 +1194,13 @@ pub struct Window {
     /// Running hashes of the path from the root of the element tree down to the
     /// element currently requesting layout. See [`Window::push_layout_key`].
     layout_key_stack: SmallVec<[LayoutKeyFrame; 32]>,
-    /// How many element trees have been laid out this frame. Window roots,
-    /// prompts, drags and tooltips each start a tree of their own and need keys
-    /// that do not collide with each other.
+    /// How many unidentified element trees have been laid out under the
+    /// current scope. Window roots, prompts, drags and tooltips each start a
+    /// tree of their own and need keys that do not collide with each other.
     layout_root_index: u32,
+    /// The layout key of the element currently being prepainted, which anything
+    /// it lays out from there hangs off. See [`Window::push_layout_key`].
+    layout_prepaint_scope: u64,
     pub(crate) root: Option<AnyView>,
     pub(crate) element_id_stack: SmallVec<[ElementId; 32]>,
     pub(crate) text_style_stack: Vec<TextStyleRefinement>,
@@ -2057,6 +2068,7 @@ impl Window {
             layout_engine: Some(TaffyLayoutEngine::new()),
             layout_key_stack: SmallVec::new(),
             layout_root_index: 0,
+            layout_prepaint_scope: LAYOUT_ROOT_SEED,
             root: None,
             element_id_stack: SmallVec::default(),
             text_style_stack: Vec::new(),
@@ -3258,6 +3270,7 @@ impl Window {
         self.layout_engine.as_mut().unwrap().end_frame();
         debug_assert!(self.layout_key_stack.is_empty());
         self.layout_root_index = 0;
+        self.layout_prepaint_scope = LAYOUT_ROOT_SEED;
         self.text_system().finish_frame();
         self.next_frame.finish(&mut self.rendered_frame);
 
@@ -5095,38 +5108,61 @@ impl Window {
     /// Because the parent's key is always mixed in, a key encodes the whole
     /// ancestor path, and a node can never be matched to an element that has
     /// moved to a different parent.
-    pub(crate) fn push_layout_key(&mut self, id: Option<&ElementId>) {
-        const ROOT_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
-
-        let key = match self.layout_key_stack.last_mut() {
-            Some(parent) => {
-                let component = match id {
-                    Some(id) => {
-                        let mut hasher = FxHasher::default();
-                        id.hash(&mut hasher);
-                        // Kept distinct from the positional case so that an
-                        // element identified by index 3 and one identified by
-                        // `ElementId` hashing to 3 do not collide.
-                        mix(hasher.finish(), 1)
-                    }
-                    None => {
-                        let index = parent.next_unidentified_child;
-                        parent.next_unidentified_child += 1;
-                        mix(index as u64, 2)
-                    }
-                };
-                mix(parent.key, component)
+    pub(crate) fn push_layout_key(&mut self, id: Option<&ElementId>) -> u64 {
+        let component = match id {
+            Some(id) => {
+                let mut hasher = FxHasher::default();
+                id.hash(&mut hasher);
+                // Kept distinct from the positional case so that an element
+                // identified by index 3 and one whose `ElementId` hashes to 3
+                // do not collide.
+                mix(hasher.finish(), 1)
             }
             None => {
-                let index = self.layout_root_index;
-                self.layout_root_index += 1;
-                mix(ROOT_SEED, index as u64)
+                let index = match self.layout_key_stack.last_mut() {
+                    Some(parent) => &mut parent.next_unidentified_child,
+                    None => &mut self.layout_root_index,
+                };
+                let component = mix(*index as u64, 2);
+                *index += 1;
+                component
             }
         };
+        let parent = self
+            .layout_key_stack
+            .last()
+            .map(|parent| parent.key)
+            .unwrap_or_else(|| mix(self.layout_prepaint_scope, LAYOUT_PREPAINT_SALT));
+        let key = mix(parent, component);
         self.layout_key_stack.push(LayoutKeyFrame {
             key,
             next_unidentified_child: 0,
         });
+        key
+    }
+
+    /// Hangs elements laid out from here on the element whose prepaint is
+    /// running, and returns what [`Window::exit_prepaint_layout_scope`] needs to
+    /// undo it.
+    ///
+    /// The walk that assigns layout keys covers the request-layout phase only.
+    /// Elements laid out afterwards — list items, which a list can lay out only
+    /// once it knows how many of them fit — arrive with no path at all, and
+    /// would otherwise be keyed by the order they happened to be laid out in.
+    /// A list that scrolled by one row, or gained a row at the top, would
+    /// renumber every item and rebuild every item's layout nodes. Keyed under
+    /// the element that lays them out, an item carrying an [`ElementId`] keeps
+    /// its nodes wherever it moves within its list.
+    pub(crate) fn enter_prepaint_layout_scope(&mut self, layout_key: u64) -> (u64, u32) {
+        (
+            mem::replace(&mut self.layout_prepaint_scope, layout_key),
+            mem::replace(&mut self.layout_root_index, 0),
+        )
+    }
+
+    /// Restores what [`Window::enter_prepaint_layout_scope`] replaced.
+    pub(crate) fn exit_prepaint_layout_scope(&mut self, enclosing: (u64, u32)) {
+        (self.layout_prepaint_scope, self.layout_root_index) = enclosing;
     }
 
     /// Ends the element most recently begun by [`Window::push_layout_key`].
@@ -8840,6 +8876,10 @@ mod tests {
         row_width: Pixels,
         label: SharedString,
         probes: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+        /// Identities of the rows, in order. Rows are keyed by these when
+        /// `keyed` is set, and by their position otherwise.
+        row_ids: Vec<u64>,
+        keyed: bool,
     }
 
     impl Render for RetainedLayoutView {
@@ -8848,15 +8888,21 @@ mod tests {
             probes.borrow_mut().clear();
             let label = self.label.clone();
             let row_width = self.row_width;
+            let keyed = self.keyed;
+            let row_ids = self.row_ids.clone();
             div()
                 .flex()
                 .flex_col()
-                .children((0..self.rows).map(move |_| {
+                .children((0..self.rows).map(move |ix| {
                     let probes = probes.clone();
-                    div()
+                    // Rows have to be distinguishable for the test to mean
+                    // anything: interchangeable rows can be matched to the
+                    // wrong node and nobody is any the wiser.
+                    let row_id = row_ids.get(ix).copied().unwrap_or(ix as u64);
+                    let row = div()
                         .flex()
                         .flex_row()
-                        .w(row_width)
+                        .w(row_width + px((row_id % 5) as f32 * 10.))
                         .h(px(20.))
                         .child(label.clone())
                         .child(
@@ -8866,7 +8912,12 @@ mod tests {
                             )
                             .flex_1()
                             .h_full(),
-                        )
+                        );
+                    if keyed {
+                        row.id(("row", row_ids[ix])).into_any_element()
+                    } else {
+                        row.into_any_element()
+                    }
                 }))
         }
     }
@@ -8916,6 +8967,8 @@ mod tests {
             row_width: px(200.),
             label: "ab".into(),
             probes,
+            row_ids: (0..4).collect(),
+            keyed: false,
         })
     }
 
@@ -8963,6 +9016,11 @@ mod tests {
             after.size.width - before.size.width,
             px(200.),
             "the probe fills what is left of the row, so widening the row must widen it too"
+        );
+        assert_eq!(
+            probes.borrow().len(),
+            4,
+            "widening rows should not have changed how many there are"
         );
     }
 
@@ -9014,6 +9072,44 @@ mod tests {
         assert!(
             stats.nodes_freed > 0,
             "nodes that left the tree must be released rather than accumulated: {stats:?}"
+        );
+    }
+
+    /// Rows are matched to their nodes by position unless they say otherwise,
+    /// so inserting at the front of a list makes every row that follows look
+    /// like a different row. An `ElementId` is how a row says otherwise.
+    #[test]
+    fn rows_identified_by_an_element_id_keep_their_nodes_when_one_is_inserted_ahead() {
+        fn insert_at_head(cx: &mut TestAppContext, keyed: bool) -> LayoutStats {
+            let probes = Rc::new(RefCell::new(Vec::new()));
+            let window = retained_layout_window(cx, probes.clone());
+            change_and_draw(cx, window, |view| view.keyed = keyed);
+
+            let stats = change_and_draw(cx, window, |view| {
+                view.rows += 1;
+                view.row_ids.insert(0, 100);
+            });
+            assert_eq!(probes.borrow().len(), 5);
+            stats
+        }
+
+        let mut cx = TestAppContext::single();
+        let positional = insert_at_head(&mut cx, false);
+        let keyed = insert_at_head(&mut cx, true);
+
+        // Shifting keys do not throw nodes away — the row now at index 1
+        // claims the node index 1 had — they hand each node to a different row,
+        // which then has to write its own style over it. That write is what
+        // dirties the node and every ancestor above it.
+        assert!(
+            positional.style_writes > 0,
+            "rows matched by position should be restyled once they shift: {positional:?}"
+        );
+        assert_eq!(
+            keyed.style_writes, 0,
+            "rows matched by an ElementId should keep the node they styled, \
+             wrote {} against {} for positional rows",
+            keyed.style_writes, positional.style_writes
         );
     }
 

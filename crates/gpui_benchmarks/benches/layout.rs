@@ -16,9 +16,19 @@ fn row_counts() -> Vec<usize> {
 }
 
 fn run(cx: &mut BenchAppContext, rows: usize, mutation: Mutation, label: &str) {
+    run_keyed(cx, rows, mutation, false, label)
+}
+
+fn run_keyed(
+    cx: &mut BenchAppContext,
+    rows: usize,
+    mutation: Mutation,
+    keyed: bool,
+    label: &str,
+) {
     let mut window = cx.add_empty_window();
     let view = window.update(|window, cx| {
-        window.replace_root(cx, |_, _| QuoteTable::new(rows, mutation))
+        window.replace_root(cx, |_, _| QuoteTable::new(rows, mutation).keyed(keyed))
     });
     window.update(|window, _| window.reset_layout_stats());
 
@@ -51,5 +61,28 @@ fn layout_rows(rows: &usize, cx: &mut BenchAppContext) {
     run(cx, *rows, Mutation::Rows, "rows");
 }
 
-gpui::bench_group!(benches, layout_unchanged, layout_colors, layout_text, layout_rows);
+/// Inserting and removing at the *front* of a list shifts every row that
+/// follows. A row identified only by its index among its siblings is a
+/// different row afterwards as far as the layout engine can tell.
+#[gpui::bench(inputs = row_counts(), group = "layout", input_name = "rows_at_head", sample_size = 20)]
+fn layout_rows_at_head(rows: &usize, cx: &mut BenchAppContext) {
+    run(cx, *rows, Mutation::RowsAtHead, "rows_at_head");
+}
+
+/// The same workload with each row carrying an `ElementId` of its own, which is
+/// what lets a row keep its layout nodes as it slides down the list.
+#[gpui::bench(inputs = row_counts(), group = "layout", input_name = "rows_at_head_keyed", sample_size = 20)]
+fn layout_rows_at_head_keyed(rows: &usize, cx: &mut BenchAppContext) {
+    run_keyed(cx, *rows, Mutation::RowsAtHead, true, "rows_at_head_keyed");
+}
+
+gpui::bench_group!(
+    benches,
+    layout_unchanged,
+    layout_colors,
+    layout_text,
+    layout_rows,
+    layout_rows_at_head,
+    layout_rows_at_head_keyed
+);
 gpui::bench_main!(benches);
