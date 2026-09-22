@@ -768,24 +768,19 @@ impl TextLayout {
                         None
                     };
 
-                    let (truncate_width, truncation_affix, truncate_from) =
-                        if let Some(text_overflow) = text_style.text_overflow.clone() {
-                            let width = known_dimensions.width.or(match available_space.width {
-                                crate::AvailableSpace::Definite(x) => match text_style.line_clamp {
-                                    Some(max_lines) => Some(x * max_lines),
-                                    None => Some(x),
-                                },
-                                _ => None,
-                            });
-
-                            match text_overflow {
-                                TextOverflow::Truncate(s) => (width, s, TruncateFrom::End),
-                                TextOverflow::TruncateStart(s) => (width, s, TruncateFrom::Start),
-                                TextOverflow::TruncateMiddle(s) => (width, s, TruncateFrom::Middle),
-                            }
-                        } else {
-                            (None, "".into(), TruncateFrom::End)
-                        };
+                    // Only the width is needed to decide whether the kept
+                    // result still answers. Which affix to truncate with, and
+                    // from which end, is needed only if we go on to shape, and
+                    // most calls here do not.
+                    let truncate_width = text_style.text_overflow.as_ref().and_then(|_| {
+                        known_dimensions.width.or(match available_space.width {
+                            crate::AvailableSpace::Definite(x) => match text_style.line_clamp {
+                                Some(max_lines) => Some(x * max_lines),
+                                None => Some(x),
+                            },
+                            _ => None,
+                        })
+                    });
 
                     // Only use cached layout if:
                     // 1. We have a cached size
@@ -814,6 +809,13 @@ impl TextLayout {
                         window.record_measure_reuse();
                         return size;
                     }
+
+                    let (truncation_affix, truncate_from) = match text_style.text_overflow.clone() {
+                        Some(TextOverflow::Truncate(affix)) => (affix, TruncateFrom::End),
+                        Some(TextOverflow::TruncateStart(affix)) => (affix, TruncateFrom::Start),
+                        Some(TextOverflow::TruncateMiddle(affix)) => (affix, TruncateFrom::Middle),
+                        None => (SharedString::default(), TruncateFrom::End),
+                    };
 
                     let mut line_wrapper =
                         cx.text_system().line_wrapper(text_style.font(), font_size);
