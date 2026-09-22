@@ -7,7 +7,10 @@
 //! leaf measurements, and `rows` changes the shape of the tree.
 
 use gpui::BenchAppContext;
-use gpui_benchmarks::{Mutation, QuoteTable, report_layout_stats};
+use gpui_benchmarks::{CountingAllocator, Mutation, QuoteTable, allocations, report_layout_stats};
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 /// Row counts to sweep. Small enough to stay interactive, large enough that
 /// per-node costs dominate per-frame fixed costs.
@@ -25,14 +28,23 @@ fn run_keyed(cx: &mut BenchAppContext, rows: usize, mutation: Mutation, keyed: b
         window.replace_root(cx, |_, _| QuoteTable::new(rows, mutation).keyed(keyed))
     });
     window.update(|window, _| window.reset_layout_stats());
+    let allocations_before = allocations();
 
     window.app_context().bench_renderer(view, |table, _, cx| {
         table.tick();
         cx.notify();
     });
 
+    let allocations_after = allocations();
     let stats = window.update(|window, _| window.layout_stats());
-    report_layout_stats(&format!("{label}/{rows}"), stats);
+    report_layout_stats(
+        &format!("{label}/{rows}"),
+        stats,
+        (
+            allocations_after.0 - allocations_before.0,
+            allocations_after.1 - allocations_before.1,
+        ),
+    );
 }
 
 #[gpui::bench(inputs = row_counts(), group = "layout", input_name = "unchanged", sample_size = 20)]
@@ -70,6 +82,47 @@ fn layout_rows_at_head_keyed(rows: &usize, cx: &mut BenchAppContext) {
     run_keyed(cx, *rows, Mutation::RowsAtHead, true, "rows_at_head_keyed");
 }
 
+/// The same interface either way: a live table beside a panel that never
+/// changes. The only difference is whether that panel is embedded as a cached
+/// view, so the gap between these two is what skipping an unchanged view's
+/// render is worth.
+fn run_panel(cx: &mut BenchAppContext, rows: usize, cached: bool, label: &str) {
+    let mut window = cx.add_empty_window();
+    let view = window.update(|window, cx| {
+        window.replace_root(cx, |_, cx| {
+            QuoteTable::new(rows, Mutation::Text).with_static_panel(rows, cached, cx)
+        })
+    });
+    window.update(|window, _| window.reset_layout_stats());
+    let allocations_before = allocations();
+
+    window.app_context().bench_renderer(view, |table, _, cx| {
+        table.tick();
+        cx.notify();
+    });
+
+    let allocations_after = allocations();
+    let stats = window.update(|window, _| window.layout_stats());
+    report_layout_stats(
+        &format!("{label}/{rows}"),
+        stats,
+        (
+            allocations_after.0 - allocations_before.0,
+            allocations_after.1 - allocations_before.1,
+        ),
+    );
+}
+
+#[gpui::bench(inputs = row_counts(), group = "layout", input_name = "panel_plain", sample_size = 20)]
+fn layout_panel_plain(rows: &usize, cx: &mut BenchAppContext) {
+    run_panel(cx, *rows, false, "panel_plain");
+}
+
+#[gpui::bench(inputs = row_counts(), group = "layout", input_name = "panel_cached", sample_size = 20)]
+fn layout_panel_cached(rows: &usize, cx: &mut BenchAppContext) {
+    run_panel(cx, *rows, true, "panel_cached");
+}
+
 gpui::bench_group!(
     benches,
     layout_unchanged,
@@ -77,6 +130,8 @@ gpui::bench_group!(
     layout_text,
     layout_rows,
     layout_rows_at_head,
-    layout_rows_at_head_keyed
+    layout_rows_at_head_keyed,
+    layout_panel_plain,
+    layout_panel_cached
 );
 gpui::bench_main!(benches);

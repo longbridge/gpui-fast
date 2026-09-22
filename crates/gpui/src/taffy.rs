@@ -75,6 +75,15 @@ pub struct LayoutStats {
     pub measure_reuses: u64,
     /// Calls to [`TaffyLayoutEngine::compute_layout`].
     pub compute_layout_calls: u64,
+    /// Time spent building the element tree: rendering every view and
+    /// registering the nodes their elements ask for.
+    pub build_time: Duration,
+    /// Time spent in the prepaint walk, which is where layout is computed and
+    /// where elements decide their bounds, hitboxes and dispatch nodes.
+    /// `compute_layout_time` is part of this.
+    pub prepaint_time: Duration,
+    /// Time spent in the paint walk, turning laid-out elements into the scene.
+    pub paint_time: Duration,
     /// Time spent inside Taffy's own layout computation.
     pub compute_layout_time: Duration,
 }

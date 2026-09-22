@@ -1204,6 +1204,10 @@ pub struct Window {
     /// Measurement reuses recorded while the layout engine was moved out of the
     /// window, waiting to be folded into its statistics.
     pub(crate) pending_measure_reuses: u64,
+    /// How long each phase of the frame took, waiting to be folded into the
+    /// layout engine's statistics. Kept here because the phases are driven from
+    /// the window, not from the engine.
+    frame_phase_times: (Duration, Duration, Duration),
     pub(crate) root: Option<AnyView>,
     pub(crate) element_id_stack: SmallVec<[ElementId; 32]>,
     pub(crate) text_style_stack: Vec<TextStyleRefinement>,
@@ -2073,6 +2077,7 @@ impl Window {
             layout_root_index: 0,
             layout_prepaint_scope: LAYOUT_ROOT_SEED,
             pending_measure_reuses: 0,
+            frame_phase_times: (Duration::ZERO, Duration::ZERO, Duration::ZERO),
             root: None,
             element_id_stack: SmallVec::default(),
             text_style_stack: Vec::new(),
@@ -3436,6 +3441,7 @@ impl Window {
     }
 
     fn draw_roots(&mut self, cx: &mut App) {
+        let build_started_at = Instant::now();
         self.invalidator.set_phase(DrawPhase::Prepaint);
         self.tooltip_bounds.take();
 
@@ -3468,6 +3474,8 @@ impl Window {
         let scale_factor = self.scale_factor();
         let mut root_element = self.root.as_ref().unwrap().clone().into_any_element();
         let root_layout_id = root_element.request_layout(self, cx);
+        self.frame_phase_times.0 += build_started_at.elapsed();
+        let prepaint_started_at = Instant::now();
         self.layout_engine
             .as_mut()
             .unwrap()
@@ -3502,6 +3510,8 @@ impl Window {
             tooltip_element = self.prepaint_tooltip(cx);
         }
 
+        self.frame_phase_times.1 += prepaint_started_at.elapsed();
+        let paint_started_at = Instant::now();
         self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
 
         // Now actually paint the elements.
@@ -3523,6 +3533,7 @@ impl Window {
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         self.paint_inspector_hitbox(cx);
+        self.frame_phase_times.2 += paint_started_at.elapsed();
 
         // a11y may have been activated/deactivated halfway through the frame
         let a11y_active_start_of_frame = self.a11y.is_active();
@@ -5182,11 +5193,18 @@ impl Window {
     /// how much of the tree survived the frame, and `style_writes` shows how
     /// much of it was dirtied again anyway.
     pub fn layout_stats(&self) -> LayoutStats {
-        self.layout_engine.as_ref().unwrap().stats()
+        let (build_time, prepaint_time, paint_time) = self.frame_phase_times;
+        LayoutStats {
+            build_time,
+            prepaint_time,
+            paint_time,
+            ..self.layout_engine.as_ref().unwrap().stats()
+        }
     }
 
     /// Zeroes the counters reported by [`Window::layout_stats`].
     pub fn reset_layout_stats(&mut self) {
+        self.frame_phase_times = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
         self.layout_engine.as_mut().unwrap().reset_stats();
     }
 

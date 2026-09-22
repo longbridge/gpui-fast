@@ -8,9 +8,11 @@
 //! engine has the most room to exploit.
 
 use gpui::{
-    Context, Hsla, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled,
-    Window, div, hsla, px,
+    AppContext, Context, Entity, Hsla, InteractiveElement, IntoElement, ParentElement, Render,
+    SharedString, StyleRefinement, Styled, Window, div, hsla, px,
 };
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// How a frame differs from the one before it.
 ///
@@ -92,6 +94,37 @@ const NAMES: &[&str] = &[
     "Li Auto",
 ];
 
+/// A panel that never changes, standing in for the parts of an application that
+/// are redrawn every frame despite having nothing new to say: sidebars,
+/// toolbars, status bars, inactive tabs.
+pub struct StaticPanel {
+    entries: usize,
+}
+
+impl Render for StaticPanel {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .w(px(240.))
+            .children((0..self.entries).map(|index| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_1()
+                    .h(px(28.))
+                    .border_b_1()
+                    .border_color(BORDER)
+                    .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(FG_MUTED))
+                    .child(div().flex_1().child(NAMES[index % NAMES.len()]))
+                    .child(div().w(px(48.)).text_right().text_xs().child("--"))
+            }))
+    }
+}
+
 /// A watchlist-shaped view: a toolbar above a table of quote rows.
 pub struct QuoteTable {
     rows: Vec<Row>,
@@ -104,6 +137,11 @@ pub struct QuoteTable {
     /// Without one a row is identified by its index among its siblings, which
     /// is only stable while nothing is inserted ahead of it.
     keyed: bool,
+    /// The half of the interface that has nothing new to say each frame.
+    panel: Option<Entity<StaticPanel>>,
+    /// Whether that half is embedded as a cached view, which decides whether
+    /// its subtree is rendered again every frame or reused.
+    cache_panel: bool,
 }
 
 impl QuoteTable {
@@ -116,7 +154,22 @@ impl QuoteTable {
             next_row_id: row_count as u64,
             mutation,
             keyed: false,
+            panel: None,
+            cache_panel: false,
         }
+    }
+
+    /// Adds a panel of `entries` rows that never changes, and says whether to
+    /// embed it as a cached view.
+    pub fn with_static_panel(
+        mut self,
+        entries: usize,
+        cached: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        self.panel = Some(cx.new(|_| StaticPanel { entries }));
+        self.cache_panel = cached;
+        self
     }
 
     /// Gives every row an `ElementId` derived from its own identity rather than
@@ -184,88 +237,112 @@ const DOWN: Hsla = hsla(0.99, 0.60, 0.60, 1.0);
 
 impl Render for QuoteTable {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let panel = self.panel.clone().map(|panel| {
+            if self.cache_panel {
+                // A definite size is what the current API asks for in exchange
+                // for skipping the subtree's render.
+                panel
+                    .cached(StyleRefinement::default().w(px(240.)).h(px(4000.)))
+                    .into_any_element()
+            } else {
+                panel.into_any_element()
+            }
+        });
+
         div()
             .flex()
-            .flex_col()
+            .flex_row()
             .size_full()
             .bg(BG)
             .text_color(FG)
+            .children(panel)
             .child(
                 div()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_3()
-                    .px_4()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(BORDER)
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Watchlist"),
-                    )
-                    .child(div().flex_1())
-                    .children(["All", "HK", "US", "A"].map(|label| {
-                        div()
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .bg(BORDER)
-                            .text_sm()
-                            .child(label)
-                    })),
-            )
-            .children(self.rows.iter().map(|row| {
-                let tone = if row.up { UP } else { DOWN };
-                let row_element = div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .px_4()
-                    .py_1()
-                    .border_b_1()
-                    .border_color(BORDER)
-                    .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(tone))
+                    .flex_col()
+                    .flex_1()
                     .child(
                         div()
                             .flex()
-                            .flex_col()
-                            .w(px(110.))
-                            .child(row.symbol.clone())
-                            .child(div().text_xs().text_color(FG_MUTED).child(row.name.clone())),
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .px_4()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(BORDER)
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("Watchlist"),
+                            )
+                            .child(div().flex_1())
+                            .children(["All", "HK", "US", "A"].map(|label| {
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(BORDER)
+                                    .text_sm()
+                                    .child(label)
+                            })),
                     )
-                    // Content-sized: text here genuinely participates in layout.
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_xs()
-                            .text_color(FG_MUTED)
-                            .child(row.name.clone()),
-                    )
-                    // Fixed-width columns: text here cannot move anything.
-                    .child(div().w(px(96.)).text_right().child(row.last.clone()))
-                    .child(
-                        div()
-                            .w(px(84.))
-                            .text_right()
-                            .text_color(tone)
-                            .child(row.change.clone()),
-                    )
-                    .child(
-                        div()
-                            .w(px(84.))
-                            .text_right()
-                            .text_color(FG_MUTED)
-                            .child(row.volume.clone()),
-                    );
-                if self.keyed {
-                    row_element.id(("row", row.id)).into_any_element()
-                } else {
-                    row_element.into_any_element()
-                }
-            }))
+                    .children(self.rows.iter().map(|row| {
+                        let tone = if row.up { UP } else { DOWN };
+                        let row_element = div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .px_4()
+                            .py_1()
+                            .border_b_1()
+                            .border_color(BORDER)
+                            .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(tone))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .w(px(110.))
+                                    .child(row.symbol.clone())
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(FG_MUTED)
+                                            .child(row.name.clone()),
+                                    ),
+                            )
+                            // Content-sized: text here genuinely participates in layout.
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_xs()
+                                    .text_color(FG_MUTED)
+                                    .child(row.name.clone()),
+                            )
+                            // Fixed-width columns: text here cannot move anything.
+                            .child(div().w(px(96.)).text_right().child(row.last.clone()))
+                            .child(
+                                div()
+                                    .w(px(84.))
+                                    .text_right()
+                                    .text_color(tone)
+                                    .child(row.change.clone()),
+                            )
+                            .child(
+                                div()
+                                    .w(px(84.))
+                                    .text_right()
+                                    .text_color(FG_MUTED)
+                                    .child(row.volume.clone()),
+                            );
+                        if self.keyed {
+                            row_element.id(("row", row.id)).into_any_element()
+                        } else {
+                            row_element.into_any_element()
+                        }
+                    })),
+            )
     }
 }
 
@@ -274,7 +351,7 @@ impl Render for QuoteTable {
 /// Criterion reports how long a frame took; these counters say where the time
 /// went, which is what tells a real improvement apart from a benchmark that
 /// merely stopped doing the work it was supposed to measure.
-pub fn report_layout_stats(label: &str, stats: gpui::LayoutStats) {
+pub fn report_layout_stats(label: &str, stats: gpui::LayoutStats, allocations: (u64, u64)) {
     let frames = stats.frames.max(1);
     let per_frame = |n: u64| n as f64 / frames as f64;
     let touched = stats.nodes_created + stats.nodes_reused;
@@ -289,7 +366,9 @@ pub fn report_layout_stats(label: &str, stats: gpui::LayoutStats) {
          writes/frame      {:>9.1} style    {:>9.1} children  {:>9.1} measure-rebind\n    \
          style compares    {:>9.1}/frame\n    \
          measure calls     {:>9.1}/frame  {:>9.1}µs/frame ({:.0}% answered from a kept result)\n    \
-         taffy compute     {:>9.1}µs/frame ({:.1} calls/frame), of which {:.0}% is measuring",
+         taffy compute     {:>9.1}µs/frame ({:.1} calls/frame), of which {:.0}% is measuring\n    \
+         frame phases      {:>9.1}µs build  {:>9.1}µs prepaint  {:>9.1}µs paint\n    \
+         allocations       {:>9.1}/frame  {:>9.1} KiB/frame",
         per_frame(stats.nodes_created),
         per_frame(stats.nodes_reused),
         per_frame(stats.style_writes),
@@ -310,5 +389,43 @@ pub fn report_layout_stats(label: &str, stats: gpui::LayoutStats) {
         } else {
             100.0 * stats.measure_time.as_secs_f64() / stats.compute_layout_time.as_secs_f64()
         },
+        stats.build_time.as_secs_f64() * 1e6 / frames as f64,
+        stats.prepaint_time.as_secs_f64() * 1e6 / frames as f64,
+        stats.paint_time.as_secs_f64() * 1e6 / frames as f64,
+        allocations.0 as f64 / frames as f64,
+        allocations.1 as f64 / 1024.0 / frames as f64,
     );
+}
+
+/// Counts every allocation the process makes, so a frame's cost can be split
+/// into work the allocator did and work it did not.
+pub struct CountingAllocator;
+
+static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+/// Allocations and bytes handed out so far.
+pub fn allocations() -> (u64, u64) {
+    (
+        ALLOCATIONS.load(Ordering::Relaxed),
+        ALLOCATED_BYTES.load(Ordering::Relaxed),
+    )
 }
