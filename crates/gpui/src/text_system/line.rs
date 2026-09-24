@@ -1,7 +1,7 @@
 use crate::{
     App, Bounds, DevicePixels, Half, Hsla, LineLayout, Pixels, Point, RenderGlyphParams, Result,
     SharedString, StrikethroughStyle, TextAlign, UnderlineStyle, Window, WrapBoundary,
-    WrappedLineKey, WrappedLineLayout, black, fill, point, px, size,
+    WrappedLineLayout, black, fill, point, px, size,
 };
 use derive_more::{Deref, DerefMut};
 use smallvec::SmallVec;
@@ -271,8 +271,6 @@ pub struct WrappedLine {
     /// The text that was shaped for this line.
     pub text: SharedString,
     pub(crate) decoration_runs: Vec<DecorationRun>,
-    /// Where the line layout cache keeps this line, when it came from there.
-    pub(crate) cache_key: Option<WrappedLineKey>,
 }
 
 impl WrappedLine {

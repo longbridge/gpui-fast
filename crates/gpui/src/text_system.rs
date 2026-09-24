@@ -412,16 +412,6 @@ impl WindowTextSystem {
         self.line_layout_cache.reset_shaping_stats()
     }
 
-    /// Tells the line layout cache that these lines, shaped on an earlier
-    /// frame and kept by their element, are in use on this one.
-    pub(crate) fn retain_lines<'a>(&self, lines: impl IntoIterator<Item = &'a WrappedLine>) {
-        self.line_layout_cache.retain_wrapped_lines(
-            lines
-                .into_iter()
-                .filter_map(|line| Some((line.cache_key.as_ref()?, &line.layout))),
-        )
-    }
-
     /// Shape the given line, at the given font_size, for painting to the screen.
     /// Subsets of the line can be styled independently with the `runs` parameter.
     ///
@@ -611,7 +601,7 @@ impl WindowTextSystem {
                 run_start += run_len_within_line;
             }
 
-            let (layout, cache_key) = self.line_layout_cache.layout_wrapped_line(
+            let layout = self.line_layout_cache.layout_wrapped_line(
                 &line_text,
                 font_size,
                 &font_runs,
@@ -624,7 +614,6 @@ impl WindowTextSystem {
                 layout,
                 decoration_runs,
                 text: line_text,
-                cache_key: Some(cache_key),
             });
 
             // Skip `\n` character.

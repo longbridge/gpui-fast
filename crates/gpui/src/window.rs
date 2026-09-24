@@ -9531,6 +9531,48 @@ mod tests {
         );
     }
 
+    /// Lines outlive the frames that asked for them only while something
+    /// holds them. Once the text is gone from the tree, and with it the nodes
+    /// that held its lines, the cache has to let them go too.
+    #[test]
+    fn text_nothing_holds_any_more_leaves_the_line_layout_cache() {
+        let mut cx = TestAppContext::single();
+        let window = cx.add_window(|_, _| ShiftingRows {
+            row_ids: (0..8).collect(),
+        });
+        let handle: AnyWindowHandle = window.into();
+        draw_frame(&mut cx, handle);
+
+        window
+            .update(&mut cx, |view, _, cx| {
+                view.row_ids.clear();
+                cx.notify();
+            })
+            .unwrap();
+        for _ in 0..3 {
+            draw_frame(&mut cx, handle);
+        }
+
+        cx.update_window(handle, |_, window, _| window.reset_layout_stats())
+            .unwrap();
+        window
+            .update(&mut cx, |view, _, cx| {
+                view.row_ids = (0..8).collect();
+                cx.notify();
+            })
+            .unwrap();
+        let shown_again = cx
+            .update_window(handle, |_, window, cx| {
+                window.draw(cx).clear(cx);
+                window.layout_stats()
+            })
+            .unwrap();
+        assert_eq!(
+            shown_again.lines_shaped, 8,
+            "text removed frames ago should have left the cache: {shown_again:?}"
+        );
+    }
+
     /// The window root is the one node whose style Taffy does not hold as the
     /// element wrote it, because an `auto` size is rewritten to fill the
     /// viewport. Retaining that node means the rewrite has to stay recoverable

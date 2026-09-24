@@ -456,6 +456,24 @@ impl WrappedLineLayout {
     }
 }
 
+/// Leaves in `previous` everything the next frame may ask for: what this
+/// frame asked for, which is in `current`, and what it did not but something
+/// still holds. `current` is left empty.
+///
+/// Whichever of the two is larger is kept and the other moved into it, so a
+/// frame that asked for little costs little, and so does one that asked for
+/// everything.
+fn carry_over<K: Eq + Hash, V>(
+    previous: &mut FxHashMap<Arc<K>, Arc<V>>,
+    current: &mut FxHashMap<Arc<K>, Arc<V>>,
+) {
+    previous.retain(|_, layout| Arc::strong_count(layout) > 1);
+    if previous.len() < current.len() {
+        std::mem::swap(previous, current);
+    }
+    previous.extend(current.drain());
+}
+
 pub(crate) struct LineLayoutCache {
     previous_frame: Mutex<FrameCache>,
     current_frame: RwLock<FrameCache>,
@@ -594,19 +612,47 @@ impl LineLayoutCache {
             .truncate(index.wrapped_lines_by_hash_index);
     }
 
+    /// Ends a frame: what it laid out becomes what the next frame can reuse.
+    ///
+    /// A line the frame did not ask for is dropped, unless something still
+    /// holds its layout. That something is usually a retained text node, which
+    /// answers from the lines it keeps without asking the cache for them, and
+    /// whose text can reach a different node at any moment — a row sliding into
+    /// its neighbour's slot — and ask for the same lines there.
     pub fn finish_frame(&self) {
-        let mut prev_frame = self.previous_frame.lock();
-        let mut curr_frame = self.current_frame.write();
-        std::mem::swap(&mut *prev_frame, &mut *curr_frame);
-        curr_frame.lines.clear();
-        curr_frame.wrapped_lines.clear();
-        curr_frame.used_lines.clear();
-        curr_frame.used_wrapped_lines.clear();
+        let mut previous = self.previous_frame.lock();
+        let mut current = self.current_frame.write();
+        let (previous, current) = (&mut *previous, &mut *current);
 
-        curr_frame.lines_by_hash.clear();
-        curr_frame.wrapped_lines_by_hash.clear();
-        curr_frame.used_lines_by_hash.clear();
-        curr_frame.used_wrapped_lines_by_hash.clear();
+        // Wrapped lines hold the lines they were wrapped from, so they are
+        // swept first, letting a line they were the last to hold go with them.
+        carry_over(&mut previous.wrapped_lines, &mut current.wrapped_lines);
+        carry_over(
+            &mut previous.wrapped_lines_by_hash,
+            &mut current.wrapped_lines_by_hash,
+        );
+        carry_over(&mut previous.lines, &mut current.lines);
+        carry_over(&mut previous.lines_by_hash, &mut current.lines_by_hash);
+
+        // The used lists index what this frame laid out, which is what a view
+        // reused next frame looks its lines up by.
+        std::mem::swap(&mut previous.used_lines, &mut current.used_lines);
+        std::mem::swap(
+            &mut previous.used_wrapped_lines,
+            &mut current.used_wrapped_lines,
+        );
+        std::mem::swap(
+            &mut previous.used_lines_by_hash,
+            &mut current.used_lines_by_hash,
+        );
+        std::mem::swap(
+            &mut previous.used_wrapped_lines_by_hash,
+            &mut current.used_wrapped_lines_by_hash,
+        );
+        current.used_lines.clear();
+        current.used_wrapped_lines.clear();
+        current.used_lines_by_hash.clear();
+        current.used_wrapped_lines_by_hash.clear();
     }
 
     pub fn layout_wrapped_line<Text>(
@@ -616,7 +662,7 @@ impl LineLayoutCache {
         runs: &[FontRun],
         wrap_width: Option<Pixels>,
         max_lines: Option<usize>,
-    ) -> (Arc<WrappedLineLayout>, WrappedLineKey)
+    ) -> Arc<WrappedLineLayout>
     where
         Text: AsRef<str>,
         SharedString: From<Text>,
@@ -630,8 +676,8 @@ impl LineLayoutCache {
         } as &dyn AsCacheKeyRef;
 
         let current_frame = self.current_frame.upgradable_read();
-        if let Some((key, layout)) = current_frame.wrapped_lines.get_key_value(key) {
-            return (layout.clone(), WrappedLineKey(key.clone()));
+        if let Some(layout) = current_frame.wrapped_lines.get(key) {
+            return layout.clone();
         }
 
         let previous_frame_entry = self.previous_frame.lock().wrapped_lines.remove_entry(key);
@@ -640,8 +686,8 @@ impl LineLayoutCache {
             current_frame
                 .wrapped_lines
                 .insert(key.clone(), layout.clone());
-            current_frame.used_wrapped_lines.push(key.clone());
-            (layout, WrappedLineKey(key))
+            current_frame.used_wrapped_lines.push(key);
+            layout
         } else {
             drop(current_frame);
             let text = SharedString::from(text);
@@ -668,33 +714,9 @@ impl LineLayoutCache {
             current_frame
                 .wrapped_lines
                 .insert(key.clone(), layout.clone());
-            current_frame.used_wrapped_lines.push(key.clone());
+            current_frame.used_wrapped_lines.push(key);
 
-            (layout, WrappedLineKey(key))
-        }
-    }
-
-    /// Carries wrapped lines that an element kept from an earlier frame into
-    /// this one, as though they had been laid out again.
-    ///
-    /// The cache keeps a line only while something asks for it every frame.
-    /// An element that answers its layout from the lines it already holds
-    /// never asks, so without this its lines would be forgotten a frame later,
-    /// and the next element to show the same text — a row that slid into a
-    /// neighbour's slot, say — would have to shape it all over again.
-    pub fn retain_wrapped_lines<'a>(
-        &self,
-        lines: impl IntoIterator<Item = (&'a WrappedLineKey, &'a Arc<WrappedLineLayout>)>,
-    ) {
-        let mut current_frame = None;
-        for (key, layout) in lines {
-            let current_frame = current_frame.get_or_insert_with(|| self.current_frame.write());
-            if !current_frame.wrapped_lines.contains_key(&key.0) {
-                current_frame
-                    .wrapped_lines
-                    .insert(key.0.clone(), layout.clone());
-                current_frame.used_wrapped_lines.push(key.0.clone());
-            }
+            layout
         }
     }
 
@@ -940,12 +962,6 @@ pub struct FontRun {
 trait AsCacheKeyRef {
     fn as_cache_key_ref(&self) -> CacheKeyRef<'_>;
 }
-
-/// Where a wrapped line sits in the [`LineLayoutCache`], kept by whoever holds
-/// the line so it can be handed back without being looked up again. See
-/// [`LineLayoutCache::retain_wrapped_lines`].
-#[derive(Clone, Debug)]
-pub(crate) struct WrappedLineKey(Arc<CacheKey>);
 
 #[derive(Clone, Debug, Eq)]
 struct CacheKey {

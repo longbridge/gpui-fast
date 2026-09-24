@@ -284,10 +284,10 @@ impl Element for &'static str {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         text_layout: &mut Self::RequestLayoutState,
-        window: &mut Window,
+        _window: &mut Window,
         _cx: &mut App,
     ) {
-        text_layout.prepaint(bounds, self, window)
+        text_layout.prepaint(bounds, self)
     }
 
     fn paint(
@@ -358,10 +358,10 @@ impl Element for SharedString {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         text_layout: &mut Self::RequestLayoutState,
-        window: &mut Window,
+        _window: &mut Window,
         _cx: &mut App,
     ) {
-        text_layout.prepaint(bounds, self.as_ref(), window)
+        text_layout.prepaint(bounds, self.as_ref())
     }
 
     fn paint(
@@ -584,10 +584,10 @@ impl Element for StyledText {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
-        window: &mut Window,
+        _window: &mut Window,
         _cx: &mut App,
     ) {
-        self.layout.prepaint(bounds, &self.text, window)
+        self.layout.prepaint(bounds, &self.text)
     }
 
     fn paint(
@@ -925,18 +925,13 @@ impl TextLayout {
         layout_id
     }
 
-    fn prepaint(&self, bounds: Bounds<Pixels>, text: &str, window: &mut Window) {
+    fn prepaint(&self, bounds: Bounds<Pixels>, text: &str) {
         let mut element_state = self.0.borrow_mut();
         let element_state = element_state
             .as_mut()
             .with_context(|| format!("measurement has not been performed on {text}"))
             .unwrap();
         element_state.bounds = Some(bounds);
-        // Lines answered from this element's own state were never asked of the
-        // line layout cache this frame, and a line nobody asks for is gone a
-        // frame later. Handing them back keeps them there for whichever element
-        // needs the same text next, as the frame that shaped them would have.
-        window.text_system().retain_lines(&element_state.lines);
     }
 
     fn paint(&self, text: &str, window: &mut Window, cx: &mut App) {
@@ -1612,10 +1607,10 @@ mod tests {
             _inspector_id: Option<&InspectorElementId>,
             bounds: Bounds<Pixels>,
             layout: &mut Self::RequestLayoutState,
-            window: &mut Window,
+            _window: &mut Window,
             _cx: &mut App,
         ) {
-            layout.prepaint(bounds, PROBED_TEXT, window)
+            layout.prepaint(bounds, PROBED_TEXT)
         }
 
         fn paint(
