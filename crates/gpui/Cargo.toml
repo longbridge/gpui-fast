@@ -153,6 +153,9 @@ http_client = { workspace = true, features = ["test-support"] }
 proptest = { workspace = true }
 reqwest_client = { workspace = true, features = ["test-support"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
+
 [target.'cfg(target_family = "wasm")'.dev-dependencies]
 wasm-bindgen = { workspace = true }
 web-sys = { version = "0.3", features = ["console"] }
