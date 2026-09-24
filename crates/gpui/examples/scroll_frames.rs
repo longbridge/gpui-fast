@@ -9,7 +9,7 @@
 //! rows that scroll in cannot.
 //!
 //! ```text
-//! cargo run -p gpui --example scroll_frames --release -- <container> <motion> <speed> <keying> [rows] [overdraw] [cells]
+//! cargo run -p gpui --example scroll_frames --release -- <container> <motion> <speed> <keying> [rows] [overdraw] [cells] [panes]
 //! ```
 //!
 //! - `container`: `uniform` (`uniform_list`) or `list` (`list`, variable-height
@@ -24,6 +24,9 @@
 //! - `cells`: extra narrow text columns per row, 0 by default. A wide table
 //!   is what brings the work of a frame near its budget, where the difference
 //!   between two builds stops being hidden by the processor clocking down.
+//! - `panes`: how many lists are drawn side by side, 1 by default. Each one
+//!   scrolls from a different place, so no two show the same rows, and more
+//!   than one opens a larger window to fit them.
 //!
 //! Every row carries text of its own, prepared up front, so a row scrolling
 //! back into view cannot borrow the shaping of a row that happens to show the
@@ -64,6 +67,10 @@ const ROW_HEIGHT: f32 = 24.;
 /// both directions without meeting either end.
 const START_ROW: usize = 1000;
 
+/// Rows between where one pane starts and where the next one does: more than
+/// any measured run scrolls, so the panes never show the same rows.
+const PANE_STRIDE: usize = 2000;
+
 const WORDS: [&str; 16] = [
     "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliett",
     "kilo", "lima", "mike", "november", "oscar", "papa",
@@ -91,6 +98,16 @@ struct RowText {
     cells: Vec<SharedString>,
 }
 
+/// One of the lists drawn side by side, scrolled by the same amount as the
+/// others from a place of its own.
+struct Pane {
+    start_row: usize,
+    uniform_scroll: UniformListScrollHandle,
+    list_state: ListState,
+    /// The rows in view last frame, to count the ones that scrolled in.
+    last_visible: Option<Range<usize>>,
+}
+
 struct ScrollFrames {
     container: Container,
     motion: Motion,
@@ -98,9 +115,7 @@ struct ScrollFrames {
     keyed: bool,
     overdraw: Pixels,
     rows: Rc<[RowText]>,
-
-    uniform_scroll: UniformListScrollHandle,
-    list_state: ListState,
+    panes: Vec<Pane>,
 
     tick: usize,
     frames: usize,
@@ -113,8 +128,6 @@ struct ScrollFrames {
     /// into a different slot costs its work in one frame, not across all.
     last_main_cpu: Option<Duration>,
     frame_main_cpu: Vec<Duration>,
-    /// The rows in view last frame, to count the ones that scrolled in.
-    last_visible: Option<Range<usize>>,
     rows_entered: usize,
     rows_visible: usize,
 }
@@ -155,46 +168,97 @@ impl Render for ScrollFrames {
             cx.quit();
         }
 
-        let scroll_top = self.scroll_top(window.viewport_size().height);
+        let viewport_height = window.viewport_size().height;
+        let offset = self.scrolled(viewport_height);
         self.tick += 1;
-        self.count_rows(scroll_top, window.viewport_size().height);
 
         let rows = self.rows.clone();
         let keyed = self.keyed;
-        let content = match self.container {
-            Container::Uniform => {
-                self.uniform_scroll
-                    .0
-                    .borrow()
-                    .base_handle
-                    .set_offset(point(px(0.), -scroll_top));
-                uniform_list("rows", rows.len(), move |range, _, _| {
-                    range.map(|ix| render_row(&rows, ix, keyed)).collect()
-                })
-                .track_scroll(&self.uniform_scroll)
-                .size_full()
-                .into_any_element()
-            }
-            Container::List => {
-                let row = (scroll_top / px(ROW_HEIGHT)).floor() as usize;
-                self.list_state.scroll_to(ListOffset {
-                    item_ix: row,
-                    offset_in_item: scroll_top - px(row as f32 * ROW_HEIGHT),
-                });
-                list(self.list_state.clone(), move |ix, _, _| {
-                    render_row(&rows, ix, keyed)
-                })
-                .size_full()
-                .into_any_element()
-            }
-        };
+        let container = self.container;
+        let (mut entered, mut visible) = (0, 0);
+        let panes = self
+            .panes
+            .iter_mut()
+            .map(|pane| {
+                let scroll_top = px(pane.start_row as f32 * ROW_HEIGHT) + offset;
+                let (pane_entered, pane_visible) =
+                    pane.count_rows(scroll_top, viewport_height, rows.len());
+                entered += pane_entered;
+                visible += pane_visible;
+
+                let rows = rows.clone();
+                let content = match container {
+                    Container::Uniform => {
+                        pane.uniform_scroll
+                            .0
+                            .borrow()
+                            .base_handle
+                            .set_offset(point(px(0.), -scroll_top));
+                        uniform_list("rows", rows.len(), move |range, _, _| {
+                            range.map(|ix| render_row(&rows, ix, keyed)).collect()
+                        })
+                        .track_scroll(&pane.uniform_scroll)
+                        .size_full()
+                        .into_any_element()
+                    }
+                    Container::List => {
+                        let row = (scroll_top / px(ROW_HEIGHT)).floor() as usize;
+                        pane.list_state.scroll_to(ListOffset {
+                            item_ix: row,
+                            offset_in_item: scroll_top - px(row as f32 * ROW_HEIGHT),
+                        });
+                        list(pane.list_state.clone(), move |ix, _, _| {
+                            render_row(&rows, ix, keyed)
+                        })
+                        .size_full()
+                        .into_any_element()
+                    }
+                };
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .border_r_1()
+                    .border_color(hsla(0., 0., 0.3, 1.))
+                    .child(content)
+            })
+            .collect::<Vec<_>>();
+        self.rows_entered += entered;
+        self.rows_visible += visible;
 
         div()
             .size_full()
+            .flex()
+            .flex_row()
             .bg(hsla(0., 0., 0.12, 1.))
             .text_color(hsla(0., 0., 0.85, 1.))
             .text_sm()
-            .child(content)
+            .children(panes)
+    }
+}
+
+impl Pane {
+    /// Records which rows are in view, and returns how many of them were not
+    /// in view last frame and how many there are. This is worked out from the
+    /// scroll position rather than counted in the render closure, which also
+    /// renders a row to measure it.
+    fn count_rows(
+        &mut self,
+        scroll_top: Pixels,
+        viewport_height: Pixels,
+        row_count: usize,
+    ) -> (usize, usize) {
+        let first = (f32::from(scroll_top) / ROW_HEIGHT).floor() as usize;
+        let last = (f32::from(scroll_top + viewport_height) / ROW_HEIGHT).ceil() as usize;
+        let visible = first..last.min(row_count);
+        let entered = match &self.last_visible {
+            Some(previous) => visible.clone().filter(|ix| !previous.contains(ix)).count(),
+            None => visible.len(),
+        };
+        let count = visible.len();
+        self.last_visible = Some(visible);
+        (entered, count)
     }
 }
 
@@ -260,6 +324,7 @@ impl ScrollFrames {
         rows: usize,
         overdraw: Pixels,
         cells: usize,
+        panes: usize,
     ) -> Self {
         let rows: Rc<[RowText]> = (0..rows)
             .map(|ix| RowText {
@@ -277,7 +342,14 @@ impl ScrollFrames {
                 cells: (0..cells).map(|c| format!("{ix}.{c}").into()).collect(),
             })
             .collect();
-        let list_state = ListState::new(rows.len(), ListAlignment::Top, overdraw);
+        let panes = (0..panes)
+            .map(|pane| Pane {
+                start_row: START_ROW + pane * PANE_STRIDE,
+                uniform_scroll: UniformListScrollHandle::new(),
+                list_state: ListState::new(rows.len(), ListAlignment::Top, overdraw),
+                last_visible: None,
+            })
+            .collect();
         ScrollFrames {
             container,
             motion,
@@ -285,8 +357,7 @@ impl ScrollFrames {
             keyed,
             overdraw,
             rows,
-            uniform_scroll: UniformListScrollHandle::new(),
-            list_state,
+            panes,
             tick: 0,
             frames: 0,
             measuring_since: None,
@@ -295,16 +366,13 @@ impl ScrollFrames {
             slowest: Duration::ZERO,
             last_main_cpu: None,
             frame_main_cpu: Vec::new(),
-            last_visible: None,
             rows_entered: 0,
             rows_visible: 0,
         }
     }
 
-    /// Where the top of the viewport is this frame, in pixels from the first
-    /// row.
-    fn scroll_top(&self, viewport_height: Pixels) -> Pixels {
-        let start = START_ROW as f32 * ROW_HEIGHT;
+    /// How far every pane has scrolled from where it started, this frame.
+    fn scrolled(&self, viewport_height: Pixels) -> Pixels {
         let travelled = self.tick as f32 * self.speed;
         let offset = match self.motion {
             Motion::Still => 0.,
@@ -321,23 +389,7 @@ impl ScrollFrames {
                 }
             }
         };
-        px(start + offset)
-    }
-
-    /// Tallies how many rows are in view and how many of them were not in view
-    /// last frame. This is worked out from the scroll position rather than
-    /// counted in the render closure, which also renders a row to measure it.
-    fn count_rows(&mut self, scroll_top: Pixels, viewport_height: Pixels) {
-        let first = (f32::from(scroll_top) / ROW_HEIGHT).floor() as usize;
-        let last = (f32::from(scroll_top + viewport_height) / ROW_HEIGHT).ceil() as usize;
-        let visible = first..last.min(self.rows.len());
-        let entered = match &self.last_visible {
-            Some(previous) => visible.clone().filter(|ix| !previous.contains(ix)).count(),
-            None => visible.len(),
-        };
-        self.rows_entered += entered;
-        self.rows_visible += visible.len();
-        self.last_visible = Some(visible);
+        px(offset)
     }
 
     fn report(&self, window: &Window) {
@@ -363,12 +415,13 @@ impl ScrollFrames {
         };
         let (p50, p95, worst) = (percentile(0.5), percentile(0.95), percentile(1.));
         println!(
-            "\n  {:?} list, {} rows, {:?} at {} px/frame, {}, overdraw {} px, over {} frames\n    \
+            "\n  {:?} list x{}, {} rows, {:?} at {} px/frame, {}, overdraw {} px, over {} frames\n    \
              main cpu          {main_cpu}  (per frame p50 {p50:.2}, p95 {p95:.2}, max {worst:.2} ms)\n    \
              process cpu       {process_cpu}\n    \
              wall              {:>8.2} ms/frame  ({:.1} fps, slowest {:.2} ms)\n    \
              rows in view      {:>8.1}/frame  ({:.1} scrolled in)",
             self.container,
+            self.panes.len(),
             self.rows.len(),
             self.motion,
             self.speed,
@@ -469,6 +522,12 @@ fn run_example() {
     let rows: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(10_000);
     let overdraw: f32 = args.next().and_then(|a| a.parse().ok()).unwrap_or(0.);
     let cells: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(0);
+    let panes: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(1).max(1);
+    let window_size = if panes > 1 {
+        size(px(1800.), px(1000.))
+    } else {
+        size(px(1000.), px(820.))
+    };
 
     application().run(move |cx| {
         if !example_support::load_fonts(cx) {
@@ -479,14 +538,23 @@ fn run_example() {
                 focus: true,
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
-                    size(px(1000.), px(820.)),
+                    window_size,
                     cx,
                 ))),
                 ..Default::default()
             },
             move |_, cx| {
                 cx.new(|_| {
-                    ScrollFrames::new(container, motion, speed, keyed, rows, px(overdraw), cells)
+                    ScrollFrames::new(
+                        container,
+                        motion,
+                        speed,
+                        keyed,
+                        rows,
+                        px(overdraw),
+                        cells,
+                        panes,
+                    )
                 })
             },
         )
