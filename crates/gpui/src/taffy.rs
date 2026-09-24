@@ -38,6 +38,24 @@ struct NodeContext {
     measure: NodeMeasureFn,
 }
 
+/// Removes a node from the tree, and with it what its measurement captured.
+///
+/// Taffy keeps a removed node's context until another node is given its slot,
+/// so a measurement closure, and everything it holds — the text of a text
+/// element and the lines shaped from it — would outlive its node by however
+/// many frames that takes. Replacing the closure rather than clearing the
+/// context releases all of it without dirtying the node, or a parent it is
+/// still attached to, on the way out.
+fn remove_node(taffy: &mut TaffyTree<NodeContext>, id: LayoutId) {
+    if let Some(context) = taffy.get_node_context_mut(id.0) {
+        let released: Box<MeasureFn> = Box::new(|_, _, _, _| Size::default());
+        #[cfg(feature = "stacker")]
+        let released = StackSafe::new(released);
+        context.measure = released;
+    }
+    taffy.remove(id.0).expect(EXPECT_MESSAGE);
+}
+
 /// Counters describing the work the layout engine performed, for benchmarking
 /// and profiling.
 ///
@@ -229,7 +247,7 @@ impl TaffyLayoutEngine {
 
         for id in self.transient.drain(..) {
             self.unstretched_styles.remove(&id);
-            self.taffy.remove(id.into()).expect(EXPECT_MESSAGE);
+            remove_node(&mut self.taffy, id);
             self.stats.nodes_freed += 1;
         }
 
@@ -245,7 +263,7 @@ impl TaffyLayoutEngine {
                     return true;
                 }
                 unstretched_styles.remove(&node.id);
-                taffy.remove(node.id.into()).expect(EXPECT_MESSAGE);
+                remove_node(taffy, node.id);
                 *freed += 1;
                 false
             });
