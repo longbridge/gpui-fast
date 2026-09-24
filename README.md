@@ -82,14 +82,21 @@ Each of these is one commit, with its own measurements in the commit message.
   its nodes as it slides.
 - **Shaped text is recoloured without being reshaped**, and text that already
   fits the width it is offered is not reshaped at all.
+- **Text a retained node holds stays in the line layout cache**, so a row that
+  slides onto a neighbour's node finds its text already shaped, instead of every
+  line in view being shaped again each time a slowly scrolled list crosses a
+  row.
 - **A paint operation records where its primitive went rather than copying it**,
   which takes the scene 1.7 MB lighter.
 - **Anything can carry a key.** `.key(id)` gives any element, components
   included, an identity among its siblings without adding a layout box. A
   component's own id never reached that far.
-- **Diagnostics**: `Window::layout_stats()` reports where a frame's time went.
-- **A benchmark that draws through a real window**:
-  `cargo run -p gpui --example grid_frames --release -- 50 50 25`.
+- **Diagnostics**: `Window::layout_stats()` reports where a frame's time went,
+  text shaping included.
+- **Benchmarks that draw through a real window**: a grid whose labels change,
+  `cargo run -p gpui --example grid_frames --release -- 50 50 25`, and a list
+  being scrolled,
+  `cargo run -p gpui --example scroll_frames --release -- uniform oscillate 12 index`.
 
 ### Getting the most out of it
 
