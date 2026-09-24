@@ -1,8 +1,17 @@
-# gpui (standalone)
+# gpui-fast
 
 [GPUI](https://gpui.rs) extracted from the [Zed](https://github.com/zed-industries/zed)
 monorepo as a self-contained cargo workspace, so it can be built and hacked on
-without checking out or compiling the editor.
+without checking out or compiling the editor — and then worked on, mostly in the
+layout engine.
+
+On a grid of 2500 live labels drawn into a real window, a frame costs
+**13.43 ms → 7.51 ms** when the grid is still and 13.76 ms → 11.60 ms when every
+cell changes. `docs/frame-budget.html` is the measurement in full.
+
+The public API is unchanged from upstream: everything added is additive, nothing
+was removed or altered, so code written against upstream gpui compiles here
+untouched.
 
 ## Provenance
 
@@ -43,9 +52,11 @@ cargo run -p gpui --example hello_world
 cargo test -p gpui
 ```
 
-## What was changed from upstream
+## Changes from upstream
 
-Only the workspace plumbing; no crate source was touched.
+### The extraction itself
+
+Workspace plumbing only; no crate source was touched.
 
 - new root `Cargo.toml`: members list narrowed to the 27 extracted crates,
   `[workspace.dependencies]` filtered from 509 entries down to the 146 actually
@@ -55,6 +66,44 @@ Only the workspace plumbing; no crate source was touched.
   `xtask`/collab aliases and the `tokio_unstable` cfg
 - `Cargo.lock` copied from upstream so versions stay pinned
 
+### Since then
+
+Each of these is one commit, with its own measurements in the commit message.
+
+- **Taffy layout nodes are kept between frames.** The engine used to clear its
+  whole tree at the end of every frame, so taffy's per-node layout cache never
+  survived long enough to be used once. Nodes are now keyed by an element's path
+  from the root and released the first frame they go unclaimed in, and every
+  write that would dirty a node is preceded by a comparison against what the
+  previous frame asked for.
+- **An `ElementId` identifies a layout node wherever it is laid out.** List items
+  are laid out only once the list knows how many fit, and used to be keyed by the
+  order they happened to be laid out in. A row carrying an `ElementId` now keeps
+  its nodes as it slides.
+- **Shaped text is recoloured without being reshaped**, and text that already
+  fits the width it is offered is not reshaped at all.
+- **A paint operation records where its primitive went rather than copying it**,
+  which takes the scene 1.7 MB lighter.
+- **Diagnostics**: `Window::layout_stats()` reports where a frame's time went.
+- **A benchmark that draws through a real window**:
+  `cargo run -p gpui --example grid_frames --release -- 50 50 25`.
+
+### Getting the most out of it
+
+One thing is worth doing on your side: give list items an `ElementId` derived
+from the data rather than from the loop index, so a row keeps its identity when
+something is inserted ahead of it.
+
+```rust
+.children(rows.iter().map(|row| render_row(row).id(row.id)))
+```
+
+Inserting at the head of a list, unkeyed against keyed: 200 rows, 7.43 ms →
+1.97 ms; 800 rows, 33.95 ms → 9.98 ms. Rows without an id keep the old
+behaviour — matched by position, rebuilt when something is inserted ahead.
+
 ## License
 
-Apache-2.0, same as upstream. See `LICENSE-APACHE`.
+Apache-2.0, same as upstream — copyright Zed Industries, Inc. See
+`LICENSE-APACHE`. This is a modified fork; the changes are the commits after
+`11a44c4`, and are summarised above.
