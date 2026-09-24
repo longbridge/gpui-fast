@@ -134,6 +134,10 @@ struct RetainedMeasure {
     /// `None` means the caller could not describe its inputs, so the
     /// measurement is treated as stale every frame.
     key: Option<u64>,
+    /// What the measurement closure the node holds was built from, as
+    /// described by the caller. While it matches, the closure is kept rather
+    /// than built again; `None` means it is built again every frame.
+    closure_key: Option<u64>,
     /// Where the caller left the result of that measurement.
     ///
     /// Handed back when the key still matches, because Taffy may then answer
@@ -407,6 +411,7 @@ impl TaffyLayoutEngine {
         rem_size: Pixels,
         scale_factor: f32,
         measure_key: Option<u64>,
+        closure_key: Option<u64>,
         fresh_state: Rc<dyn Any>,
         build_measure: impl FnOnce(&Rc<dyn Any>) -> Box<MeasureFn>,
     ) -> (LayoutId, Rc<dyn Any>) {
@@ -435,6 +440,7 @@ impl TaffyLayoutEngine {
                     &[],
                     Some(RetainedMeasure {
                         key: measure_key,
+                        closure_key,
                         state: fresh_state.clone(),
                     }),
                 );
@@ -461,24 +467,34 @@ impl TaffyLayoutEngine {
             }
             None => false,
         };
+        // The closure the node holds was built around the state being handed
+        // back, from inputs the caller says are unchanged, so it is the closure
+        // that would be built now.
+        let keeps_closure = reusable
+            && closure_key.is_some()
+            && previous
+                .as_ref()
+                .is_some_and(|previous| previous.closure_key == closure_key);
         let state = match (reusable, previous) {
             (true, Some(previous)) => previous.state,
             _ => fresh_state,
         };
 
-        let measure = build_measure(&state);
-        #[cfg(feature = "stacker")]
-        let measure = StackSafe::new(measure);
+        if !keeps_closure {
+            let measure = build_measure(&state);
+            #[cfg(feature = "stacker")]
+            let measure = StackSafe::new(measure);
 
-        // Swapping the closure in place leaves the node clean. Going through
-        // `set_node_context` would dirty it, which is exactly what a reusable
-        // measurement must avoid.
-        if let Some(context) = self.taffy.get_node_context_mut(id.0) {
-            context.measure = measure;
-        } else {
-            self.taffy
-                .set_node_context(id.0, Some(NodeContext { measure }))
-                .expect(EXPECT_MESSAGE);
+            // Swapping the closure in place leaves the node clean. Going
+            // through `set_node_context` would dirty it, which is exactly what
+            // a reusable measurement must avoid.
+            if let Some(context) = self.taffy.get_node_context_mut(id.0) {
+                context.measure = measure;
+            } else {
+                self.taffy
+                    .set_node_context(id.0, Some(NodeContext { measure }))
+                    .expect(EXPECT_MESSAGE);
+            }
         }
 
         if !reusable {
@@ -491,6 +507,7 @@ impl TaffyLayoutEngine {
             .expect("a claimed key is always present")
             .measure = Some(RetainedMeasure {
             key: measure_key,
+            closure_key,
             state: state.clone(),
         });
 

@@ -727,13 +727,24 @@ impl TextLayout {
                 .to_pixels(font_size.into(), window.rem_size()),
         );
 
-        let runs = if let Some(runs) = runs {
-            runs
+        // Plain text is one run, which stays inline: most frames only hash it,
+        // and a measurement that has to keep it is the exception.
+        let runs: SmallVec<[TextRun; 1]> = if let Some(runs) = runs {
+            SmallVec::from_vec(runs)
         } else {
-            vec![text_style.to_run(text.len())]
+            SmallVec::from_buf([text_style.to_run(text.len())])
         };
         let shaping_key = shaping_key(&text, &runs, &text_style, font_size, line_height);
         let decoration_key = decoration_key(&runs);
+        // Everything the measurement below captures that the shaping key does
+        // not: the decorations it shapes with, and the font it truncates with.
+        let closure_key = {
+            let mut hasher = FxHasher::default();
+            shaping_key.hash(&mut hasher);
+            decoration_key.hash(&mut hasher);
+            text_style.font().hash(&mut hasher);
+            hasher.finish()
+        };
         // Truncated text is shaped from a rewritten string whose runs no longer
         // line up with these, so its decorations cannot be replaced in place.
         let truncating = text_style.text_overflow.is_some();
@@ -741,6 +752,7 @@ impl TextLayout {
         let (layout_id, state) = window.request_measured_layout_cached(
             Default::default(),
             shaping_key,
+            closure_key,
             self.0.clone(),
             |state| {
                 // Lines are in here only when the shaping still stands, in
@@ -1544,6 +1556,167 @@ mod tests {
         assert_ne!(
             make_text_unstable_id(false).id,
             make_text_unstable_id(true).id
+        );
+    }
+
+    const PROBED_TEXT: &str = "hello world wide web";
+
+    /// Text in a single color that hands out the layout it ended up with,
+    /// which is the one it adopted from its node rather than the one it
+    /// started the frame with.
+    struct ProbedText {
+        color: Hsla,
+        probe: Rc<RefCell<Option<TextLayout>>>,
+    }
+
+    impl IntoElement for ProbedText {
+        type Element = Self;
+
+        fn into_element(self) -> Self::Element {
+            self
+        }
+    }
+
+    impl Element for ProbedText {
+        type RequestLayoutState = TextLayout;
+        type PrepaintState = ();
+
+        fn id(&self) -> Option<ElementId> {
+            None
+        }
+
+        fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+            None
+        }
+
+        fn request_layout(
+            &mut self,
+            _id: Option<&GlobalElementId>,
+            _inspector_id: Option<&InspectorElementId>,
+            window: &mut Window,
+            cx: &mut App,
+        ) -> (LayoutId, Self::RequestLayoutState) {
+            let run = TextRun {
+                color: self.color,
+                ..window.text_style().to_run(PROBED_TEXT.len())
+            };
+            let mut layout = TextLayout::default();
+            let layout_id = layout.layout(PROBED_TEXT.into(), Some(vec![run]), window, cx);
+            self.probe.replace(Some(layout.clone()));
+            (layout_id, layout)
+        }
+
+        fn prepaint(
+            &mut self,
+            _id: Option<&GlobalElementId>,
+            _inspector_id: Option<&InspectorElementId>,
+            bounds: Bounds<Pixels>,
+            layout: &mut Self::RequestLayoutState,
+            window: &mut Window,
+            _cx: &mut App,
+        ) {
+            layout.prepaint(bounds, PROBED_TEXT, window)
+        }
+
+        fn paint(
+            &mut self,
+            _id: Option<&GlobalElementId>,
+            _inspector_id: Option<&InspectorElementId>,
+            _bounds: Bounds<Pixels>,
+            layout: &mut Self::RequestLayoutState,
+            _: &mut Self::PrepaintState,
+            window: &mut Window,
+            cx: &mut App,
+        ) {
+            layout.paint(PROBED_TEXT, window, cx)
+        }
+    }
+
+    struct ProbedTextView {
+        color: Hsla,
+        width: Pixels,
+        probe: Rc<RefCell<Option<TextLayout>>>,
+    }
+
+    impl crate::Render for ProbedTextView {
+        fn render(&mut self, _: &mut Window, _: &mut crate::Context<Self>) -> impl IntoElement {
+            use crate::{ParentElement as _, Styled as _, div};
+            div().w(self.width).child(ProbedText {
+                color: self.color,
+                probe: self.probe.clone(),
+            })
+        }
+    }
+
+    /// A retained text node keeps the measurement closure it has while nothing
+    /// it was built from changes. A color is one of those things, though it
+    /// changes nothing about the measurement: text that is measured again
+    /// after being recolored, because it was offered a different width, has
+    /// to be shaped in the new color, not the one the kept closure knew.
+    #[test]
+    fn text_measured_again_after_a_recolor_is_shaped_in_the_new_color() {
+        use crate::{AppContext as _, TestAppContext, hsla, px};
+
+        let red = hsla(0., 1., 0.5, 1.);
+        let blue = hsla(0.66, 1., 0.5, 1.);
+        let mut cx = TestAppContext::single();
+        let probe = Rc::new(RefCell::new(None));
+        let window = cx.add_window({
+            let probe = probe.clone();
+            move |_, _| ProbedTextView {
+                color: red,
+                width: px(1000.),
+                probe,
+            }
+        });
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+                .unwrap()
+        };
+        let lines = |probe: &Rc<RefCell<Option<TextLayout>>>| {
+            let layout = probe.borrow().clone().unwrap();
+            let inner = layout.0.borrow();
+            let inner = inner.as_ref().unwrap();
+            let wraps = inner
+                .lines
+                .iter()
+                .map(|line| line.wrap_boundaries.len())
+                .sum::<usize>();
+            let colors = inner
+                .lines
+                .iter()
+                .flat_map(|line| line.decoration_runs.iter().map(|run| run.color))
+                .collect::<Vec<_>>();
+            (wraps, colors)
+        };
+        let change = |cx: &mut TestAppContext, change: &dyn Fn(&mut ProbedTextView)| {
+            window
+                .update(cx, |view, _, cx| {
+                    change(view);
+                    cx.notify();
+                })
+                .unwrap();
+            draw(cx);
+        };
+
+        draw(&mut cx);
+        change(&mut cx, &|view| view.color = blue);
+        change(&mut cx, &|view| view.width = px(30.));
+        let (wraps, colors) = lines(&probe);
+        assert!(wraps > 0, "the narrow box should have made the text wrap");
+        assert!(
+            colors.iter().all(|color| *color == blue),
+            "text shaped after the recolor should be blue, got {colors:?}"
+        );
+
+        // Measured once more with nothing but the width changed, the text
+        // keeps the closure it has, which must still know the new color.
+        change(&mut cx, &|view| view.width = px(1000.));
+        let (wraps, colors) = lines(&probe);
+        assert_eq!(wraps, 0, "the wide box should have unwrapped the text");
+        assert!(
+            colors.iter().all(|color| *color == blue),
+            "text shaped with a kept closure should still be blue, got {colors:?}"
         );
     }
 }

@@ -5041,6 +5041,7 @@ impl Window {
                 // Nothing is known about what this measurement depends on, so it is
                 // re-run every frame.
                 None,
+                None,
                 Rc::new(()) as Rc<dyn Any>,
                 |_| Box::new(measure),
             );
@@ -5059,10 +5060,18 @@ impl Window {
     /// element later paints from. Those live in `state`: when a skipped
     /// measurement means nothing was produced this frame, the state that went
     /// with the previous one is returned instead, and the caller should adopt it.
+    ///
+    /// `closure_key` must cover everything the closure `build_measure` returns
+    /// depends on, including what it captures and `build_measure` itself does.
+    /// While both keys are unchanged the node keeps the closure it already
+    /// has, built around the same state, and `build_measure` is not called.
+    /// A closure that captures anything `measure_key` leaves out, colours for
+    /// example, would otherwise be rebuilt every frame just in case.
     pub fn request_measured_layout_cached<S, F>(
         &mut self,
         style: Style,
         measure_key: u64,
+        closure_key: u64,
         state: Rc<S>,
         build_measure: impl FnOnce(&Rc<S>) -> F,
     ) -> (LayoutId, Rc<S>)
@@ -5086,6 +5095,7 @@ impl Window {
                 rem_size,
                 scale_factor,
                 Some(measure_key),
+                Some(closure_key),
                 state as Rc<dyn Any>,
                 |state| {
                     let state = state
