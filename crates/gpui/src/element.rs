@@ -250,6 +250,8 @@ impl GlobalElementId {
 trait ElementObject {
     fn inner_element(&mut self) -> &mut dyn Any;
 
+    fn element_id(&self) -> Option<ElementId>;
+
     fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId;
 
     fn prepaint(&mut self, window: &mut Window, cx: &mut App);
@@ -594,6 +596,10 @@ where
         &mut self.element
     }
 
+    fn element_id(&self) -> Option<ElementId> {
+        self.element.id()
+    }
+
     #[inline]
     fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
         Drawable::request_layout(self, window, cx)
@@ -672,6 +678,33 @@ impl AnyElement {
         cx: &mut App,
     ) -> Size<Pixels> {
         self.0.layout_as_root(available_space, window, cx)
+    }
+
+    /// Lays this element out as the item at `index` of a list, the way
+    /// [`Self::layout_as_root`] does.
+    ///
+    /// A list lays out only the items in view, so an item without an
+    /// [`ElementId`] is otherwise matched to last frame's nodes by where it
+    /// comes among the items laid out this frame, and scrolling by a single
+    /// row hands every item the nodes of its neighbour. Keyed by its index
+    /// instead, an item keeps its nodes while it stays in view. Only the
+    /// layout is keyed: element state, which nothing here claims to identify,
+    /// is left as it was. An item with an id of its own keeps being matched by
+    /// that, so one keyed by its data still keeps its nodes when items are
+    /// inserted ahead of it.
+    pub(crate) fn layout_as_list_item(
+        &mut self,
+        index: usize,
+        available_space: Size<AvailableSpace>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Size<Pixels> {
+        if self.0.element_id().is_some() {
+            return self.layout_as_root(available_space, window, cx);
+        }
+        window.with_list_item_layout_key(index, |window| {
+            self.layout_as_root(available_space, window, cx)
+        })
     }
 
     /// Prepaints this element at the given absolute origin.

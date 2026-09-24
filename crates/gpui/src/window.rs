@@ -5185,6 +5185,26 @@ impl Window {
         self.layout_key_stack.pop();
     }
 
+    /// Lays out whatever `f` lays out under a step of the layout key path
+    /// that names the list item at `index`, as though an element identified by
+    /// it enclosed them. No such element exists, so the element id stack, and
+    /// the element state keyed by it, are untouched. See
+    /// [`AnyElement::layout_as_list_item`].
+    pub(crate) fn with_list_item_layout_key<R>(
+        &mut self,
+        index: usize,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        // Named so that it cannot stand for an item that was given the same
+        // index as its id.
+        let key =
+            ElementId::NamedInteger(SharedString::new_static("gpui::list_item"), index as u64);
+        self.push_layout_key(Some(&key));
+        let result = f(self);
+        self.pop_layout_key();
+        result
+    }
+
     /// Counters describing the work the layout engine has performed since the
     /// last call to [`Window::reset_layout_stats`].
     ///
@@ -7750,8 +7770,8 @@ mod tests {
         LayoutStats, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
         Pixels, PlatformInput, Point, Render, RenderOnce, RequestFrameOptions, SharedString,
         StatefulInteractiveElement as _, Styled, TestAppContext, TouchDragEvent, TouchEvent,
-        TouchId, TouchPhase, Window, WindowAppearance, WindowHandle, WindowOptions, canvas, div,
-        hsla, point, px, size,
+        TouchId, TouchPhase, UniformListScrollHandle, Window, WindowAppearance, WindowHandle,
+        WindowOptions, canvas, div, hsla, point, px, size, uniform_list,
     };
 
     /// Visibility transitions reach observers exactly once each, with the new
@@ -9320,6 +9340,99 @@ mod tests {
         };
         assert_eq!(node_count(&mut cx, plain), node_count(&mut cx, keyed));
         assert_eq!(*plain_probes.borrow(), *keyed_probes.borrow());
+    }
+
+    /// Rows of a uniform list five rows tall, scrolled to `scroll_top`.
+    struct ScrolledRows {
+        row_ids: Vec<u64>,
+        keyed: bool,
+        scroll_top: Pixels,
+        scroll: UniformListScrollHandle,
+    }
+
+    impl Render for ScrolledRows {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.scroll
+                .0
+                .borrow()
+                .base_handle
+                .set_offset(point(px(0.), -self.scroll_top));
+            let row_ids = self.row_ids.clone();
+            let keyed = self.keyed;
+            div().w(px(300.)).h(px(100.)).child(
+                uniform_list("rows", row_ids.len(), move |range, _, _| {
+                    range
+                        .map(|ix| {
+                            // Rows have to be distinguishable for a row landing
+                            // on a neighbour's node to show.
+                            let id = row_ids[ix];
+                            let row = div().w(px(200.) + px((id % 5) as f32 * 10.)).h(px(20.));
+                            if keyed {
+                                row.id(("row", id)).into_any_element()
+                            } else {
+                                row.into_any_element()
+                            }
+                        })
+                        .collect()
+                })
+                .track_scroll(&self.scroll)
+                .size_full(),
+            )
+        }
+    }
+
+    fn scrolled_rows_window(cx: &mut TestAppContext, keyed: bool) -> WindowHandle<ScrolledRows> {
+        let window = cx.add_window(move |_, _| ScrolledRows {
+            row_ids: (0..50).collect(),
+            keyed,
+            scroll_top: px(0.),
+            scroll: UniformListScrollHandle::new(),
+        });
+        draw_frame(cx, window.into());
+        draw_frame(cx, window.into());
+        window
+    }
+
+    /// A list lays out only the items in view, so an item without an id was
+    /// matched by where it came among them, and a list scrolled by one row
+    /// handed every item its neighbour's nodes. Matched by its index, an item
+    /// keeps its nodes while it stays in view.
+    #[test]
+    fn unidentified_list_items_keep_their_nodes_when_the_list_scrolls() {
+        let mut cx = TestAppContext::single();
+        let window = scrolled_rows_window(&mut cx, false);
+
+        let scrolled = change_and_draw(&mut cx, window, |view| view.scroll_top = px(20.));
+        assert_eq!(
+            scrolled.style_writes, 0,
+            "rows still in view should keep the node they styled: {scrolled:?}"
+        );
+        assert_eq!(
+            scrolled.nodes_created, 1,
+            "only the row scrolling in should need a node: {scrolled:?}"
+        );
+    }
+
+    /// Keying list items by index must not come between an item and an id of
+    /// its own: an item identified by its data keeps its nodes when an item
+    /// is inserted ahead of it, which its index could not do.
+    #[test]
+    fn identified_list_items_keep_their_nodes_when_one_is_inserted_ahead() {
+        let mut cx = TestAppContext::single();
+        let window = scrolled_rows_window(&mut cx, true);
+
+        let inserted = change_and_draw(&mut cx, window, |view| view.row_ids.insert(0, 100));
+        assert_eq!(
+            inserted.style_writes, 0,
+            "identified rows should keep the node they styled: {inserted:?}"
+        );
+        // The inserted row needs a node, and so does the first row, which the
+        // list lays out on its own to find the height of every row. The five
+        // rows in view keeping theirs is what an index would have broken.
+        assert!(
+            inserted.nodes_created < 5,
+            "identified rows should not be rebuilt when one is inserted ahead: {inserted:?}"
+        );
     }
 
     /// Shaping is counted only when the text cache cannot answer, so a frame

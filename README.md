@@ -88,6 +88,9 @@ Each of these is one commit, with its own measurements in the commit message.
   row.
 - **A paint operation records where its primitive went rather than copying it**,
   which takes the scene 1.7 MB lighter.
+- **List items without an id are matched by their index**, so a scrolled
+  `uniform_list` or `list` keeps the layout of every row still in view whether
+  or not its rows are identified.
 - **Anything can carry a key.** `.key(id)` gives any element, components
   included, an identity among its siblings without adding a layout box. A
   component's own id never reached that far.
@@ -117,6 +120,8 @@ on anything and adds nothing to the layout.
 Inserting at the head of a list, unkeyed against keyed: 200 rows, 7.43 ms →
 1.97 ms; 800 rows, 33.95 ms → 9.98 ms. Rows without an id keep the old
 behaviour — matched by position, rebuilt when something is inserted ahead.
+In a `uniform_list` or `list` they are matched by index instead, which holds
+while the list scrolls but not when something is inserted ahead.
 
 ## License
 

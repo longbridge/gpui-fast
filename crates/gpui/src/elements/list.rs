@@ -1012,7 +1012,7 @@ impl StateInner {
         for (ix, item) in cursor.enumerate() {
             let size = item.size().unwrap_or_else(|| {
                 let mut element = render_item(ix, window, cx);
-                element.layout_as_root(available_item_space, window, cx)
+                element.layout_as_list_item(ix, available_item_space, window, cx)
             });
 
             measured_items.push(ListItem::Measured {
@@ -1074,7 +1074,8 @@ impl StateInner {
             if visible_height < available_height || size.is_none() {
                 let item_index = scroll_top.item_ix + ix;
                 let mut element = render_item(item_index, window, cx);
-                let element_size = element.layout_as_root(available_item_space, window, cx);
+                let element_size =
+                    element.layout_as_list_item(item_index, available_item_space, window, cx);
                 size = Some(element_size);
 
                 // If there's a pending scroll adjustment for the scroll-top
@@ -1135,7 +1136,8 @@ impl StateInner {
                 if let Some(item) = cursor.item() {
                     let item_index = cursor.start().0;
                     let mut element = render_item(item_index, window, cx);
-                    let element_size = element.layout_as_root(available_item_space, window, cx);
+                    let element_size =
+                        element.layout_as_list_item(item_index, available_item_space, window, cx);
                     let focus_handle = item.focus_handle();
                     rendered_height += element_size.height;
                     measured_items.push_front(ListItem::Measured {
@@ -1183,8 +1185,9 @@ impl StateInner {
                 let size = if let ListItem::Measured { size, .. } = item {
                     *size
                 } else {
-                    let mut element = render_item(cursor.start().0, window, cx);
-                    element.layout_as_root(available_item_space, window, cx)
+                    let item_index = cursor.start().0;
+                    let mut element = render_item(item_index, window, cx);
+                    element.layout_as_list_item(item_index, available_item_space, window, cx)
                 };
 
                 leading_overdraw += size.height;
@@ -1228,8 +1231,9 @@ impl StateInner {
             while let Some(item) = cursor.item() {
                 if item.contains_focused(window, cx) {
                     let item_index = cursor.start().0;
-                    let mut element = render_item(cursor.start().0, window, cx);
-                    let size = element.layout_as_root(available_item_space, window, cx);
+                    let mut element = render_item(item_index, window, cx);
+                    let size =
+                        element.layout_as_list_item(item_index, available_item_space, window, cx);
                     item_layouts.push_back(ItemLayout {
                         index: item_index,
                         element,
@@ -1307,12 +1311,18 @@ impl StateInner {
                                         break;
                                     };
                                     let size = prev_item.size().unwrap_or_else(|| {
-                                        let mut element = render_item(cursor.start().0, window, cx);
+                                        let item_index = cursor.start().0;
+                                        let mut element = render_item(item_index, window, cx);
                                         let item_available_size = size(
                                             bounds.size.width.into(),
                                             AvailableSpace::MinContent,
                                         );
-                                        element.layout_as_root(item_available_size, window, cx)
+                                        element.layout_as_list_item(
+                                            item_index,
+                                            item_available_size,
+                                            window,
+                                            cx,
+                                        )
                                     });
                                     item_ix = cursor.start().0;
                                     offset_in_item += size.height;
@@ -1337,10 +1347,16 @@ impl StateInner {
                                 let Some(item) = cursor.item() else { break };
 
                                 let size = item.size().unwrap_or_else(|| {
-                                    let mut item = render_item(cursor.start().0, window, cx);
+                                    let item_index = cursor.start().0;
+                                    let mut item = render_item(item_index, window, cx);
                                     let item_available_size =
                                         size(bounds.size.width.into(), AvailableSpace::MinContent);
-                                    item.layout_as_root(item_available_size, window, cx)
+                                    item.layout_as_list_item(
+                                        item_index,
+                                        item_available_size,
+                                        window,
+                                        cx,
+                                    )
                                 });
                                 height -= size.height;
                             }
