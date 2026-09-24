@@ -6,11 +6,13 @@ use crate::{
         round_to_device_pixel,
     },
 };
-use collections::{FxHashMap, FxHashSet};
+use collections::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::SmallVec;
 use std::{
     any::Any,
     fmt::Debug,
+    hash::{Hash as _, Hasher as _},
+    mem,
     ops::Range,
     rc::Rc,
     time::{Duration, Instant},
@@ -115,6 +117,10 @@ struct RetainedNode {
     children: SmallVec<[LayoutId; 8]>,
     /// Present while the node measures its own size.
     measure: Option<RetainedMeasure>,
+    /// [`layout_fingerprint`] of the style the node was last asked for. While
+    /// the request is the same, converting it to a Taffy style and comparing
+    /// that against the node's is work with only one possible outcome.
+    style_fingerprint: u64,
 }
 
 /// What [`TaffyLayoutEngine::claim`] found for an element's key.
@@ -281,6 +287,7 @@ impl TaffyLayoutEngine {
         id: LayoutId,
         children: &[LayoutId],
         measure: Option<RetainedMeasure>,
+        style_fingerprint: u64,
     ) {
         let Some(key) = key else {
             self.transient.push(id);
@@ -293,9 +300,44 @@ impl TaffyLayoutEngine {
                 claimed_in_frame: self.frame,
                 children: SmallVec::from_slice(children),
                 measure,
+                style_fingerprint,
             },
         );
         self.claimed_this_frame += 1;
+    }
+
+    /// Brings a retained node's style up to date with `style`, converting and
+    /// comparing it only when it is not the request the node was last given.
+    fn apply_requested_style(
+        &mut self,
+        key: u64,
+        id: LayoutId,
+        style: &Style,
+        rem_size: Pixels,
+        scale_factor: f32,
+    ) {
+        let fingerprint = layout_fingerprint(style, rem_size, scale_factor);
+        let node = self
+            .retained
+            .get_mut(&key)
+            .expect("a claimed key is always present");
+        if node.style_fingerprint == fingerprint {
+            self.stats.style_compares += 1;
+            // A field `layout_fingerprint` fails to read would leave the node
+            // with a stale style whenever only that field changed, and nothing
+            // would say so; debug builds compare in full to catch one.
+            debug_assert!(
+                self.unstretched_styles
+                    .get(&id)
+                    .unwrap_or_else(|| self.taffy.style(id.0).expect(EXPECT_MESSAGE))
+                    == &style.to_taffy(rem_size, scale_factor),
+                "layout_fingerprint matched a style that converts differently; \
+                 it has to read every field to_taffy does"
+            );
+            return;
+        }
+        node.style_fingerprint = fingerprint;
+        self.apply_style(id, style.to_taffy(rem_size, scale_factor));
     }
 
     /// Writes `style` to a node, but only if it differs from what the node was
@@ -348,11 +390,9 @@ impl TaffyLayoutEngine {
         scale_factor: f32,
         children: &[LayoutId],
     ) -> LayoutId {
-        let taffy_style = style.to_taffy(rem_size, scale_factor);
-
         let key = match self.claim(key) {
             Claim::Reused(key, id) => {
-                self.apply_style(id, taffy_style);
+                self.apply_requested_style(key, id, &style, rem_size, scale_factor);
                 self.apply_children(key, id, children);
                 // A node that measured itself on an earlier frame no longer does.
                 if self
@@ -375,6 +415,8 @@ impl TaffyLayoutEngine {
         };
 
         self.stats.nodes_created += 1;
+        let style_fingerprint = layout_fingerprint(&style, rem_size, scale_factor);
+        let taffy_style = style.to_taffy(rem_size, scale_factor);
         let id: LayoutId = if children.is_empty() {
             self.taffy
                 .new_leaf(taffy_style)
@@ -387,7 +429,7 @@ impl TaffyLayoutEngine {
                 .expect(EXPECT_MESSAGE)
                 .into()
         };
-        self.retain(key, id, children, None);
+        self.retain(key, id, children, None, style_fingerprint);
         id
     }
 
@@ -415,8 +457,6 @@ impl TaffyLayoutEngine {
         fresh_state: Rc<dyn Any>,
         build_measure: impl FnOnce(&Rc<dyn Any>) -> Box<MeasureFn>,
     ) -> (LayoutId, Rc<dyn Any>) {
-        let taffy_style = style.to_taffy(rem_size, scale_factor);
-
         let (key, id) = match self.claim(key) {
             Claim::Reused(key, id) => (key, id),
             claim => {
@@ -427,6 +467,8 @@ impl TaffyLayoutEngine {
                 let measure = build_measure(&fresh_state);
                 #[cfg(feature = "stacker")]
                 let measure = StackSafe::new(measure);
+                let style_fingerprint = layout_fingerprint(&style, rem_size, scale_factor);
+                let taffy_style = style.to_taffy(rem_size, scale_factor);
                 self.stats.nodes_created += 1;
                 self.stats.measure_rebinds += 1;
                 let id: LayoutId = self
@@ -443,12 +485,13 @@ impl TaffyLayoutEngine {
                         closure_key,
                         state: fresh_state.clone(),
                     }),
+                    style_fingerprint,
                 );
                 return (id, fresh_state);
             }
         };
 
-        self.apply_style(id, taffy_style);
+        self.apply_requested_style(key, id, &style, rem_size, scale_factor);
         self.apply_children(key, id, &[]);
 
         // The previous measurement still stands only if the caller described
@@ -872,6 +915,124 @@ trait ToTaffy<Output> {
     fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> Output;
 }
 
+/// A hash of everything in `style` that its conversion to a Taffy style reads,
+/// and of what that conversion resolves lengths against.
+///
+/// It has to read exactly the fields [`ToTaffy`] does: a field it misses leaves
+/// a retained node with a stale style whenever only that field changes. Debug
+/// builds check every match against a full conversion.
+fn layout_fingerprint(style: &Style, rem_size: Pixels, scale_factor: f32) -> u64 {
+    fn absolute(hasher: &mut FxHasher, length: &AbsoluteLength) {
+        match length {
+            AbsoluteLength::Pixels(pixels) => (0u8, pixels.0.to_bits()).hash(hasher),
+            AbsoluteLength::Rems(rems) => (1u8, rems.0.to_bits()).hash(hasher),
+        }
+    }
+    fn definite(hasher: &mut FxHasher, length: &DefiniteLength) {
+        match length {
+            DefiniteLength::Absolute(length) => {
+                0u8.hash(hasher);
+                absolute(hasher, length);
+            }
+            DefiniteLength::Fraction(fraction) => (1u8, fraction.to_bits()).hash(hasher),
+        }
+    }
+    fn length(hasher: &mut FxHasher, length: &Length) {
+        match length {
+            Length::Definite(length) => {
+                0u8.hash(hasher);
+                definite(hasher, length);
+            }
+            Length::Auto => 1u8.hash(hasher),
+        }
+    }
+    fn edges<T: Clone + Debug + Default + PartialEq>(
+        hasher: &mut FxHasher,
+        edges: &Edges<T>,
+        each: fn(&mut FxHasher, &T),
+    ) {
+        each(hasher, &edges.top);
+        each(hasher, &edges.right);
+        each(hasher, &edges.bottom);
+        each(hasher, &edges.left);
+    }
+    fn sizes<T: Clone + Debug + Default + PartialEq>(
+        hasher: &mut FxHasher,
+        size: &Size<T>,
+        each: fn(&mut FxHasher, &T),
+    ) {
+        each(hasher, &size.width);
+        each(hasher, &size.height);
+    }
+    fn placement(hasher: &mut FxHasher, placement: &crate::GridPlacement) {
+        match placement {
+            crate::GridPlacement::Line(line) => (0u8, *line).hash(hasher),
+            crate::GridPlacement::Span(span) => (1u8, *span).hash(hasher),
+            crate::GridPlacement::Auto => 2u8.hash(hasher),
+        }
+    }
+    fn template(hasher: &mut FxHasher, template: &Option<GridTemplate>) {
+        match template {
+            Some(template) => {
+                (1u8, template.repeat).hash(hasher);
+                mem::discriminant(&template.min_size).hash(hasher);
+            }
+            None => 0u8.hash(hasher),
+        }
+    }
+
+    let mut hasher = FxHasher::default();
+    let hasher = &mut hasher;
+    rem_size.0.to_bits().hash(hasher);
+    scale_factor.to_bits().hash(hasher);
+
+    mem::discriminant(&style.display).hash(hasher);
+    mem::discriminant(&style.overflow.x).hash(hasher);
+    mem::discriminant(&style.overflow.y).hash(hasher);
+    absolute(hasher, &style.scrollbar_width);
+    mem::discriminant(&style.position).hash(hasher);
+    edges(hasher, &style.inset, length);
+    sizes(hasher, &style.size, length);
+    sizes(hasher, &style.min_size, length);
+    sizes(hasher, &style.max_size, length);
+    style.aspect_ratio.map(f32::to_bits).hash(hasher);
+    edges(hasher, &style.margin, length);
+    edges(hasher, &style.padding, definite);
+    edges(hasher, &style.border_widths, absolute);
+    style
+        .align_items
+        .map(|x| mem::discriminant(&x))
+        .hash(hasher);
+    style.align_self.map(|x| mem::discriminant(&x)).hash(hasher);
+    style
+        .align_content
+        .map(|x| mem::discriminant(&x))
+        .hash(hasher);
+    style
+        .justify_content
+        .map(|x| mem::discriminant(&x))
+        .hash(hasher);
+    sizes(hasher, &style.gap, definite);
+    mem::discriminant(&style.flex_direction).hash(hasher);
+    mem::discriminant(&style.flex_wrap).hash(hasher);
+    length(hasher, &style.flex_basis);
+    style.flex_grow.to_bits().hash(hasher);
+    style.flex_shrink.to_bits().hash(hasher);
+    template(hasher, &style.grid_rows);
+    template(hasher, &style.grid_cols);
+    match &style.grid_location {
+        Some(location) => {
+            1u8.hash(hasher);
+            for line in [&location.row, &location.column] {
+                placement(hasher, &line.start);
+                placement(hasher, &line.end);
+            }
+        }
+        None => 0u8.hash(hasher),
+    }
+    hasher.finish()
+}
+
 impl ToTaffy<taffy::style::Style> for Style {
     fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> taffy::style::Style {
         use taffy::style_helpers::{fr, length, minmax, repeat};
@@ -1181,6 +1342,129 @@ impl From<Size<Pixels>> for Size<AvailableSpace> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every field the conversion to a Taffy style reads has to reach the
+    /// fingerprint too: a change the fingerprint cannot see is one a retained
+    /// node never receives. Each case changes one field that the conversion
+    /// reads, and both have to notice.
+    #[test]
+    fn the_layout_fingerprint_sees_every_field_the_taffy_style_is_made_from() {
+        use crate::{
+            AlignContent, AlignItems, Display, FlexDirection, FlexWrap, GridLocation,
+            GridPlacement, GridTemplateMinSize, Overflow, Position, px, relative, rems,
+        };
+
+        let (rem_size, scale_factor) = (px(16.), 2.);
+        let base = Style::default();
+        let cases: Vec<(&str, Box<dyn Fn(&mut Style)>)> = vec![
+            ("display", Box::new(|s| s.display = Display::Grid)),
+            ("overflow.x", Box::new(|s| s.overflow.x = Overflow::Hidden)),
+            ("overflow.y", Box::new(|s| s.overflow.y = Overflow::Scroll)),
+            (
+                "scrollbar_width",
+                Box::new(|s| s.scrollbar_width = px(7.).into()),
+            ),
+            ("position", Box::new(|s| s.position = Position::Absolute)),
+            ("inset", Box::new(|s| s.inset.left = px(3.).into())),
+            ("size", Box::new(|s| s.size.width = px(40.).into())),
+            ("size in rems", Box::new(|s| s.size.width = rems(2.).into())),
+            (
+                "size as a fraction",
+                Box::new(|s| s.size.width = relative(0.5).into()),
+            ),
+            ("min_size", Box::new(|s| s.min_size.height = px(5.).into())),
+            ("max_size", Box::new(|s| s.max_size.width = px(90.).into())),
+            ("aspect_ratio", Box::new(|s| s.aspect_ratio = Some(1.5))),
+            ("margin", Box::new(|s| s.margin.top = px(2.).into())),
+            ("padding", Box::new(|s| s.padding.bottom = px(4.).into())),
+            (
+                "border_widths",
+                Box::new(|s| s.border_widths.right = px(1.).into()),
+            ),
+            (
+                "align_items",
+                Box::new(|s| s.align_items = Some(AlignItems::Center)),
+            ),
+            (
+                "align_self",
+                Box::new(|s| s.align_self = Some(AlignItems::End)),
+            ),
+            (
+                "align_content",
+                Box::new(|s| s.align_content = Some(AlignContent::End)),
+            ),
+            (
+                "justify_content",
+                Box::new(|s| s.justify_content = Some(AlignContent::Center)),
+            ),
+            ("gap", Box::new(|s| s.gap.width = px(6.).into())),
+            (
+                "flex_direction",
+                Box::new(|s| s.flex_direction = FlexDirection::Column),
+            ),
+            ("flex_wrap", Box::new(|s| s.flex_wrap = FlexWrap::Wrap)),
+            ("flex_basis", Box::new(|s| s.flex_basis = px(12.).into())),
+            ("flex_grow", Box::new(|s| s.flex_grow = 1.)),
+            ("flex_shrink", Box::new(|s| s.flex_shrink = 0.)),
+            (
+                "grid_rows",
+                Box::new(|s| {
+                    s.grid_rows = Some(GridTemplate {
+                        repeat: 3,
+                        min_size: GridTemplateMinSize::Zero,
+                    })
+                }),
+            ),
+            (
+                "grid_cols",
+                Box::new(|s| {
+                    s.grid_cols = Some(GridTemplate {
+                        repeat: 2,
+                        min_size: GridTemplateMinSize::MinContent,
+                    })
+                }),
+            ),
+            (
+                "grid_location",
+                Box::new(|s| {
+                    s.grid_location = Some(GridLocation {
+                        row: GridPlacement::Line(1)..GridPlacement::Span(2),
+                        column: GridPlacement::Auto..GridPlacement::Auto,
+                    })
+                }),
+            ),
+        ];
+
+        let base_fingerprint = layout_fingerprint(&base, rem_size, scale_factor);
+        let base_taffy = base.to_taffy(rem_size, scale_factor);
+        for (field, change) in &cases {
+            let mut style = base.clone();
+            change(&mut style);
+            assert_ne!(
+                style.to_taffy(rem_size, scale_factor),
+                base_taffy,
+                "changing {field} should change the Taffy style, or this case tests nothing"
+            );
+            assert_ne!(
+                layout_fingerprint(&style, rem_size, scale_factor),
+                base_fingerprint,
+                "changing {field} changes the Taffy style but not the fingerprint"
+            );
+        }
+
+        // Lengths are resolved against these, so they are inputs as much as
+        // the style is.
+        let mut in_rems = base.clone();
+        in_rems.size.width = rems(2.).into();
+        assert_ne!(
+            layout_fingerprint(&in_rems, rem_size, scale_factor),
+            layout_fingerprint(&in_rems, px(20.), scale_factor)
+        );
+        assert_ne!(
+            layout_fingerprint(&in_rems, rem_size, scale_factor),
+            layout_fingerprint(&in_rems, rem_size, 1.)
+        );
+    }
 
     #[test]
     fn border_widths_to_taffy_use_stroke_snapping() {
