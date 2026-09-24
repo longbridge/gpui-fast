@@ -9215,6 +9215,69 @@ mod tests {
         );
     }
 
+    /// Rows that each show text of their own, matched to their nodes by
+    /// position.
+    struct ShiftingRows {
+        row_ids: Vec<u64>,
+    }
+
+    impl Render for ShiftingRows {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .flex()
+                .flex_col()
+                .children(self.row_ids.iter().map(|id| {
+                    div()
+                        .h(px(20.))
+                        .child(SharedString::from(format!("row {id}")))
+                }))
+        }
+    }
+
+    /// A retained text node answers from the lines it already holds and never
+    /// asks the line layout cache for them. Those lines still have to stay in
+    /// the cache: when unidentified rows shift by one, every row lands on a
+    /// neighbour's node, and the text it brings was on screen all along.
+    #[test]
+    fn text_kept_by_its_node_is_not_reshaped_when_rows_shift_onto_other_nodes() {
+        let mut cx = TestAppContext::single();
+        let window = cx.add_window(|_, _| ShiftingRows {
+            row_ids: (0..8).collect(),
+        });
+        let handle: AnyWindowHandle = window.into();
+        // Enough frames for anything only the first frame asked the cache for
+        // to have been forgotten, had nobody asked since.
+        for _ in 0..3 {
+            draw_frame(&mut cx, handle);
+        }
+
+        // Counted from before the change, which can draw a frame of its own;
+        // see `change_and_draw`.
+        cx.update_window(handle, |_, window, _| window.reset_layout_stats())
+            .unwrap();
+        window
+            .update(&mut cx, |view, _, cx| {
+                view.row_ids.remove(0);
+                cx.notify();
+            })
+            .unwrap();
+        let shifted = cx
+            .update_window(handle, |_, window, cx| {
+                window.draw(cx).clear(cx);
+                window.layout_stats()
+            })
+            .unwrap();
+
+        assert!(
+            shifted.style_writes > 0 || shifted.measure_calls > 0,
+            "rows should have moved onto other nodes for this to test anything: {shifted:?}"
+        );
+        assert_eq!(
+            shifted.lines_shaped, 0,
+            "every row's text was on screen the frame before and should come from the cache: {shifted:?}"
+        );
+    }
+
     /// The window root is the one node whose style Taffy does not hold as the
     /// element wrote it, because an `auto` size is rewritten to fill the
     /// viewport. Retaining that node means the rewrite has to stay recoverable
