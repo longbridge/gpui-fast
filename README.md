@@ -84,19 +84,28 @@ Each of these is one commit, with its own measurements in the commit message.
   fits the width it is offered is not reshaped at all.
 - **A paint operation records where its primitive went rather than copying it**,
   which takes the scene 1.7 MB lighter.
+- **Anything can carry a key.** `.key(id)` gives any element, components
+  included, an identity among its siblings without adding a layout box. A
+  component's own id never reached that far.
 - **Diagnostics**: `Window::layout_stats()` reports where a frame's time went.
 - **A benchmark that draws through a real window**:
   `cargo run -p gpui --example grid_frames --release -- 50 50 25`.
 
 ### Getting the most out of it
 
-One thing is worth doing on your side: give list items an `ElementId` derived
-from the data rather than from the loop index, so a row keeps its identity when
-something is inserted ahead of it.
+One thing is worth doing on your side: key list items by the data rather than
+by the loop index, so a row keeps its identity when something is inserted ahead
+of it.
 
 ```rust
-.children(rows.iter().map(|row| render_row(row).id(row.id)))
+.children(rows.iter().map(|row| render_row(row).key(row.id)))
 ```
+
+The key has to be on the item itself, the element placed directly in the list.
+A `div().id(..)` there works as well, but a component built with `RenderOnce`
+reports no id of its own, whatever the element it renders into has, so a list
+of components is matched by position unless each one is keyed. `.key()` works
+on anything and adds nothing to the layout.
 
 Inserting at the head of a list, unkeyed against keyed: 200 rows, 7.43 ms →
 1.97 ms; 800 rows, 33.95 ms → 9.98 ms. Rows without an id keep the old

@@ -33,7 +33,7 @@
 
 use crate::{
     A11ySubtreeBuilder, App, ArenaBox, AvailableSpace, Bounds, Context, DispatchNodeId, ElementId,
-    FocusHandle, InspectorElementId, LayoutId, Pixels, Point, Size, Style, Window,
+    FocusHandle, InspectorElementId, Keyed, LayoutId, Pixels, Point, Size, Style, Window,
     util::FluentBuilder, window::with_element_arena,
 };
 use derive_more::{Deref, DerefMut};
@@ -153,6 +153,20 @@ pub trait IntoElement: Sized {
     /// Convert self into a dynamically-typed [`AnyElement`].
     fn into_any_element(self) -> AnyElement {
         self.into_element().into_any()
+    }
+
+    /// Give this element a key that identifies it among its siblings, so the
+    /// layout it had last frame is found again wherever it is drawn this one.
+    ///
+    /// Put it on each item of a list, keyed by the item rather than by its
+    /// index: a row that keeps its key keeps its layout when rows are
+    /// inserted or removed ahead of it. Unlike [`.id()`], it works on anything,
+    /// including components built with [`RenderOnce`], whose own id never
+    /// reaches their siblings. It adds no box to the layout. See [`Keyed`].
+    ///
+    /// [`.id()`]: crate::InteractiveElement::id
+    fn key(self, key: impl Into<ElementId>) -> Keyed {
+        Keyed::new(key.into(), self.into_any_element())
     }
 }
 

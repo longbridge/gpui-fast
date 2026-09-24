@@ -7744,11 +7744,11 @@ mod tests {
     };
 
     use crate::{
-        AnyWindowHandle, AppContext as _, Bounds, Context, DispatchPhase, DragMoveEvent, Empty,
-        ExternalDragPayload, ExternalPaths, FileDragPaths, FileDropEvent, FocusHandle, Hsla,
+        AnyWindowHandle, App, AppContext as _, Bounds, Context, DispatchPhase, DragMoveEvent,
+        Empty, ExternalDragPayload, ExternalPaths, FileDragPaths, FileDropEvent, FocusHandle, Hsla,
         InputEvent as _, InteractiveElement as _, IntoElement, KeyDownEvent, Keystroke,
         LayoutStats, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
-        Pixels, PlatformInput, Point, Render, RequestFrameOptions, SharedString,
+        Pixels, PlatformInput, Point, Render, RenderOnce, RequestFrameOptions, SharedString,
         StatefulInteractiveElement as _, Styled, TestAppContext, TouchDragEvent, TouchEvent,
         TouchId, TouchPhase, Window, WindowAppearance, WindowHandle, WindowOptions, canvas, div,
         hsla, point, px, size,
@@ -8976,10 +8976,10 @@ mod tests {
     /// here, so the counters start before the change rather than before the
     /// draw; otherwise the work the change caused would be measured a frame too
     /// late, once the tree had already settled.
-    fn change_and_draw(
+    fn change_and_draw<V: Render>(
         cx: &mut TestAppContext,
-        window: WindowHandle<RetainedLayoutView>,
-        change: impl FnOnce(&mut RetainedLayoutView),
+        window: WindowHandle<V>,
+        change: impl FnOnce(&mut V),
     ) -> LayoutStats {
         cx.update_window(window.into(), |_, window, _| window.reset_layout_stats())
             .unwrap();
@@ -9190,6 +9190,136 @@ mod tests {
              wrote {} against {} for positional rows",
             keyed.style_writes, positional.style_writes
         );
+    }
+
+    /// A row built as a component, which is what lists are mostly made of. It
+    /// identifies the element it renders into, which is as far as a
+    /// component's own id reaches: the component itself reports none.
+    #[derive(IntoElement)]
+    struct ComponentRow {
+        id: u64,
+        probes: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+    }
+
+    impl RenderOnce for ComponentRow {
+        fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+            let probes = self.probes;
+            div()
+                .id(("row", self.id))
+                .flex()
+                .flex_row()
+                .w(px(200.) + px((self.id % 5) as f32 * 10.))
+                .h(px(20.))
+                .child("ab")
+                .child(
+                    canvas(
+                        move |bounds, _, _| probes.borrow_mut().push(bounds),
+                        |_, _, _, _| {},
+                    )
+                    .flex_1()
+                    .h_full(),
+                )
+        }
+    }
+
+    /// A list of [`ComponentRow`]s, each keyed by its id when `keyed` is set.
+    struct ComponentRows {
+        row_ids: Vec<u64>,
+        keyed: bool,
+        probes: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+    }
+
+    impl Render for ComponentRows {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.probes.borrow_mut().clear();
+            let keyed = self.keyed;
+            let probes = self.probes.clone();
+            div()
+                .flex()
+                .flex_col()
+                .children(self.row_ids.iter().map(move |&id| {
+                    let row = ComponentRow {
+                        id,
+                        probes: probes.clone(),
+                    };
+                    if keyed {
+                        row.key(("row", id)).into_any_element()
+                    } else {
+                        row.into_any_element()
+                    }
+                }))
+        }
+    }
+
+    fn component_rows_window(
+        cx: &mut TestAppContext,
+        keyed: bool,
+    ) -> (
+        WindowHandle<ComponentRows>,
+        Rc<RefCell<Vec<Bounds<Pixels>>>>,
+    ) {
+        let probes = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let probes = probes.clone();
+            move |_, _| ComponentRows {
+                row_ids: (0..4).collect(),
+                keyed,
+                probes,
+            }
+        });
+        draw_frame(cx, window.into());
+        (window, probes)
+    }
+
+    /// A component's id stops at the element it renders into, so a list of
+    /// components is matched by position however its rows are identified
+    /// inside. A key is what reaches the list.
+    #[test]
+    fn components_given_a_key_keep_their_nodes_when_one_is_inserted_ahead() {
+        fn insert_at_head(cx: &mut TestAppContext, keyed: bool) -> LayoutStats {
+            let (window, probes) = component_rows_window(cx, keyed);
+            let stats = change_and_draw(cx, window, |view| view.row_ids.insert(0, 100));
+            assert_eq!(probes.borrow().len(), 5);
+            stats
+        }
+
+        let mut cx = TestAppContext::single();
+        let identified_inside = insert_at_head(&mut cx, false);
+        let keyed = insert_at_head(&mut cx, true);
+
+        // Identified only inside, a shifted row is not handed its
+        // neighbour's node, since the id inside is part of the path; it gets a
+        // new one, which is as much a rebuild. Keyed, only the new row does.
+        assert_eq!(
+            keyed.style_writes, 0,
+            "keyed components should keep the node they styled: {keyed:?}"
+        );
+        assert!(
+            keyed.nodes_created > 0,
+            "the inserted row needs nodes of its own: {keyed:?}"
+        );
+        assert_eq!(
+            identified_inside.nodes_created,
+            5 * keyed.nodes_created,
+            "every component identified only inside should be rebuilt once the rows shift, \
+             and only the inserted one when they are keyed: {identified_inside:?} against {keyed:?}"
+        );
+    }
+
+    /// A key is only a step in the path a node is found by. It must not add a
+    /// node of its own or move anything.
+    #[test]
+    fn a_key_adds_no_layout_node_and_moves_nothing() {
+        let mut cx = TestAppContext::single();
+        let (plain, plain_probes) = component_rows_window(&mut cx, false);
+        let (keyed, keyed_probes) = component_rows_window(&mut cx, true);
+
+        let node_count = |cx: &mut TestAppContext, window: WindowHandle<ComponentRows>| {
+            cx.update_window(window.into(), |_, window, _| window.layout_node_count())
+                .unwrap()
+        };
+        assert_eq!(node_count(&mut cx, plain), node_count(&mut cx, keyed));
+        assert_eq!(*plain_probes.borrow(), *keyed_probes.borrow());
     }
 
     /// Shaping is counted only when the text cache cannot answer, so a frame
