@@ -1,0 +1,337 @@
+<title>gpui 帧预算</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<style>
+  :root {
+    --paper:    #F2F5F4;
+    --raised:   #FBFCFC;
+    --ink:      #131C1A;
+    --muted:    #677573;
+    --hairline: #D3DAD8;
+    --accent:   #0E6B5E;
+    --was:      #97A3A0;
+    --grid:     #DFE5E3;
+
+    --serif: "IBM Plex Serif", "Noto Serif SC", Georgia, serif;
+    --sans: "IBM Plex Sans", "Noto Sans SC", system-ui, -apple-system, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:    #0E1413;
+      --raised:   #161E1C;
+      --ink:      #E2E9E6;
+      --muted:    #8A9895;
+      --hairline: #27332F;
+      --accent:   #46AC98;
+      --was:      #56625F;
+      --grid:     #1E2926;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --paper:    #0E1413;
+    --raised:   #161E1C;
+    --ink:      #E2E9E6;
+    --muted:    #8A9895;
+    --hairline: #27332F;
+    --accent:   #46AC98;
+    --was:      #56625F;
+    --grid:     #1E2926;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.65;
+    padding-inline: 24px;
+    padding-block: 64px 96px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page { max-width: 880px; margin-inline: auto; display: flex; flex-direction: column; gap: 68px; }
+  .prose { max-width: 62ch; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 14px;
+  }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(34px, 6vw, 50px);
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+    margin: 0 0 20px;
+  }
+
+  h2 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(22px, 3.4vw, 28px);
+    line-height: 1.2;
+    text-wrap: balance;
+    margin: 0 0 8px;
+  }
+
+  h3 { font-family: var(--sans); font-weight: 600; font-size: 15px; margin: 0 0 6px; }
+
+  p { margin: 0 0 16px; }
+  p:last-child { margin-bottom: 0; }
+
+  .lede { font-size: 19px; line-height: 1.6; }
+  .note { font-size: 14.5px; color: var(--muted); }
+  strong { font-weight: 600; }
+  code, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  code { font-size: 0.92em; }
+
+  .conditions {
+    display: flex; flex-wrap: wrap; gap: 0 36px;
+    border-top: 1px solid var(--hairline);
+    border-bottom: 1px solid var(--hairline);
+    padding-block: 18px;
+  }
+  .conditions div { display: flex; flex-direction: column; gap: 1px; }
+  .conditions dt { font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+  .conditions dd { margin: 0; font-family: var(--mono); font-size: 13.5px; font-variant-numeric: tabular-nums; }
+
+  .headline { display: flex; flex-wrap: wrap; gap: 14px 52px; align-items: flex-end; }
+  .figure { display: flex; flex-direction: column; gap: 2px; }
+  .figure .value { font-family: var(--mono); font-weight: 500; font-size: 42px; line-height: 1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .figure .value.now { color: var(--accent); }
+  .figure .value.was { color: var(--was); }
+  .figure .caption { font-size: 13px; color: var(--muted); }
+  .arrow { font-family: var(--mono); font-size: 28px; color: var(--muted); align-self: center; padding-bottom: 12px; }
+
+  .chart { display: flex; flex-direction: column; gap: 14px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 24px; font-size: 13.5px; }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; }
+  .swatch { width: 22px; height: 0; border-top: 2.5px solid currentColor; }
+  .swatch.dashed { border-top-style: dashed; border-top-width: 1.5px; }
+  .chart-scroll { overflow-x: auto; }
+  svg { display: block; max-width: 100%; height: auto; }
+  .axis-label { font-family: var(--mono); font-size: 11.5px; fill: var(--muted); }
+  .tick-label { font-family: var(--mono); font-size: 12px; fill: var(--muted); }
+  .point-label { font-family: var(--mono); font-size: 12px; font-weight: 500; }
+
+  .phases { display: flex; flex-direction: column; gap: 30px; }
+  .phase-group { display: flex; flex-direction: column; gap: 11px; }
+  .bar-row { display: grid; grid-template-columns: 104px 1fr 74px; align-items: center; gap: 14px; }
+  .bar-name { font-size: 13.5px; color: var(--muted); }
+  .bar-name.is-now { color: var(--ink); font-weight: 500; }
+  .bar { display: flex; height: 26px; background: var(--grid); overflow: hidden; }
+  .seg { height: 100%; display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 11px; color: #fff; overflow: hidden; white-space: nowrap; }
+  .seg.build { background: var(--was); }
+  .seg.prepaint { background: var(--accent); }
+  .seg.paint { background: var(--ink); }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .seg.paint { color: var(--paper); }
+  }
+  :root[data-theme="dark"] .seg.paint { color: var(--paper); }
+  .bar-total { font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; }
+  .phase-key { display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: 13px; color: var(--muted); }
+  .phase-key span { display: inline-flex; align-items: center; gap: 7px; }
+  .chip { width: 11px; height: 11px; border-radius: 2px; }
+
+  .table-scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 460px; }
+  th, td { text-align: right; padding: 10px 0 10px 18px; border-bottom: 1px solid var(--hairline); }
+  th:first-child, td:first-child { text-align: left; padding-left: 0; }
+  thead th { font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); font-weight: 400; }
+  tbody td { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  td.gain { color: var(--accent); font-weight: 500; }
+  tbody tr:last-child td { border-bottom: none; }
+
+  .callout { border-left: 2px solid var(--accent); padding: 2px 0 2px 20px; }
+  footer { border-top: 1px solid var(--hairline); padding-top: 22px; font-size: 13.5px; color: var(--muted); }
+
+  @media (max-width: 560px) {
+    .bar-row { grid-template-columns: 84px 1fr 62px; gap: 10px; }
+    .figure .value { font-size: 34px; }
+    .headline { gap: 14px 30px; }
+  }
+
+  @keyframes draw { from { stroke-dashoffset: 1400; } to { stroke-dashoffset: 0; } }
+  @media (prefers-reduced-motion: no-preference) {
+    .draw { stroke-dasharray: 1400; stroke-dashoffset: 0; animation: draw 1.1s ease-out backwards; }
+  }
+</style>
+
+<div class="page">
+
+  <header class="prose">
+    <p class="eyebrow">gpui · 50×50 网格 · 真窗口</p>
+    <h1>一帧从 13.4 毫秒到 7.5 毫秒</h1>
+    <p class="lede">在一个 2500 格、每格一段小文本的实时网格上，把现在的 gpui 和刚从 zed 抽出来时的 gpui 放在一起测。真窗口、真 GPU 呈现，不是 headless。</p>
+  </header>
+
+  <section class="conditions" aria-label="测量条件">
+    <div><dt>负载</dt><dd>5051 布局节点 · ~12000 图元</dd></div>
+    <div><dt>取样</dt><dd>预热 60 帧 · 计 300 帧 · 3 次取最小</dd></div>
+    <div><dt>机器</dt><dd>RTX 4080 · Wayland · 144 Hz</dd></div>
+  </section>
+
+  <section class="prose">
+    <p class="eyebrow">整帧</p>
+    <div class="headline">
+      <div class="figure">
+        <span class="value was">13.43</span>
+        <span class="caption">baseline ms/帧 · 74 fps</span>
+      </div>
+      <span class="arrow">→</span>
+      <div class="figure">
+        <span class="value now">7.51</span>
+        <span class="caption">现在 ms/帧 · 133 fps</span>
+      </div>
+      <div class="figure">
+        <span class="value now">−44%</span>
+        <span class="caption">内容静止时</span>
+      </div>
+    </div>
+    <p class="note" style="margin-top:18px">内容全变时是 −16%。这个差距不是噪声，而是提升的本质：能省下来的，是<strong>没有变化的那部分</strong>的工作。</p>
+  </section>
+
+  <section class="chart">
+    <div class="prose">
+      <h2>提升随「有多少东西真的变了」而变</h2>
+      <p>横轴是每帧文本发生变化的格子比例。baseline 是一条<strong>平线</strong>：内容变不变，它都花同样的时间。现在的版本跟着实际变化量走，界面越安静越便宜。</p>
+    </div>
+    <div class="legend">
+      <span style="color:var(--was)"><i class="swatch"></i>baseline</span>
+      <span style="color:var(--accent)"><i class="swatch"></i>现在</span>
+      <span style="color:var(--muted)"><i class="swatch dashed"></i>144 Hz 上限 6.94 ms</span>
+    </div>
+    <div class="chart-scroll">
+      <svg viewBox="0 0 760 400" role="img" aria-label="帧时间随变化比例的折线图">
+        <g stroke="var(--grid)" stroke-width="1">
+          <line x1="64" y1="336" x2="736" y2="336"></line>
+          <line x1="64" y1="259" x2="736" y2="259"></line>
+          <line x1="64" y1="182" x2="736" y2="182"></line>
+          <line x1="64" y1="105" x2="736" y2="105"></line>
+          <line x1="64" y1="28"  x2="736" y2="28"></line>
+        </g>
+        <g class="tick-label" text-anchor="end">
+          <text x="54" y="340">0</text>
+          <text x="54" y="263">4</text>
+          <text x="54" y="186">8</text>
+          <text x="54" y="109">12</text>
+          <text x="54" y="32">16</text>
+        </g>
+        <text class="axis-label" x="64" y="16">ms / 帧</text>
+
+        <line x1="64" y1="202.4" x2="736" y2="202.4" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="5 5"></line>
+        <text class="axis-label" x="736" y="196" text-anchor="end">144 Hz 上限</text>
+
+        <polyline class="draw" fill="none" stroke="var(--was)" stroke-width="2.5" stroke-linejoin="round"
+          points="108,77.5 254,74.0 400,68.4 546,54.6 692,71.1"></polyline>
+        <polyline class="draw" fill="none" stroke="var(--accent)" stroke-width="3" stroke-linejoin="round" style="animation-delay:.08s"
+          points="108,191.4 254,181.0 400,175.6 546,165.1 692,112.7"></polyline>
+
+        <g fill="var(--was)">
+          <circle cx="108" cy="77.5" r="4"></circle><circle cx="254" cy="74.0" r="4"></circle>
+          <circle cx="400" cy="68.4" r="4"></circle><circle cx="546" cy="54.6" r="4"></circle>
+          <circle cx="692" cy="71.1" r="4"></circle>
+        </g>
+        <g fill="var(--accent)">
+          <circle cx="108" cy="191.4" r="4.5"></circle><circle cx="254" cy="181.0" r="4.5"></circle>
+          <circle cx="400" cy="175.6" r="4.5"></circle><circle cx="546" cy="165.1" r="4.5"></circle>
+          <circle cx="692" cy="112.7" r="4.5"></circle>
+        </g>
+
+        <g class="point-label" fill="var(--was)" text-anchor="middle">
+          <text x="108" y="66">13.43</text><text x="692" y="60">13.76</text>
+        </g>
+        <g class="point-label" fill="var(--accent)" text-anchor="middle">
+          <text x="108" y="180">7.51</text><text x="692" y="102">11.60</text>
+        </g>
+
+        <g class="tick-label" text-anchor="middle">
+          <text x="108" y="360">0%</text>
+          <text x="254" y="360">1%</text>
+          <text x="400" y="360">5%</text>
+          <text x="546" y="360">25%</text>
+          <text x="692" y="360">100%</text>
+        </g>
+        <text class="axis-label" x="400" y="386" text-anchor="middle">每帧变化的格子比例</text>
+      </svg>
+    </div>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>变化比例</th><th>baseline</th><th>现在</th><th>提升</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>0%</td><td>13.43</td><td>7.51</td><td class="gain">−44.1%</td></tr>
+          <tr><td>1%</td><td>13.61</td><td>8.05</td><td class="gain">−40.9%</td></tr>
+          <tr><td>5%</td><td>13.90</td><td>8.33</td><td class="gain">−40.1%</td></tr>
+          <tr><td>25%</td><td>14.62</td><td>8.88</td><td class="gain">−39.3%</td></tr>
+          <tr><td>100%</td><td>13.76</td><td>11.60</td><td class="gain">−15.7%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note prose">100% 那一端是最不利的情况：每个格子的文本每帧都变，没有任何一处可以省。即便如此仍有 −16%。</p>
+  </section>
+
+  <section class="phases">
+    <div class="prose">
+      <h2>提升来自哪一段</h2>
+      <p>一帧走三遍元素树：<strong>build</strong> 建树并要布局，<strong>prepaint</strong> 算位置（布局在这里），<strong>paint</strong> 生成交给 GPU 的图元。这三段是帧内 <code>Instant</code> 直接测的，不受合成器影响。</p>
+    </div>
+
+    <div class="phase-key">
+      <span><i class="chip" style="background:var(--was)"></i>build</span>
+      <span><i class="chip" style="background:var(--accent)"></i>prepaint（含布局）</span>
+      <span><i class="chip" style="background:var(--ink)"></i>paint</span>
+    </div>
+
+    <div class="phase-group">
+      <h3>内容静止（0% 变化）</h3>
+      <div class="bar-row">
+        <span class="bar-name">baseline</span>
+        <div class="bar"><div class="seg build" style="width:11.7%">1.52</div><div class="seg prepaint" style="width:45.8%">5.96</div><div class="seg paint" style="width:35.2%">4.58</div></div>
+        <span class="bar-total">12.06</span>
+      </div>
+      <div class="bar-row">
+        <span class="bar-name is-now">现在</span>
+        <div class="bar"><div class="seg build" style="width:12.3%">1.60</div><div class="seg prepaint" style="width:3.5%"></div><div class="seg paint" style="width:36.2%">4.70</div></div>
+        <span class="bar-total">6.76</span>
+      </div>
+    </div>
+
+    <div class="phase-group">
+      <h3>内容全变（100% 变化）</h3>
+      <div class="bar-row">
+        <span class="bar-name">baseline</span>
+        <div class="bar"><div class="seg build" style="width:12.0%">1.56</div><div class="seg prepaint" style="width:46.8%">6.09</div><div class="seg paint" style="width:36.0%">4.68</div></div>
+        <span class="bar-total">12.33</span>
+      </div>
+      <div class="bar-row">
+        <span class="bar-name is-now">现在</span>
+        <div class="bar"><div class="seg build" style="width:13.5%">1.76</div><div class="seg prepaint" style="width:31.7%">4.12</div><div class="seg paint" style="width:36.2%">4.70</div></div>
+        <span class="bar-total">10.58</span>
+      </div>
+    </div>
+
+    <div class="prose callout">
+      <p><strong>prepaint 从 5.96 ms 掉到 0.46 ms，是 −92%。</strong>静止帧里布局的开销已经接近于零。而 paint 的 4.7 ms <em>纹丝不动</em>，三种变化比例下都一样——这一段和「变了多少」无关。</p>
+    </div>
+  </section>
+
+  <footer class="prose">
+    <p>数据由 <code>cargo run -p gpui --example grid_frames --release -- 50 50 &lt;变化比例&gt;</code> 产生，两个版本交替运行以排除漂移。相位时间为帧内计时，与合成器无关；整帧时间取三次最小值，因为外部干扰只会让帧变慢。</p>
+  </footer>
+
+</div>
