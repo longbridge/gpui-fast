@@ -5194,10 +5194,13 @@ impl Window {
     /// much of it was dirtied again anyway.
     pub fn layout_stats(&self) -> LayoutStats {
         let (build_time, prepaint_time, paint_time) = self.frame_phase_times;
+        let (lines_shaped, shape_time) = self.text_system.shaping_stats();
         LayoutStats {
             build_time,
             prepaint_time,
             paint_time,
+            lines_shaped,
+            shape_time,
             ..self.layout_engine.as_ref().unwrap().stats()
         }
     }
@@ -5206,6 +5209,7 @@ impl Window {
     pub fn reset_layout_stats(&mut self) {
         self.frame_phase_times = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
         self.layout_engine.as_mut().unwrap().reset_stats();
+        self.text_system.reset_shaping_stats();
     }
 
     /// Records that a measurement answered from a result the element already
@@ -9185,6 +9189,29 @@ mod tests {
             "rows matched by an ElementId should keep the node they styled, \
              wrote {} against {} for positional rows",
             keyed.style_writes, positional.style_writes
+        );
+    }
+
+    /// Shaping is counted only when the text cache cannot answer, so a frame
+    /// that shows the same text as the last one shapes nothing, and one that
+    /// shows new text shapes exactly that.
+    #[test]
+    fn only_text_the_cache_does_not_hold_is_counted_as_shaped() {
+        let mut cx = TestAppContext::single();
+        let probes = Rc::new(RefCell::new(Vec::new()));
+        let window = retained_layout_window(&mut cx, probes);
+        draw_frame(&mut cx, window.into());
+
+        let unchanged = draw_frame(&mut cx, window.into());
+        assert_eq!(
+            unchanged.lines_shaped, 0,
+            "text shown last frame should come from the cache: {unchanged:?}"
+        );
+
+        let relabeled = change_and_draw(&mut cx, window, |view| view.label = "cd".into());
+        assert!(
+            relabeled.lines_shaped > 0,
+            "text not shown before has to be shaped: {relabeled:?}"
         );
     }
 

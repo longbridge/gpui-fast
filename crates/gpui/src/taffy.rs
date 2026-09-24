@@ -86,6 +86,14 @@ pub struct LayoutStats {
     pub paint_time: Duration,
     /// Time spent inside Taffy's own layout computation.
     pub compute_layout_time: Duration,
+    /// Lines of text handed to the platform to be shaped. A line the text
+    /// cache still held from this frame or the last one is not counted, so this
+    /// is the shaping the cache did not save.
+    pub lines_shaped: u64,
+    /// Time spent shaping those lines. Shaping done while measuring is also
+    /// part of `measure_time`; shaping done while painting is part of
+    /// `paint_time`.
+    pub shape_time: Duration,
 }
 
 /// A node kept from one frame to the next, alongside enough of the request

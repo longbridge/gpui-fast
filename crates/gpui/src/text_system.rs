@@ -30,6 +30,7 @@ use std::{
     hash::{Hash, Hasher},
     ops::{Deref, DerefMut, Range},
     sync::Arc,
+    time::Duration,
 };
 
 /// An opaque identifier for a specific font.
@@ -398,6 +399,17 @@ impl WindowTextSystem {
 
     pub(crate) fn truncate_layouts(&self, index: LineLayoutIndex) {
         self.line_layout_cache.truncate_layouts(index)
+    }
+
+    /// Lines shaped by the platform, and the time that took, since the last
+    /// [`Self::reset_shaping_stats`]. Lines answered from the cache do not count.
+    pub(crate) fn shaping_stats(&self) -> (u64, Duration) {
+        self.line_layout_cache.shaping_stats()
+    }
+
+    /// Zeroes the counters reported by [`Self::shaping_stats`].
+    pub(crate) fn reset_shaping_stats(&self) {
+        self.line_layout_cache.reset_shaping_stats()
     }
 
     /// Shape the given line, at the given font_size, for painting to the screen.

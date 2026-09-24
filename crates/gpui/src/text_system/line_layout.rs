@@ -1,12 +1,17 @@
 use crate::{FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, point, px};
 use collections::FxHashMap;
 use parking_lot::{Mutex, RwLock, RwLockUpgradableReadGuard};
+use scheduler::Instant;
 use smallvec::SmallVec;
 use std::{
     borrow::Borrow,
     hash::{Hash, Hasher},
     ops::Range,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 
 use super::LineWrapper;
@@ -455,6 +460,11 @@ pub(crate) struct LineLayoutCache {
     previous_frame: Mutex<FrameCache>,
     current_frame: RwLock<FrameCache>,
     platform_text_system: Arc<dyn PlatformTextSystem>,
+    /// Lines handed to the platform to be shaped, because neither this frame
+    /// nor the last one had them. See [`LineLayoutCache::shaping_stats`].
+    lines_shaped: AtomicU64,
+    /// Time spent in those calls, in nanoseconds.
+    shape_nanos: AtomicU64,
 }
 
 #[derive(Default)]
@@ -490,7 +500,35 @@ impl LineLayoutCache {
             previous_frame: Mutex::default(),
             current_frame: RwLock::default(),
             platform_text_system,
+            lines_shaped: AtomicU64::new(0),
+            shape_nanos: AtomicU64::new(0),
         }
+    }
+
+    /// How many lines have been shaped, and how long that took, since the last
+    /// [`LineLayoutCache::reset_shaping_stats`]. A line answered from the cache
+    /// is not counted, so this is the text work the cache failed to save.
+    pub fn shaping_stats(&self) -> (u64, Duration) {
+        (
+            self.lines_shaped.load(Ordering::Relaxed),
+            Duration::from_nanos(self.shape_nanos.load(Ordering::Relaxed)),
+        )
+    }
+
+    /// Zeroes the counters reported by [`LineLayoutCache::shaping_stats`].
+    pub fn reset_shaping_stats(&self) {
+        self.lines_shaped.store(0, Ordering::Relaxed);
+        self.shape_nanos.store(0, Ordering::Relaxed);
+    }
+
+    /// Shapes a line the cache does not have, counting it.
+    fn shape_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout {
+        let started_at = Instant::now();
+        let layout = self.platform_text_system.layout_line(text, font_size, runs);
+        self.lines_shaped.fetch_add(1, Ordering::Relaxed);
+        self.shape_nanos
+            .fetch_add(started_at.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        layout
     }
 
     pub fn layout_index(&self) -> LineLayoutIndex {
@@ -667,9 +705,7 @@ impl LineLayoutCache {
             layout
         } else {
             let text = SharedString::from(text);
-            let mut layout = self
-                .platform_text_system
-                .layout_line(&text, font_size, runs);
+            let mut layout = self.shape_line(&text, font_size, runs);
 
             if let Some(force_width) = force_width {
                 apply_force_width_to_layout(&mut layout, force_width);
@@ -816,9 +852,7 @@ impl LineLayoutCache {
         }
 
         let text = materialize_text();
-        let mut layout = self
-            .platform_text_system
-            .layout_line(&text, font_size, runs);
+        let mut layout = self.shape_line(&text, font_size, runs);
 
         if let Some(force_width) = force_width {
             apply_force_width_to_layout(&mut layout, force_width);
