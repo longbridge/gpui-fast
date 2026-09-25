@@ -6,6 +6,11 @@ use std::{
     ptr::NonNull,
 };
 
+/// How many bounds a replay may compare against, counted over every search
+/// it makes — for bounds that changed, and for bounds that might meet them —
+/// before building the tree costs less than going on without it.
+const REPLAY_SEARCH_BUDGET: usize = 1 << 15;
+
 /// Maximum children per internal node (R-tree style branching factor).
 /// Higher values = shorter tree = fewer cache misses, but more work per node.
 const MAX_CHILDREN: usize = 12;
@@ -37,11 +42,18 @@ where
     recorded: Vec<(Bounds<U>, u32)>,
     /// What `recorded` held when the tree was cleared.
     previous: Vec<(Bounds<U>, u32)>,
-    /// Whether every insert since the tree was cleared has matched the one in
-    /// the same position in `previous`. The orderings are then already known
-    /// and the tree is not built at all; it is built from `recorded` the
-    /// first time an insert differs.
+    /// Whether the tree is still being replayed rather than built: every
+    /// ordering since it was cleared has been found without it, and it is
+    /// built from `recorded` once that stops paying.
     replaying: bool,
+    /// While replaying, every bounds whose entry differs from the one in the
+    /// same position in `previous` — in its bounds or in its ordering — in
+    /// both its old and its new form. An insert that matches `previous` and
+    /// meets none of them has the ordering it had then.
+    changed: Vec<Bounds<U>>,
+    /// How many more bounds replaying may compare against, over every search
+    /// it makes, before the tree is built instead.
+    replay_search_budget: usize,
 }
 
 /// A node in the bounds tree.
@@ -129,6 +141,8 @@ where
         std::mem::swap(&mut self.previous, &mut self.recorded);
         self.recorded.clear();
         self.replaying = true;
+        self.changed.clear();
+        self.replay_search_budget = REPLAY_SEARCH_BUDGET;
     }
 
     /// Clears the tree and forgets what was inserted before, so the next fill
@@ -146,11 +160,7 @@ where
     /// existing bounds that intersect with the new bounds.
     pub fn insert(&mut self, new_bounds: Bounds<U>) -> u32 {
         if self.replaying {
-            let position = self.recorded.len();
-            if let Some((previous, ordering)) = self.previous.get(position)
-                && *previous == new_bounds
-            {
-                let ordering = *ordering;
+            if let Some(ordering) = self.replay(&new_bounds) {
                 self.recorded.push((new_bounds, ordering));
                 return ordering;
             }
@@ -168,6 +178,53 @@ where
         self.track_max_leaf(new_leaf_idx, ordering);
         self.recorded.push((new_bounds, ordering));
         ordering
+    }
+
+    /// The ordering `bounds` is given while the tree is being replayed, or
+    /// `None` once finding it without the tree would cost more than building
+    /// the tree.
+    ///
+    /// An ordering is one more than the greatest among the bounds inserted
+    /// before it that it meets. If `bounds` is what was inserted at this
+    /// position last time, and meets nothing that was, or is now, different
+    /// from last time before it, then everything it meets and every ordering
+    /// among them is as it was, and so is its own. Otherwise its ordering is
+    /// worked out from what has been inserted so far, and if that differs
+    /// from last time, the bounds join the ones that changed.
+    fn replay(&mut self, bounds: &Bounds<U>) -> Option<u32> {
+        self.replay_search_budget = self.replay_search_budget.checked_sub(self.changed.len())?;
+        let previous = self.previous.get(self.recorded.len());
+        if let Some((previous_bounds, ordering)) = previous
+            && previous_bounds == bounds
+            && !self
+                .changed
+                .iter()
+                .any(|changed| changed.intersects(bounds))
+        {
+            return Some(*ordering);
+        }
+
+        self.replay_search_budget = self.replay_search_budget.checked_sub(self.recorded.len())?;
+        let ordering = self
+            .recorded
+            .iter()
+            .filter(|(other, _)| other.intersects(bounds))
+            .map(|(_, ordering)| *ordering)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        match previous {
+            Some((previous_bounds, previous_ordering)) => {
+                if previous_bounds != bounds {
+                    self.changed.push(previous_bounds.clone());
+                    self.changed.push(bounds.clone());
+                } else if *previous_ordering != ordering {
+                    self.changed.push(bounds.clone());
+                }
+            }
+            None => self.changed.push(bounds.clone()),
+        }
+        Some(ordering)
     }
 
     /// Remembers `leaf` as the one with the highest ordering if it is.
@@ -455,6 +512,8 @@ where
             recorded: Vec::new(),
             previous: Vec::new(),
             replaying: false,
+            changed: Vec::new(),
+            replay_search_budget: REPLAY_SEARCH_BUDGET,
         }
     }
 }
@@ -558,6 +617,33 @@ mod tests {
         }
     }
 
+    fn random_bounds(rng: &mut rand::rngs::StdRng) -> Bounds<f32> {
+        Bounds {
+            origin: Point {
+                x: rng.random_range(-100.0..100.0),
+                y: rng.random_range(-100.0..100.0),
+            },
+            size: Size {
+                width: rng.random_range(0.0..50.0),
+                height: rng.random_range(0.0..50.0),
+            },
+        }
+    }
+    fn fill(tree: &mut BoundsTree<f32>, frame: &[Bounds<f32>]) {
+        tree.clear();
+        let mut inserted: Vec<(Bounds<f32>, u32)> = Vec::new();
+        for bounds in frame {
+            let expected = inserted
+                .iter()
+                .filter_map(|(other, order)| other.intersects(bounds).then_some(*order))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            assert_eq!(tree.insert(*bounds), expected);
+            inserted.push((*bounds, expected));
+        }
+    }
+
     /// A tree hands out last fill's orderings again while the bounds come in
     /// as they did then, and builds itself the moment they stop. Each frame
     /// here follows the one before for a while and then goes its own way, or
@@ -565,33 +651,6 @@ mod tests {
     /// against every bounds inserted before it in that frame.
     #[test]
     fn replaying_the_last_fill_gives_what_inserting_it_would() {
-        fn random_bounds(rng: &mut rand::rngs::StdRng) -> Bounds<f32> {
-            Bounds {
-                origin: Point {
-                    x: rng.random_range(-100.0..100.0),
-                    y: rng.random_range(-100.0..100.0),
-                },
-                size: Size {
-                    width: rng.random_range(0.0..50.0),
-                    height: rng.random_range(0.0..50.0),
-                },
-            }
-        }
-        fn fill(tree: &mut BoundsTree<f32>, frame: &[Bounds<f32>]) {
-            tree.clear();
-            let mut inserted: Vec<(Bounds<f32>, u32)> = Vec::new();
-            for bounds in frame {
-                let expected = inserted
-                    .iter()
-                    .filter_map(|(other, order)| other.intersects(bounds).then_some(*order))
-                    .max()
-                    .unwrap_or(0)
-                    + 1;
-                assert_eq!(tree.insert(*bounds), expected);
-                inserted.push((*bounds, expected));
-            }
-        }
-
         for seed in 1..=300 {
             let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
             let mut tree = BoundsTree::default();
@@ -611,6 +670,40 @@ mod tests {
             // Differs from the first bounds on.
             let third: Vec<_> = (0..count).map(|_| random_bounds(&mut rng)).collect();
             fill(&mut tree, &third);
+        }
+    }
+
+    /// A frame that repeats the last one but for a few bounds scattered
+    /// through it — a label grown by a digit, a row inserted or taken out —
+    /// is replayed past each of them, and must still give every bounds the
+    /// ordering inserting it afresh would. Frames with changes enough to
+    /// exhaust what replaying may search are built as before, from wherever
+    /// that happens.
+    #[test]
+    fn replaying_past_scattered_changes_gives_what_inserting_it_would() {
+        for seed in 1..=300 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            let mut tree = BoundsTree::default();
+            let count = rng.random_range(1..=if seed % 10 == 0 { 800 } else { 150 });
+            let mut frame: Vec<_> = (0..count).map(|_| random_bounds(&mut rng)).collect();
+            fill(&mut tree, &frame);
+            for _ in 0..6 {
+                for _ in 0..rng.random_range(0..=count / 8 + 1) {
+                    let at = rng.random_range(0..frame.len().max(1));
+                    match rng.random_range(0..10) {
+                        0 if !frame.is_empty() => {
+                            frame.remove(at);
+                        }
+                        1 => frame.insert(at.min(frame.len()), random_bounds(&mut rng)),
+                        _ if !frame.is_empty() => {
+                            let grown = &mut frame[at];
+                            grown.size.width += rng.random_range(-5.0..5.0);
+                        }
+                        _ => {}
+                    }
+                }
+                fill(&mut tree, &frame);
+            }
         }
     }
 
