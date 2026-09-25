@@ -9352,6 +9352,60 @@ mod tests {
         assert_eq!(*plain_probes.borrow(), *keyed_probes.borrow());
     }
 
+    /// A chip whose identity is given by a key or by an id.
+    struct ReparentedChip {
+        keyed: bool,
+        probes: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+    }
+
+    impl Render for ReparentedChip {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let probes = self.probes.clone();
+            probes.borrow_mut().clear();
+            let chip = div().pl(px(7.)).child(
+                canvas(
+                    move |bounds, _, _| probes.borrow_mut().push(bounds),
+                    |_, _, _, _| {},
+                )
+                .w(px(10.))
+                .h(px(10.)),
+            );
+            div().flex().pl(px(50.)).child(if self.keyed {
+                chip.key("chip").into_any_element()
+            } else {
+                chip.id("chip").into_any_element()
+            })
+        }
+    }
+
+    /// A chip that trades its key for an id of the same value takes the key
+    /// its child used to find its node by, so it gets a new node, and the
+    /// child is handed the node the chip had. That node is still listed under
+    /// the row when the chip's new node adopts it, and the row rewriting its
+    /// children must not cut the link the child's position is added up along.
+    #[test]
+    fn a_node_adopted_from_another_parent_keeps_its_position() {
+        let mut cx = TestAppContext::single();
+        let probes = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let probes = probes.clone();
+            move |_, _| ReparentedChip {
+                keyed: true,
+                probes,
+            }
+        });
+
+        draw_frame(&mut cx, window.into());
+        assert_eq!(probes.borrow()[0].origin.x, px(57.));
+
+        change_and_draw(&mut cx, window, |view| view.keyed = false);
+        assert_eq!(
+            probes.borrow()[0].origin.x,
+            px(57.),
+            "the child should still be offset by the row's and the chip's padding"
+        );
+    }
+
     /// Rows of a uniform list five rows tall, scrolled to `scroll_top`.
     struct ScrolledRows {
         row_ids: Vec<u64>,

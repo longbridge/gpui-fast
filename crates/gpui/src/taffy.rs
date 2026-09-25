@@ -435,18 +435,23 @@ impl TaffyLayoutEngine {
         self.stats.nodes_created += 1;
         let style_fingerprint = layout_fingerprint(&style, rem_size, scale_factor);
         let taffy_style = style.to_taffy(rem_size, scale_factor);
-        let id: LayoutId = if children.is_empty() {
-            self.taffy
-                .new_leaf(taffy_style)
-                .expect(EXPECT_MESSAGE)
-                .into()
-        } else {
+        let id: LayoutId = self
+            .taffy
+            .new_leaf(taffy_style)
+            .expect(EXPECT_MESSAGE)
+            .into();
+        if !children.is_empty() {
+            // A retained child can arrive here still listed under the parent
+            // it had last frame. `new_with_children` would leave it listed
+            // there, so when that parent's children were next rewritten the
+            // child would lose its parent link, and with it the offset
+            // `layout_bounds` adds up from its ancestors. `set_children`
+            // detaches each child from wherever it was first.
             self.taffy
                 // This is safe because LayoutId is repr(transparent) to taffy::tree::NodeId.
-                .new_with_children(taffy_style, LayoutId::to_taffy_slice(children))
-                .expect(EXPECT_MESSAGE)
-                .into()
-        };
+                .set_children(id.0, LayoutId::to_taffy_slice(children))
+                .expect(EXPECT_MESSAGE);
+        }
         self.retain(key, id, children, None, style_fingerprint);
         id
     }
