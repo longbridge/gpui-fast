@@ -445,30 +445,31 @@
   <section class="chart">
     <div class="prose">
       <h2>In an application: gpui-kit's data table</h2>
-      <p>The benchmarks above are labels and rows without an id. gpui-kit's DataTable story is what an application looks like instead: a 5000-row table of quotes whose cells carry ids, hover states and click handlers, with 30% of its first 2000 rows given new values 30 times a second. Most of its elements are identified, so a large share of every frame goes to keeping their identities — hashing and comparing the <code>ElementId</code> path of each one to find its element state — which is work none of the steps above touch.</p>
-      <p>Figures are the share of the main thread's time spent in <code>Window::draw</code>, from 10 s of <code>sample</code> after 10 s of settling, two runs each, all three builds in one session. The window draws about 24 frames a second in a debug build and 29 in a release build, set by the refresh timer. <em>gpui-pre</em> is the crates.io snapshot gpui-kit used before it moved to this tree.</p>
+      <p>The benchmarks above are labels and rows without an id. gpui-kit's DataTable story is what an application looks like instead: a 5000-row table of quotes whose cells carry ids, hover states and click handlers, with 30% of its first 2000 rows given new values 30 times a second. Most of its elements are identified, and every one of them looks its state up by its path of ids several times a frame, which is work none of the steps above touch.</p>
+      <p>Figures are milliseconds of main-thread CPU per second spent in <code>Window::draw</code>, recorded with <code>samply</code> at 4 kHz: two runs of 20 s for each build, all in one session, the same gpui-kit code built against each. Under each figure are the change against the row above and, marked <em>total</em>, against <em>gpui-pre</em>, the crates.io snapshot gpui-kit used before it moved to this tree. The window draws about 24 frames a second in a debug build and 29 in a release build, set by the refresh timer.</p>
     </div>
     <div class="table-scroll">
-      <table>
+      <table class="steps">
         <thead>
           <tr>
-            <th>Build</th>
-            <th>gpui-pre 0.3.6</th>
-            <th>This tree, before</th>
-            <th>This tree, now</th>
             <th>Step</th>
-            <th>Against gpui-pre</th>
+            <th>debug (<code>cargo run</code>)</th>
+            <th>release</th>
           </tr>
         </thead>
         <tbody>
-          <tr><td class="label">debug (<code>cargo run</code>)</td><td>12.1%</td><td class="worse">13.6%</td><td>11.3%</td><td class="gain">−17%</td><td class="gain">−6%</td></tr>
-          <tr><td class="label">release</td><td>16.2%</td><td>14.3%</td><td>13.8%</td><td class="gain">−4%</td><td class="gain">−16%</td></tr>
+          <tr><td class="step"><strong>gpui-pre 0.3.6</strong></td><td>92.0</td><td>91.2</td></tr>
+          <tr><td class="step">This tree before these steps</td><td>103.2<span class="delta worse">+12%</span><span class="delta total worse">+12%</span></td><td>80.8<span class="delta gain">−11%</span><span class="delta total gain">−11%</span></td></tr>
+          <tr><td class="step">Elements are given inspector ids only while the inspector is open</td><td>84.2<span class="delta gain">−18%</span><span class="delta total gain">−8%</span></td><td>72.1<span class="delta gain">−11%</span><span class="delta total gain">−21%</span></td></tr>
+          <tr><td class="step">Inspector state is looked up only for the element being inspected</td><td>86.6<span class="delta worse">+3%</span><span class="delta total gain">−6%</span></td><td>67.8<span class="delta gain">−6%</span><span class="delta total gain">−26%</span></td></tr>
+          <tr><td class="step">An element's id path is hashed once, when the id is made</td><td>74.1<span class="delta gain">−14%</span><span class="delta total gain">−19%</span></td><td>61.5<span class="delta gain">−9%</span><span class="delta total gain">−33%</span></td></tr>
         </tbody>
       </table>
     </div>
     <div class="prose">
-      <p><strong>Elements are given inspector ids only while the inspector is open.</strong> Building one copies the whole element id stack and hashes it into a map, for every element in every frame. It is compiled in only for debug builds or with the <code>inspector</code> feature, so it never reached the benchmarks above and has no row in the table of steps; but <code>cargo run</code> is a debug build, and gpui-kit's workspace turns the feature on for release builds too. Upstream gpui already skips it unless the inspector is open, which is why this tree drew the table 12% slower than gpui-pre in a debug build before the step and draws it 6% faster after it.</p>
-      <p class="note">In release, the steps above take 42% off the table's prepaint, where layout and text shaping are, but request layout costs more than it did in gpui-pre and paint about a quarter more, which leaves 16% overall. A debug build also spends as much of its main thread generating the story's random quotes as drawing them, in crates the debug profile does not optimise, so a debug build's CPU use moves far less than its drawing does.</p>
+      <p><strong>Two of these steps are upstream gpui's</strong>, from the snapshot gpui-pre was cut from and newer than the one this tree was extracted from. Building an inspector id copied the whole element id stack and hashed it into a map, and looking up inspector state cloned every div's base style, for every element in every frame, with the inspector closed. Both are compiled in only for debug builds or with the <code>inspector</code> feature, so neither reached the benchmarks above; but <code>cargo run</code> is a debug build, and gpui-kit's workspace turns the feature on for its release builds too. They are why this tree drew the table 12% slower than gpui-pre in a debug build before these steps.</p>
+      <p><strong>Hashing an id's path once</strong> takes 14% off the debug build and 9% off the release one. Element state is looked up by an element's global id in request layout, prepaint and paint, each lookup hashing it to take the state out of last frame's map, again to put it in this frame's, and once more when the frame is finished — twelve times a frame for a path of names hashed byte by byte. The path's hash is now worked out when the id is made, and the id hashes to it. <code>GlobalElementId</code> loses <code>DerefMut</code>, which would let its path change under its hash; nothing in this tree or in gpui-kit used it.</p>
+      <p class="note">The inspector-state step measures +3% in the debug build, within what two runs of the same build differ by there; in the release build it takes 6%. A debug build spends about as much of its main thread generating the story's random quotes as drawing them, in crates the debug profile does not optimise, so its CPU use as a whole moves about half as much as its drawing does. <code>samply</code>'s sampling also keeps the processor clocked up, so these figures are lower than what a system monitor shows for the same window, where a lightly loaded processor clocks down and the same work takes longer.</p>
     </div>
   </section>
 
