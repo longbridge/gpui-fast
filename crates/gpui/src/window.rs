@@ -2987,7 +2987,7 @@ impl Window {
         f: impl FnOnce(&GlobalElementId, &mut Self) -> R,
     ) -> R {
         self.with_id(element_id, |this| {
-            let global_id = GlobalElementId(Arc::from(&*this.element_id_stack));
+            let global_id = GlobalElementId::new(Arc::from(&*this.element_id_stack));
 
             f(&global_id, this)
         })

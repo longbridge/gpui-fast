@@ -36,7 +36,7 @@ use crate::{
     FocusHandle, InspectorElementId, Keyed, LayoutId, Pixels, Point, Size, Style, Window,
     util::FluentBuilder, window::with_element_arena,
 };
-use derive_more::{Deref, DerefMut};
+use derive_more::Deref;
 use std::{
     any::Any,
     fmt::{self, Debug, Display},
@@ -223,8 +223,43 @@ pub trait ParentElement {
 }
 
 /// A globally unique identifier for an element, used to track state across frames.
-#[derive(Deref, DerefMut, Clone, Default, Debug, Eq, PartialEq, Hash)]
-pub struct GlobalElementId(pub(crate) Arc<[ElementId]>);
+///
+/// Element state is looked up by it several times per element in every frame,
+/// and hashing its path of ids each time, names byte by byte, cost more than
+/// the lookups did. The path's hash is therefore worked out once, when the id
+/// is made, and is all the id hashes to.
+#[derive(Deref, Clone, Debug)]
+pub struct GlobalElementId(#[deref] pub(crate) Arc<[ElementId]>, u64);
+
+impl GlobalElementId {
+    pub(crate) fn new(path: Arc<[ElementId]>) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = collections::FxHasher::default();
+        path.hash(&mut hasher);
+        let hash = hasher.finish();
+        GlobalElementId(path, hash)
+    }
+}
+
+impl Default for GlobalElementId {
+    fn default() -> Self {
+        GlobalElementId::new(Arc::from([]))
+    }
+}
+
+impl PartialEq for GlobalElementId {
+    fn eq(&self, other: &Self) -> bool {
+        self.1 == other.1 && self.0 == other.0
+    }
+}
+
+impl Eq for GlobalElementId {}
+
+impl std::hash::Hash for GlobalElementId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_u64(self.1);
+    }
+}
 
 impl Display for GlobalElementId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -324,7 +359,7 @@ impl<E: Element> Drawable<E> {
                 let layout_key = window.push_layout_key(element_id.as_ref());
                 let global_id = element_id.map(|element_id| {
                     window.element_id_stack.push(element_id);
-                    GlobalElementId(Arc::from(&*window.element_id_stack))
+                    GlobalElementId::new(Arc::from(&*window.element_id_stack))
                 });
 
                 let inspector_id;
@@ -336,7 +371,9 @@ impl<E: Element> Drawable<E> {
                     inspector_id = if window.inspector_enabled() {
                         self.element.source_location().map(|source| {
                             let path = crate::InspectorElementPath {
-                                global_id: GlobalElementId(Arc::from(&*window.element_id_stack)),
+                                global_id: GlobalElementId::new(Arc::from(
+                                    &*window.element_id_stack,
+                                )),
                                 source_location: source,
                             };
                             window.build_inspector_element_id(path)
@@ -864,5 +901,39 @@ impl Element for Empty {
         _window: &mut Window,
         _cx: &mut App,
     ) {
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::hash::{BuildHasher, BuildHasherDefault};
+
+    /// An id's hash is worked out from its path when it is made, so ids made
+    /// apart from the same path have to agree, and ids of different paths
+    /// must not be taken for one another even where their hashes would meet.
+    #[test]
+    fn global_ids_compare_and_hash_by_path() {
+        let path = |ids: &[&'static str]| {
+            GlobalElementId::new(ids.iter().map(|id| ElementId::from(*id)).collect())
+        };
+        let hash = |id: &GlobalElementId| {
+            BuildHasherDefault::<collections::FxHasher>::default().hash_one(id)
+        };
+
+        let a = path(&["root", "table", "row"]);
+        let b = path(&["root", "table", "row"]);
+        assert_eq!(a, b);
+        assert_eq!(hash(&a), hash(&b));
+
+        let c = path(&["root", "table", "cell"]);
+        assert_ne!(a, c);
+
+        // A path that happens to share another's hash is still a different id.
+        let mut forged = c;
+        forged.1 = a.1;
+        assert_ne!(a, forged);
+
+        assert_eq!(GlobalElementId::default(), path(&[]));
     }
 }
