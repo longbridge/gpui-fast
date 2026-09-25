@@ -36,6 +36,7 @@ use crate::{
     FocusHandle, InspectorElementId, Keyed, LayoutId, Pixels, Point, Size, Style, Window,
     util::FluentBuilder, window::with_element_arena,
 };
+use collections::FxHashMap;
 use derive_more::Deref;
 use std::{
     any::Any,
@@ -233,11 +234,53 @@ pub struct GlobalElementId(#[deref] pub(crate) Arc<[ElementId]>, u64);
 
 impl GlobalElementId {
     pub(crate) fn new(path: Arc<[ElementId]>) -> Self {
+        let hash = Self::path_hash(&path);
+        GlobalElementId(path, hash)
+    }
+
+    fn path_hash(path: &[ElementId]) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = collections::FxHasher::default();
         path.hash(&mut hasher);
-        let hash = hasher.finish();
-        GlobalElementId(path, hash)
+        hasher.finish()
+    }
+}
+
+/// The global ids handed out this frame and the last, by the hash of their
+/// path.
+///
+/// An element whose path is the one it had on the frame before, which is
+/// nearly every element, is given the id it had then, rather than a copy of
+/// the whole element id stack to be dropped id by id when the frame is done.
+#[derive(Default)]
+pub(crate) struct GlobalIdCache {
+    previous: FxHashMap<u64, GlobalElementId>,
+    current: FxHashMap<u64, GlobalElementId>,
+}
+
+impl GlobalIdCache {
+    /// The global id of `path`: one handed out already if there is one, a
+    /// new one otherwise.
+    pub(crate) fn get(&mut self, path: &[ElementId]) -> GlobalElementId {
+        let hash = GlobalElementId::path_hash(path);
+        if let Some(id) = self.current.get(&hash)
+            && *id.0 == *path
+        {
+            return id.clone();
+        }
+        let id = match self.previous.get(&hash) {
+            Some(id) if *id.0 == *path => id.clone(),
+            _ => GlobalElementId(Arc::from(path), hash),
+        };
+        self.current.insert(hash, id.clone());
+        id
+    }
+
+    /// Keeps this frame's ids for the next one to find, and forgets the
+    /// previous frame's.
+    pub(crate) fn finish_frame(&mut self) {
+        mem::swap(&mut self.previous, &mut self.current);
+        self.current.clear();
     }
 }
 
@@ -359,7 +402,7 @@ impl<E: Element> Drawable<E> {
                 let layout_key = window.push_layout_key(element_id.as_ref());
                 let global_id = element_id.map(|element_id| {
                     window.element_id_stack.push(element_id);
-                    GlobalElementId::new(Arc::from(&*window.element_id_stack))
+                    window.global_ids.get(&window.element_id_stack)
                 });
 
                 let inspector_id;
@@ -935,5 +978,44 @@ mod tests {
         assert_ne!(a, forged);
 
         assert_eq!(GlobalElementId::default(), path(&[]));
+    }
+
+    /// A path asked for again this frame or the next gets the id already
+    /// made for it, not a new copy; one unused for a whole frame is let go,
+    /// and one whose hash is shared with another path is never mistaken
+    /// for it.
+    #[test]
+    fn global_ids_are_reused_while_their_path_is_in_use() {
+        let path = |ids: &[&'static str]| -> Vec<ElementId> {
+            ids.iter().map(|id| ElementId::from(*id)).collect()
+        };
+        let row = path(&["root", "table", "row"]);
+        let cell = path(&["root", "table", "cell"]);
+        let mut cache = GlobalIdCache::default();
+
+        let first = cache.get(&row);
+        assert!(Arc::ptr_eq(&first.0, &cache.get(&row).0));
+
+        cache.finish_frame();
+        let next = cache.get(&row);
+        assert!(
+            Arc::ptr_eq(&first.0, &next.0),
+            "a path in use last frame keeps its id"
+        );
+
+        cache.finish_frame();
+        cache.finish_frame();
+        let later = cache.get(&row);
+        assert!(
+            !Arc::ptr_eq(&first.0, &later.0),
+            "a path unused for a frame is let go"
+        );
+        assert_eq!(first, later);
+
+        let hash = GlobalElementId::path_hash(&row);
+        cache
+            .current
+            .insert(hash, GlobalElementId(Arc::from(&*cell), hash));
+        assert_eq!(&*cache.get(&row).0, &*row);
     }
 }

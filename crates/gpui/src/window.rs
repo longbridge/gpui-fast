@@ -1210,6 +1210,7 @@ pub struct Window {
     frame_phase_times: (Duration, Duration, Duration),
     pub(crate) root: Option<AnyView>,
     pub(crate) element_id_stack: SmallVec<[ElementId; 32]>,
+    pub(crate) global_ids: crate::element::GlobalIdCache,
     pub(crate) text_style_stack: Vec<TextStyleRefinement>,
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
@@ -2080,6 +2081,7 @@ impl Window {
             frame_phase_times: (Duration::ZERO, Duration::ZERO, Duration::ZERO),
             root: None,
             element_id_stack: SmallVec::default(),
+            global_ids: Default::default(),
             text_style_stack: Vec::new(),
             rendered_entity_stack: Vec::new(),
             element_offset_stack: Vec::new(),
@@ -2987,7 +2989,7 @@ impl Window {
         f: impl FnOnce(&GlobalElementId, &mut Self) -> R,
     ) -> R {
         self.with_id(element_id, |this| {
-            let global_id = GlobalElementId::new(Arc::from(&*this.element_id_stack));
+            let global_id = this.global_ids.get(&this.element_id_stack);
 
             f(&global_id, this)
         })
@@ -3281,6 +3283,7 @@ impl Window {
         self.layout_root_index = 0;
         self.layout_prepaint_scope = LAYOUT_ROOT_SEED;
         self.text_system().finish_frame();
+        self.global_ids.finish_frame();
         self.next_frame.finish(&mut self.rendered_frame);
 
         self.invalidator.set_phase(DrawPhase::Focus);
