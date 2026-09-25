@@ -32,6 +32,16 @@ where
     insert_path: Vec<usize>,
     /// Reusable stack for search operations.
     search_stack: Vec<NonNull<Node<U>>>,
+    /// The bounds inserted since the tree was last cleared, in order, each
+    /// with the ordering it was given.
+    recorded: Vec<(Bounds<U>, u32)>,
+    /// What `recorded` held when the tree was cleared.
+    previous: Vec<(Bounds<U>, u32)>,
+    /// Whether every insert since the tree was cleared has matched the one in
+    /// the same position in `previous`. The orderings are then already known
+    /// and the tree is not built at all; it is built from `recorded` the
+    /// first time an insert differs.
+    replaying: bool,
 }
 
 /// A node in the bounds tree.
@@ -105,12 +115,20 @@ where
         + Default,
 {
     /// Clears all nodes from the tree.
+    ///
+    /// What was inserted since the last clear is kept aside: a frame usually
+    /// inserts the same bounds in the same order as the one before it, and an
+    /// ordering depends on nothing but the bounds inserted before it, so as
+    /// long as that holds the orderings can be handed out again as they were.
     pub fn clear(&mut self) {
         self.nodes.clear();
         self.root = None;
         self.max_leaf = None;
         self.insert_path.clear();
         self.search_stack.clear();
+        std::mem::swap(&mut self.previous, &mut self.recorded);
+        self.recorded.clear();
+        self.replaying = true;
     }
 
     /// Inserts bounds into the tree and returns its assigned ordering.
@@ -118,21 +136,49 @@ where
     /// The ordering is one greater than the maximum ordering of any
     /// existing bounds that intersect with the new bounds.
     pub fn insert(&mut self, new_bounds: Bounds<U>) -> u32 {
+        if self.replaying {
+            let position = self.recorded.len();
+            if let Some((previous, ordering)) = self.previous.get(position)
+                && *previous == new_bounds
+            {
+                let ordering = *ordering;
+                self.recorded.push((new_bounds, ordering));
+                return ordering;
+            }
+            self.replaying = false;
+            self.build_from_recorded();
+        }
+
         // Find maximum ordering among intersecting bounds
         let max_intersecting = self.find_max_ordering(&new_bounds);
         let ordering = max_intersecting + 1;
 
         // Insert the new leaf
-        let new_leaf_idx = self.insert_leaf(new_bounds, ordering);
+        let new_leaf_idx = self.insert_leaf(new_bounds.clone(), ordering);
 
-        // Update max_leaf tracking
+        self.track_max_leaf(new_leaf_idx, ordering);
+        self.recorded.push((new_bounds, ordering));
+        ordering
+    }
+
+    /// Remembers `leaf` as the one with the highest ordering if it is.
+    fn track_max_leaf(&mut self, leaf_idx: usize, ordering: u32) {
         self.max_leaf = match self.max_leaf {
-            None => Some(new_leaf_idx),
-            Some(old_idx) if self.nodes[old_idx].max_order < ordering => Some(new_leaf_idx),
+            None => Some(leaf_idx),
+            Some(old_idx) if self.nodes[old_idx].max_order < ordering => Some(leaf_idx),
             some => some,
         };
+    }
 
-        ordering
+    /// Builds the tree from what has been inserted since it was cleared, whose
+    /// orderings were handed out without it. Their orderings are known, so
+    /// there is nothing to search for, only leaves to place.
+    fn build_from_recorded(&mut self) {
+        for position in 0..self.recorded.len() {
+            let (bounds, ordering) = self.recorded[position].clone();
+            let leaf_idx = self.insert_leaf(bounds, ordering);
+            self.track_max_leaf(leaf_idx, ordering);
+        }
     }
 
     /// Finds the maximum ordering among all bounds that intersect with the query.
@@ -397,6 +443,9 @@ where
             max_leaf: None,
             insert_path: Vec::new(),
             search_stack: Vec::new(),
+            recorded: Vec::new(),
+            previous: Vec::new(),
+            replaying: false,
         }
     }
 }
@@ -497,6 +546,62 @@ mod tests {
                 let actual_ordering = tree.insert(bounds);
                 assert_eq!(actual_ordering, expected_ordering);
             }
+        }
+    }
+
+    /// A tree hands out last fill's orderings again while the bounds come in
+    /// as they did then, and builds itself the moment they stop. Each frame
+    /// here follows the one before for a while and then goes its own way, or
+    /// repeats it, or differs from the start, and every ordering is checked
+    /// against every bounds inserted before it in that frame.
+    #[test]
+    fn replaying_the_last_fill_gives_what_inserting_it_would() {
+        fn random_bounds(rng: &mut rand::rngs::StdRng) -> Bounds<f32> {
+            Bounds {
+                origin: Point {
+                    x: rng.random_range(-100.0..100.0),
+                    y: rng.random_range(-100.0..100.0),
+                },
+                size: Size {
+                    width: rng.random_range(0.0..50.0),
+                    height: rng.random_range(0.0..50.0),
+                },
+            }
+        }
+        fn fill(tree: &mut BoundsTree<f32>, frame: &[Bounds<f32>]) {
+            tree.clear();
+            let mut inserted: Vec<(Bounds<f32>, u32)> = Vec::new();
+            for bounds in frame {
+                let expected = inserted
+                    .iter()
+                    .filter_map(|(other, order)| other.intersects(bounds).then_some(*order))
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                assert_eq!(tree.insert(*bounds), expected);
+                inserted.push((*bounds, expected));
+            }
+        }
+
+        for seed in 1..=300 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            let mut tree = BoundsTree::default();
+            let count = rng.random_range(1..=120);
+            let first: Vec<_> = (0..count).map(|_| random_bounds(&mut rng)).collect();
+            fill(&mut tree, &first);
+
+            // Follows the last fill for a while, then diverges.
+            let kept = rng.random_range(0..=count);
+            let mut second: Vec<_> = first[..kept].to_vec();
+            second.extend((0..rng.random_range(0..=60)).map(|_| random_bounds(&mut rng)));
+            fill(&mut tree, &second);
+
+            // Repeats it exactly.
+            fill(&mut tree, &second);
+
+            // Differs from the first bounds on.
+            let third: Vec<_> = (0..count).map(|_| random_bounds(&mut rng)).collect();
+            fill(&mut tree, &third);
         }
     }
 
