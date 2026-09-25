@@ -37,6 +37,7 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     mem,
+    ops::{Deref, DerefMut},
     rc::Rc,
     sync::Arc,
     time::Duration,
@@ -2097,6 +2098,111 @@ impl IntoElement for Div {
     }
 }
 
+/// An element's accessibility properties, allocated once one of them is set.
+///
+/// Most elements set none, and an [`Interactivity`] moves with its element
+/// through every call of its builder, so the properties' 300-odd bytes are
+/// kept out of it until they are needed.
+#[derive(Default)]
+pub(crate) struct Aria(Option<Box<AriaProperties>>);
+
+static NO_ARIA: AriaProperties = AriaProperties {
+    author_id: None,
+    label: None,
+    description: None,
+    keyshortcuts: None,
+    selected: None,
+    expanded: None,
+    toggled: None,
+    numeric_value: None,
+    min_numeric_value: None,
+    max_numeric_value: None,
+    numeric_value_step: None,
+    value: None,
+    placeholder: None,
+    orientation: None,
+    level: None,
+    position_in_set: None,
+    size_of_set: None,
+    row_index: None,
+    column_index: None,
+    row_count: None,
+    column_count: None,
+};
+
+impl Deref for Aria {
+    type Target = AriaProperties;
+
+    fn deref(&self) -> &AriaProperties {
+        self.0.as_deref().unwrap_or(&NO_ARIA)
+    }
+}
+
+impl DerefMut for Aria {
+    fn deref_mut(&mut self) -> &mut AriaProperties {
+        self.0.get_or_insert_with(Default::default)
+    }
+}
+
+/// A list one pointer wide that allocates nothing while it is empty.
+///
+/// An [`Interactivity`] holds a score of listener lists, nearly all of them
+/// empty on any one element, and moves with its element through every call
+/// of its builder. As `Vec`s they were 500 of its bytes, copied every time.
+// A boxed `Vec` is one pointer where a `Vec` is three, which is the point;
+// the second allocation is paid only by a list that has something in it.
+#[allow(clippy::box_collection)]
+pub(crate) struct LazyVec<T>(Option<Box<Vec<T>>>);
+
+impl<T> Default for LazyVec<T> {
+    fn default() -> Self {
+        LazyVec(None)
+    }
+}
+
+impl<T: Clone> Clone for LazyVec<T> {
+    fn clone(&self) -> Self {
+        LazyVec(self.0.clone())
+    }
+}
+
+impl<T> LazyVec<T> {
+    pub(crate) fn push(&mut self, item: T) {
+        self.0.get_or_insert_with(Default::default).push(item);
+    }
+
+    /// Takes every item out, leaving the list empty.
+    pub(crate) fn drain(&mut self, _: std::ops::RangeFull) -> std::vec::IntoIter<T> {
+        mem::take(self).into_iter()
+    }
+}
+
+impl<T> Deref for LazyVec<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        self.0.as_deref().map_or(&[], Vec::as_slice)
+    }
+}
+
+impl<T> IntoIterator for LazyVec<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.map(|items| *items).unwrap_or_default().into_iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a LazyVec<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct AriaProperties {
     pub(crate) author_id: Option<SharedString>,
@@ -2153,27 +2259,27 @@ pub struct Interactivity {
     pub(crate) group_hover_style: Option<GroupStyle>,
     pub(crate) active_style: Option<Box<StyleRefinement>>,
     pub(crate) group_active_style: Option<GroupStyle>,
-    pub(crate) drag_over_styles: Vec<(
+    pub(crate) drag_over_styles: LazyVec<(
         TypeId,
         Box<dyn Fn(&dyn Any, &mut Window, &mut App) -> StyleRefinement>,
     )>,
-    pub(crate) group_drag_over_styles: Vec<(TypeId, GroupStyle)>,
-    pub(crate) mouse_down_listeners: Vec<MouseDownListener>,
-    pub(crate) mouse_up_listeners: Vec<MouseUpListener>,
-    pub(crate) mouse_pressure_listeners: Vec<MousePressureListener>,
-    pub(crate) mouse_move_listeners: Vec<MouseMoveListener>,
-    pub(crate) mouse_exit_listeners: Vec<MouseExitListener>,
-    pub(crate) file_drop_exit_listeners: Vec<FileDropExitListener>,
-    pub(crate) scroll_wheel_listeners: Vec<ScrollWheelListener>,
-    pub(crate) pinch_listeners: Vec<PinchListener>,
-    pub(crate) key_down_listeners: Vec<KeyDownListener>,
-    pub(crate) key_up_listeners: Vec<KeyUpListener>,
-    pub(crate) modifiers_changed_listeners: Vec<ModifiersChangedListener>,
-    pub(crate) action_listeners: Vec<(TypeId, ActionListener)>,
-    pub(crate) drop_listeners: Vec<(TypeId, DropListener)>,
+    pub(crate) group_drag_over_styles: LazyVec<(TypeId, GroupStyle)>,
+    pub(crate) mouse_down_listeners: LazyVec<MouseDownListener>,
+    pub(crate) mouse_up_listeners: LazyVec<MouseUpListener>,
+    pub(crate) mouse_pressure_listeners: LazyVec<MousePressureListener>,
+    pub(crate) mouse_move_listeners: LazyVec<MouseMoveListener>,
+    pub(crate) mouse_exit_listeners: LazyVec<MouseExitListener>,
+    pub(crate) file_drop_exit_listeners: LazyVec<FileDropExitListener>,
+    pub(crate) scroll_wheel_listeners: LazyVec<ScrollWheelListener>,
+    pub(crate) pinch_listeners: LazyVec<PinchListener>,
+    pub(crate) key_down_listeners: LazyVec<KeyDownListener>,
+    pub(crate) key_up_listeners: LazyVec<KeyUpListener>,
+    pub(crate) modifiers_changed_listeners: LazyVec<ModifiersChangedListener>,
+    pub(crate) action_listeners: LazyVec<(TypeId, ActionListener)>,
+    pub(crate) drop_listeners: LazyVec<(TypeId, DropListener)>,
     pub(crate) can_drop_predicate: Option<CanDropPredicate>,
-    pub(crate) click_listeners: Vec<ClickListener>,
-    pub(crate) aux_click_listeners: Vec<ClickListener>,
+    pub(crate) click_listeners: LazyVec<ClickListener>,
+    pub(crate) aux_click_listeners: LazyVec<ClickListener>,
     pub(crate) drag_listener: Option<DragListener>,
     pub(crate) hover_listener: Option<Box<dyn Fn(&bool, &mut Window, &mut App)>>,
     pub(crate) hover_listener_mode: HoverListenerMode,
@@ -2186,11 +2292,11 @@ pub struct Interactivity {
     pub(crate) tab_stop: bool,
 
     pub(crate) a11y_action_listeners:
-        Vec<(accesskit::Action, crate::window::a11y::A11yActionListener)>,
+        LazyVec<(accesskit::Action, crate::window::a11y::A11yActionListener)>,
     pub(crate) a11y_synthetic_children: Option<Box<dyn FnOnce(&mut crate::A11ySubtreeBuilder)>>,
     pub(crate) report_active_descendant_focus: bool,
     pub(crate) override_role: Option<accesskit::Role>,
-    pub(crate) aria: AriaProperties,
+    pub(crate) aria: Aria,
 
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) source_location: Option<&'static core::panic::Location<'static>>,
