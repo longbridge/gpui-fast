@@ -330,13 +330,20 @@ impl<E: Element> Drawable<E> {
                 let inspector_id;
                 #[cfg(any(feature = "inspector", debug_assertions))]
                 {
-                    inspector_id = self.element.source_location().map(|source| {
-                        let path = crate::InspectorElementPath {
-                            global_id: GlobalElementId(Arc::from(&*window.element_id_stack)),
-                            source_location: source,
-                        };
-                        window.build_inspector_element_id(path)
-                    });
+                    // The path the inspector finds an element by is a copy of
+                    // the whole element id stack, so it is only built while the
+                    // inspector is open. Opening it refreshes the window.
+                    inspector_id = if window.inspector_enabled() {
+                        self.element.source_location().map(|source| {
+                            let path = crate::InspectorElementPath {
+                                global_id: GlobalElementId(Arc::from(&*window.element_id_stack)),
+                                source_location: source,
+                            };
+                            window.build_inspector_element_id(path)
+                        })
+                    } else {
+                        None
+                    };
                 }
                 #[cfg(not(any(feature = "inspector", debug_assertions)))]
                 {

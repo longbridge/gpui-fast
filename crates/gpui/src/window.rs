@@ -7086,6 +7086,12 @@ impl Window {
         self.refresh();
     }
 
+    /// Whether the inspector is open, so elements need the ids it finds them by.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub(crate) fn inspector_enabled(&self) -> bool {
+        self.inspector.is_some()
+    }
+
     /// Returns true if the window is in inspector mode.
     pub fn is_inspector_picking(&self, _cx: &App) -> bool {
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -9378,6 +9384,38 @@ mod tests {
         };
         assert_eq!(node_count(&mut cx, plain), node_count(&mut cx, keyed));
         assert_eq!(*plain_probes.borrow(), *keyed_probes.borrow());
+    }
+
+    /// Elements are given the ids the inspector finds them by only while it is
+    /// open, since building one copies the whole element id stack. Opening it
+    /// has to bring them back on the next frame.
+    #[test]
+    fn inspector_ids_are_built_only_while_the_inspector_is_open() {
+        let mut cx = TestAppContext::single();
+        let probes = Rc::new(RefCell::new(Vec::new()));
+        let window = retained_layout_window(&mut cx, probes);
+        let inspector_ids = |cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, _| {
+                window.rendered_frame.next_inspector_instance_ids.len()
+            })
+            .unwrap()
+        };
+
+        draw_frame(&mut cx, window.into());
+        assert_eq!(inspector_ids(&mut cx), 0);
+
+        cx.update_window(window.into(), |_, window, cx| window.toggle_inspector(cx))
+            .unwrap();
+        draw_frame(&mut cx, window.into());
+        assert!(
+            inspector_ids(&mut cx) > 0,
+            "opening the inspector should give elements their ids again"
+        );
+
+        cx.update_window(window.into(), |_, window, cx| window.toggle_inspector(cx))
+            .unwrap();
+        draw_frame(&mut cx, window.into());
+        assert_eq!(inspector_ids(&mut cx), 0);
     }
 
     /// A chip whose identity is given by a key or by an id.
