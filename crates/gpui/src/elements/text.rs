@@ -736,18 +736,22 @@ impl TextLayout {
         };
         let shaping_key = shaping_key(&text, &runs, &text_style, font_size, line_height);
         let decoration_key = decoration_key(&runs);
+        // Truncated text is shaped from a rewritten string whose runs no longer
+        // line up with these, so its decorations cannot be replaced in place.
+        let truncating = text_style.text_overflow.is_some();
         // Everything the measurement below captures that the shaping key does
-        // not: the decorations it shapes with, and the font it truncates with.
+        // not: the decorations it shapes with, and, when it truncates, the font
+        // it truncates with. Text that does not truncate never reads the font,
+        // so building one to hash it would be for nothing.
         let closure_key = {
             let mut hasher = FxHasher::default();
             shaping_key.hash(&mut hasher);
             decoration_key.hash(&mut hasher);
-            text_style.font().hash(&mut hasher);
+            if truncating {
+                text_style.font().hash(&mut hasher);
+            }
             hasher.finish()
         };
-        // Truncated text is shaped from a rewritten string whose runs no longer
-        // line up with these, so its decorations cannot be replaced in place.
-        let truncating = text_style.text_overflow.is_some();
 
         let (layout_id, state) = window.request_measured_layout_cached(
             Default::default(),
@@ -822,16 +826,24 @@ impl TextLayout {
                         return size;
                     }
 
-                    let (truncation_affix, truncate_from) = match text_style.text_overflow.clone() {
-                        Some(TextOverflow::Truncate(affix)) => (affix, TruncateFrom::End),
-                        Some(TextOverflow::TruncateStart(affix)) => (affix, TruncateFrom::Start),
-                        Some(TextOverflow::TruncateMiddle(affix)) => (affix, TruncateFrom::Middle),
-                        None => (SharedString::default(), TruncateFrom::End),
-                    };
-
-                    let mut line_wrapper =
-                        cx.text_system().line_wrapper(text_style.font(), font_size);
                     let (text, runs) = if let Some(truncate_width) = truncate_width {
+                        // Only truncation needs a wrapper, whose font has to be
+                        // resolved and whose slot in the pool has to be taken
+                        // and handed back; text that is not truncated would
+                        // pay for that on every measurement for nothing.
+                        let (truncation_affix, truncate_from) =
+                            match text_style.text_overflow.clone() {
+                                Some(TextOverflow::Truncate(affix)) => (affix, TruncateFrom::End),
+                                Some(TextOverflow::TruncateStart(affix)) => {
+                                    (affix, TruncateFrom::Start)
+                                }
+                                Some(TextOverflow::TruncateMiddle(affix)) => {
+                                    (affix, TruncateFrom::Middle)
+                                }
+                                None => (SharedString::default(), TruncateFrom::End),
+                            };
+                        let mut line_wrapper =
+                            cx.text_system().line_wrapper(text_style.font(), font_size);
                         if let Some(max_lines) = text_style.line_clamp
                             && let Some(wrap_width) = wrap_width
                         {
@@ -1630,17 +1642,84 @@ mod tests {
     struct ProbedTextView {
         color: Hsla,
         width: Pixels,
+        ellipsis: bool,
         probe: Rc<RefCell<Option<TextLayout>>>,
     }
 
     impl crate::Render for ProbedTextView {
         fn render(&mut self, _: &mut Window, _: &mut crate::Context<Self>) -> impl IntoElement {
-            use crate::{ParentElement as _, Styled as _, div};
-            div().w(self.width).child(ProbedText {
-                color: self.color,
-                probe: self.probe.clone(),
-            })
+            use crate::{ParentElement as _, Styled as _, div, prelude::FluentBuilder as _};
+            div()
+                .w(self.width)
+                .when(self.ellipsis, |this| this.text_ellipsis())
+                .child(ProbedText {
+                    color: self.color,
+                    probe: self.probe.clone(),
+                })
         }
+    }
+
+    /// The text a probed layout ended up showing, line by line.
+    fn probed_lines(probe: &Rc<RefCell<Option<TextLayout>>>) -> Vec<String> {
+        let layout = probe.borrow().clone().unwrap();
+        let inner = layout.0.borrow();
+        inner
+            .as_ref()
+            .unwrap()
+            .lines
+            .iter()
+            .map(|line| line.text.to_string())
+            .collect()
+    }
+
+    /// Only truncating text takes a line wrapper, so the one path that does has
+    /// to go on truncating: in a box too narrow for it, with an ellipsis, and
+    /// in full again once the box is wide enough, through the same retained
+    /// node and the measurement closure it kept.
+    #[test]
+    fn text_that_truncates_is_truncated_and_widening_it_shows_it_whole() {
+        use crate::{AppContext as _, TestAppContext, hsla, px};
+
+        let mut cx = TestAppContext::single();
+        let probe = Rc::new(RefCell::new(None));
+        let window = cx.add_window({
+            let probe = probe.clone();
+            move |_, _| ProbedTextView {
+                color: hsla(0., 0., 0., 1.),
+                width: px(30.),
+                ellipsis: true,
+                probe,
+            }
+        });
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+                .unwrap()
+        };
+
+        draw(&mut cx);
+        let narrow = probed_lines(&probe);
+        assert_eq!(
+            narrow.len(),
+            1,
+            "truncated text stays on one line: {narrow:?}"
+        );
+        assert!(
+            narrow[0].ends_with('…') && narrow[0].len() < PROBED_TEXT.len(),
+            "text in a narrow box should be cut short with an ellipsis: {narrow:?}"
+        );
+
+        window
+            .update(&mut cx, |view, _, cx| {
+                view.width = px(1000.);
+                cx.notify();
+            })
+            .unwrap();
+        draw(&mut cx);
+        assert_eq!(
+            probed_lines(&probe),
+            vec![PROBED_TEXT.to_string()],
+            "text in a box wide enough for it should be shown whole"
+        );
     }
 
     /// A retained text node keeps the measurement closure it has while nothing
@@ -1661,6 +1740,7 @@ mod tests {
             move |_, _| ProbedTextView {
                 color: red,
                 width: px(1000.),
+                ellipsis: false,
                 probe,
             }
         });
