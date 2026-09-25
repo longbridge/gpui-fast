@@ -442,6 +442,36 @@
     </div>
   </section>
 
+  <section class="chart">
+    <div class="prose">
+      <h2>In an application: gpui-kit's data table</h2>
+      <p>The benchmarks above are labels and rows without an id. gpui-kit's DataTable story is what an application looks like instead: a 5000-row table of quotes whose cells carry ids, hover states and click handlers, with 30% of its first 2000 rows given new values 30 times a second. Most of its elements are identified, so a large share of every frame goes to keeping their identities — hashing and comparing the <code>ElementId</code> path of each one to find its element state — which is work none of the steps above touch.</p>
+      <p>Figures are the share of the main thread's time spent in <code>Window::draw</code>, from 10 s of <code>sample</code> after 10 s of settling, two runs each, all three builds in one session. The window draws about 24 frames a second in a debug build and 29 in a release build, set by the refresh timer. <em>gpui-pre</em> is the crates.io snapshot gpui-kit used before it moved to this tree.</p>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Build</th>
+            <th>gpui-pre 0.3.6</th>
+            <th>This tree, before</th>
+            <th>This tree, now</th>
+            <th>Step</th>
+            <th>Against gpui-pre</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td class="label">debug (<code>cargo run</code>)</td><td>12.1%</td><td class="worse">13.6%</td><td>11.3%</td><td class="gain">−17%</td><td class="gain">−6%</td></tr>
+          <tr><td class="label">release</td><td>16.2%</td><td>14.3%</td><td>13.8%</td><td class="gain">−4%</td><td class="gain">−16%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p><strong>Elements are given inspector ids only while the inspector is open.</strong> Building one copies the whole element id stack and hashes it into a map, for every element in every frame. It is compiled in only for debug builds or with the <code>inspector</code> feature, so it never reached the benchmarks above and has no row in the table of steps; but <code>cargo run</code> is a debug build, and gpui-kit's workspace turns the feature on for release builds too. Upstream gpui already skips it unless the inspector is open, which is why this tree drew the table 12% slower than gpui-pre in a debug build before the step and draws it 6% faster after it.</p>
+      <p class="note">In release, the steps above take 42% off the table's prepaint, where layout and text shaping are, but request layout costs more than it did in gpui-pre and paint about a quarter more, which leaves 16% overall. A debug build also spends as much of its main thread generating the story's random quotes as drawing them, in crates the debug profile does not optimise, so a debug build's CPU use moves far less than its drawing does.</p>
+    </div>
+  </section>
+
   <footer class="prose">
     <p>Produced by <code>cargo run -p gpui --example grid_frames --release -- 50 50 &lt;percent&gt;</code> and <code>cargo run -p gpui --example scroll_frames --release -- uniform &lt;motion&gt; &lt;speed&gt; &lt;keying&gt; 10000 0 20 4</code>. Every build was compiled from its own commit with the same two examples and the same phase timer added to <code>Window::draw_roots</code>, then run alternately, rotating the order each round; each figure is the median of five runs. The median rather than the best: this machine runs the same binary in one of two speeds from one stretch to the next, and the best of a few runs reports whichever stretch a build happened to land in. The processor clocks down with a light load, so builds were only compared on workloads heavy enough to keep it at speed.</p>
     <p style="margin-top:12px"><a href="https://github.com/sunli829/gpui-fast">github.com/sunli829/gpui-fast</a></p>
