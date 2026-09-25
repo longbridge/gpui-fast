@@ -131,6 +131,15 @@ where
         self.replaying = true;
     }
 
+    /// Clears the tree and forgets what was inserted before, so the next fill
+    /// is ordered from scratch rather than replayed.
+    #[cfg(test)]
+    pub fn forget(&mut self) {
+        self.clear();
+        self.previous.clear();
+        self.replaying = false;
+    }
+
     /// Inserts bounds into the tree and returns its assigned ordering.
     ///
     /// The ordering is one greater than the maximum ordering of any

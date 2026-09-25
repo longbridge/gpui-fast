@@ -31,6 +31,8 @@ mod inspector;
 mod interactive;
 mod key_dispatch;
 mod keymap;
+#[cfg(test)]
+mod oracle_tests;
 mod path_builder;
 mod platform;
 pub mod prelude;

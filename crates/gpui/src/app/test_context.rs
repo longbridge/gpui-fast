@@ -125,10 +125,32 @@ impl AppContext for TestAppContext {
 impl TestAppContext {
     /// Creates a new `TestAppContext`. Usually you can rely on `#[gpui::test]` to do this for you.
     pub fn build(dispatcher: TestDispatcher, fn_name: Option<&'static str>) -> Self {
+        Self::build_with_text_system(dispatcher, fn_name, None)
+    }
+
+    /// Creates a `TestAppContext` whose platform lays out and rasterizes text
+    /// with the given text system rather than the no-op one.
+    #[cfg(test)]
+    pub(crate) fn with_text_system(text_system: Arc<dyn crate::PlatformTextSystem>) -> Self {
+        Self::build_with_text_system(TestDispatcher::new(0), None, Some(text_system))
+    }
+
+    fn build_with_text_system(
+        dispatcher: TestDispatcher,
+        fn_name: Option<&'static str>,
+        text_system: Option<Arc<dyn crate::PlatformTextSystem>>,
+    ) -> Self {
         let arc_dispatcher = Arc::new(dispatcher.clone());
         let background_executor = BackgroundExecutor::new(arc_dispatcher.clone());
         let foreground_executor = ForegroundExecutor::new(arc_dispatcher);
-        let platform = TestPlatform::new(background_executor.clone(), foreground_executor.clone());
+        let platform = match text_system {
+            Some(text_system) => TestPlatform::with_text_system(
+                background_executor.clone(),
+                foreground_executor.clone(),
+                text_system,
+            ),
+            None => TestPlatform::new(background_executor.clone(), foreground_executor.clone()),
+        };
         let asset_source = Arc::new(());
         let http_client = http_client::FakeHttpClient::with_404_response();
         let text_system = Arc::new(TextSystem::new(platform.text_system()));

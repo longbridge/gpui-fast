@@ -10,8 +10,8 @@ use crate::{
 };
 use std::{
     fmt::Debug,
-    mem,
     iter::Peekable,
+    mem,
     ops::{Add, Range, Sub},
     slice,
 };
@@ -160,6 +160,60 @@ impl Scene {
         self.paint_operations.len()
     }
 
+    /// Forgets the orderings recorded for replaying, so the next frame orders
+    /// every primitive from scratch.
+    #[cfg(test)]
+    pub(crate) fn forget_orderings(&mut self) {
+        self.primitive_bounds.forget();
+    }
+
+    /// Everything this finished scene draws, in drawing order, as text two
+    /// scenes can be compared by: each primitive with its bounds, clip, colours
+    /// and ordering, and each layer's bounds. Atlas tiles are left out, since
+    /// two windows need not place the same glyph in the same tile.
+    #[cfg(test)]
+    pub(crate) fn describe(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for operation in &self.paint_operations {
+            match operation {
+                PaintOperation::StartLayer(bounds) => lines.push(format!("layer {bounds:?}")),
+                PaintOperation::EndLayer => lines.push("end layer".into()),
+                PaintOperation::Primitive(..) => {}
+            }
+        }
+        lines.extend(self.shadows.iter().map(|shadow| format!("{shadow:?}")));
+        lines.extend(self.quads.iter().map(|quad| format!("{quad:?}")));
+        lines.extend(
+            self.underlines
+                .iter()
+                .map(|underline| format!("{underline:?}")),
+        );
+        lines.extend(self.monochrome_sprites.iter().map(|sprite| {
+            format!(
+                "monochrome sprite {} {:?} {:?} {:?}",
+                sprite.order, sprite.bounds, sprite.content_mask, sprite.color
+            )
+        }));
+        lines.extend(self.subpixel_sprites.iter().map(|sprite| {
+            format!(
+                "subpixel sprite {} {:?} {:?} {:?}",
+                sprite.order, sprite.bounds, sprite.content_mask, sprite.color
+            )
+        }));
+        lines.extend(self.polychrome_sprites.iter().map(|sprite| {
+            format!(
+                "polychrome sprite {} {:?} {:?}",
+                sprite.order, sprite.bounds, sprite.content_mask
+            )
+        }));
+        lines.extend(
+            self.paths
+                .iter()
+                .map(|path| format!("path {} {:?}", path.order, path.bounds)),
+        );
+        lines
+    }
+
     pub fn push_layer(&mut self, bounds: Bounds<ScaledPixels>) {
         let order = self.primitive_bounds.insert(bounds);
         self.layer_stack.push(order);
@@ -266,8 +320,12 @@ impl Scene {
             PrimitiveKind::Shadow => {
                 at(&self.shadows, &positions.shadows, emitted_at).map(Primitive::Shadow)
             }
-            PrimitiveKind::Quad => at(&self.quads, &positions.quads, emitted_at).map(Primitive::Quad),
-            PrimitiveKind::Path => at(&self.paths, &positions.paths, emitted_at).map(Primitive::Path),
+            PrimitiveKind::Quad => {
+                at(&self.quads, &positions.quads, emitted_at).map(Primitive::Quad)
+            }
+            PrimitiveKind::Path => {
+                at(&self.paths, &positions.paths, emitted_at).map(Primitive::Path)
+            }
             PrimitiveKind::Underline => {
                 at(&self.underlines, &positions.underlines, emitted_at).map(Primitive::Underline)
             }

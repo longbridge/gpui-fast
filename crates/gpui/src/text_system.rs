@@ -665,6 +665,12 @@ impl WindowTextSystem {
         self.line_layout_cache.finish_frame()
     }
 
+    /// Forgets every line laid out so far. See [`LineLayoutCache::forget`].
+    #[cfg(test)]
+    pub(crate) fn forget_line_layouts(&self) {
+        self.line_layout_cache.forget()
+    }
+
     /// Layout the given line of text, at the given font_size.
     /// Subsets of the line can be styled independently with the `runs` parameter.
     /// Generally, you should prefer to use [`Self::shape_line`] instead, which

@@ -619,6 +619,14 @@ impl LineLayoutCache {
     /// answers from the lines it keeps without asking the cache for them, and
     /// whose text can reach a different node at any moment — a row sliding into
     /// its neighbour's slot — and ask for the same lines there.
+    /// Forgets every line laid out so far, so the next frame shapes what it
+    /// shows from scratch.
+    #[cfg(test)]
+    pub fn forget(&self) {
+        *self.previous_frame.lock() = FrameCache::default();
+        *self.current_frame.write() = FrameCache::default();
+    }
+
     pub fn finish_frame(&self) {
         let mut previous = self.previous_frame.lock();
         let mut current = self.current_frame.write();

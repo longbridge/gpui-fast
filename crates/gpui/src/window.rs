@@ -5235,6 +5235,34 @@ impl Window {
         }
     }
 
+    /// Drops everything this window keeps from one frame to the next to save
+    /// work — retained layout nodes and the measurements they hold, shaped
+    /// lines, recorded orderings — and asks for a full refresh, so the next
+    /// frame is drawn the way a window drawing its first frame would draw it.
+    /// State the application can observe, such as element state, is kept.
+    #[cfg(test)]
+    pub(crate) fn forget_retained_state(&mut self) {
+        self.layout_engine = Some(TaffyLayoutEngine::new());
+        self.text_system.forget_line_layouts();
+        self.rendered_frame.scene.forget_orderings();
+        self.next_frame.scene.forget_orderings();
+        self.refresh();
+    }
+
+    /// What the last drawn frame shows and where it can be hit, as text two
+    /// frames can be compared by. See [`Scene::describe`].
+    #[cfg(test)]
+    pub(crate) fn describe_rendered_frame(&self) -> Vec<String> {
+        let mut lines = self.rendered_frame.scene.describe();
+        lines.extend(self.rendered_frame.hitboxes.iter().map(|hitbox| {
+            format!(
+                "hitbox {:?} {:?} {:?}",
+                hitbox.bounds, hitbox.content_mask, hitbox.behavior
+            )
+        }));
+        lines
+    }
+
     /// Zeroes the counters reported by [`Window::layout_stats`].
     pub fn reset_layout_stats(&mut self) {
         self.frame_phase_times = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
