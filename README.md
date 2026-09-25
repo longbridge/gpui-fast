@@ -88,6 +88,9 @@ Each of these is one commit, with its own measurements in the commit message.
   row.
 - **A paint operation records where its primitive went rather than copying it**,
   which takes the scene 1.7 MB lighter.
+- **The bounds tree that orders primitives stays balanced.** It never split a
+  full node, so bounds arriving in painting order nested it dozens of levels
+  deep; splitting like an R-tree halves what paint costs.
 - **List items without an id are matched by their index**, so a scrolled
   `uniform_list` or `list` keeps the layout of every row still in view whether
   or not its rows are identified.
