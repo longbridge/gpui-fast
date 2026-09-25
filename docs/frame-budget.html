@@ -196,7 +196,7 @@
 
   <header class="prose">
     <p class="eyebrow">gpui · Apple M4 · real window</p>
-    <h1>A frame, from 8.2 ms to 4.2 ms</h1>
+    <h1>A frame, from 8.1 ms to 3.8 ms</h1>
     <p class="lede">A grid of 2500 cells, each holding a short label, redrawn continuously, and a wide table scrolled back and forth. The current tree measured against gpui as it was extracted from Zed, and against every step in between — in a real window, presented by the GPU, not headless.</p>
   </header>
 
@@ -211,20 +211,20 @@
     <p class="eyebrow">Whole frame, grid at rest</p>
     <div class="headline">
       <div class="figure">
-        <span class="value was">8.15</span>
+        <span class="value was">8.14</span>
         <span class="caption">as extracted, ms/frame</span>
       </div>
       <span class="arrow">→</span>
       <div class="figure">
-        <span class="value now">4.15</span>
+        <span class="value now">3.75</span>
         <span class="caption">now, ms/frame</span>
       </div>
       <div class="figure">
-        <span class="value now">−49%</span>
+        <span class="value now">−54%</span>
         <span class="caption">of a frame's main-thread work</span>
       </div>
     </div>
-    <p class="note" style="margin-top:18px">A 120 Hz display gives a frame 8.33 ms, and the wall clock never reports less than that, so builds are compared on the CPU time the main thread spends on each frame — where gpui builds, lays out and paints. Extracted gpui used nearly all of it: the grid ran at the edge of the refresh whether it was still or changing. Now the still grid takes half the frame, and one where every cell changes two thirds of it.</p>
+    <p class="note" style="margin-top:18px">A 120 Hz display gives a frame 8.33 ms, and the wall clock never reports less than that, so builds are compared on the CPU time the main thread spends on each frame — where gpui builds, lays out and paints. Extracted gpui used nearly all of it: the grid ran at the edge of the refresh whether it was still or changing. Now the still grid takes less than half the frame, and one where every cell changes two thirds of it.</p>
   </section>
 
   <section class="chart">
@@ -262,16 +262,16 @@
 
 <!--CHART-->
         <polyline class="draw" fill="none" stroke="var(--was)" stroke-width="2.5" stroke-linejoin="round"
-          points="108,85.0 254,66.8 400,64.3 546,81.6 692,80.4"></polyline>
+          points="108,85.3 254,83.1 400,81.9 546,81.3 692,80.4"></polyline>
         <polyline class="draw" fill="none" stroke="var(--accent)" stroke-width="3" stroke-linejoin="round" style="animation-delay:.08s"
-          points="108,208.2 254,209.4 400,206.9 546,198.3 692,165.7"></polyline>
-        <g fill="var(--was)"><circle cx="108" cy="85.0" r="4"></circle><circle cx="254" cy="66.8" r="4"></circle><circle cx="400" cy="64.3" r="4"></circle><circle cx="546" cy="81.6" r="4"></circle><circle cx="692" cy="80.4" r="4"></circle></g>
-        <g fill="var(--accent)"><circle cx="108" cy="208.2" r="4.5"></circle><circle cx="254" cy="209.4" r="4.5"></circle><circle cx="400" cy="206.9" r="4.5"></circle><circle cx="546" cy="198.3" r="4.5"></circle><circle cx="692" cy="165.7" r="4.5"></circle></g>
+          points="108,220.5 254,205.7 400,204.2 546,198.9 692,167.8"></polyline>
+        <g fill="var(--was)"><circle cx="108" cy="85.3" r="4"></circle><circle cx="254" cy="83.1" r="4"></circle><circle cx="400" cy="81.9" r="4"></circle><circle cx="546" cy="81.3" r="4"></circle><circle cx="692" cy="80.4" r="4"></circle></g>
+        <g fill="var(--accent)"><circle cx="108" cy="220.5" r="4.5"></circle><circle cx="254" cy="205.7" r="4.5"></circle><circle cx="400" cy="204.2" r="4.5"></circle><circle cx="546" cy="198.9" r="4.5"></circle><circle cx="692" cy="167.8" r="4.5"></circle></g>
         <g class="point-label" fill="var(--was)" text-anchor="middle">
-          <text x="108" y="109">8.15</text><text x="692" y="70">8.30</text>
+          <text x="108" y="109">8.14</text><text x="692" y="70">8.30</text>
         </g>
         <g class="point-label" fill="var(--accent)" text-anchor="middle">
-          <text x="108" y="232">4.15</text><text x="692" y="156">5.53</text>
+          <text x="108" y="244">3.75</text><text x="692" y="158">5.46</text>
         </g>
 <!--/CHART-->
         <g class="tick-label" text-anchor="middle">
@@ -300,16 +300,16 @@
         </thead>
         <tbody>
 <!--GRID-ROWS-->
-          <tr><td>0%</td><td>8.15 ms</td><td>4.15 ms</td><td class="gain">−49.1%</td><td>4.13–4.17</td><td>98% → 50%</td><td class="state">a window at rest, redrawn</td></tr>
-          <tr><td>1%</td><td>8.74 ms</td><td>4.11 ms</td><td class="gain">−53.0%</td><td>4.08–4.21</td><td>105% → 49%</td><td class="state">a few live values ticking</td></tr>
-          <tr><td>5%</td><td>8.82 ms</td><td>4.19 ms</td><td class="gain">−52.5%</td><td>4.17–4.20</td><td>106% → 50%</td><td class="state">one busy region</td></tr>
-          <tr><td>25%</td><td>8.26 ms</td><td>4.47 ms</td><td class="gain">−45.9%</td><td>4.47–4.57</td><td>99% → 54%</td><td class="state">a quarter of the view is live</td></tr>
-          <tr><td>100%</td><td>8.30 ms</td><td>5.53 ms</td><td class="gain">−33.4%</td><td>5.51–5.59</td><td>100% → 66%</td><td class="state">nothing holds still</td></tr>
+          <tr><td>0%</td><td>8.14 ms</td><td>3.75 ms</td><td class="gain">−53.9%</td><td>3.61–3.84</td><td>98% → 45%</td><td class="state">a window at rest, redrawn</td></tr>
+          <tr><td>1%</td><td>8.21 ms</td><td>4.23 ms</td><td class="gain">−48.5%</td><td>4.17–4.27</td><td>99% → 51%</td><td class="state">a few live values ticking</td></tr>
+          <tr><td>5%</td><td>8.25 ms</td><td>4.28 ms</td><td class="gain">−48.1%</td><td>4.23–4.33</td><td>99% → 51%</td><td class="state">one busy region</td></tr>
+          <tr><td>25%</td><td>8.27 ms</td><td>4.45 ms</td><td class="gain">−46.2%</td><td>4.43–4.48</td><td>99% → 53%</td><td class="state">a quarter of the view is live</td></tr>
+          <tr><td>100%</td><td>8.30 ms</td><td>5.46 ms</td><td class="gain">−34.2%</td><td>5.45–5.49</td><td>100% → 66%</td><td class="state">nothing holds still</td></tr>
 <!--/GRID-ROWS-->
         </tbody>
       </table>
     </div>
-    <p class="note prose">100% is the worst case by construction: every cell's text is different every frame, so there is nothing anywhere to reuse. It is still −33%. Extracted gpui ran at two speeds over these runs, around 8.2 ms and around 8.8 ms, and at 1% and 5% changing most of its runs landed on the slower one; at its faster speed those two gains would be about −50% rather than −53%.</p>
+    <p class="note prose">100% is the worst case by construction: every cell's text is different every frame, so there is nothing anywhere to reuse. It is still −34%.</p>
   </section>
 
   <section class="phases">
@@ -329,13 +329,13 @@
       <h3>Grid at rest — 0% changing</h3>
       <div class="bar-row">
         <span class="bar-name">as extracted</span>
-        <div class="bar"><div class="seg build" style="width:15.3%">1.38</div><div class="seg prepaint" style="width:31.4%">2.83</div><div class="seg paint" style="width:37.1%">3.34</div></div>
-        <span class="bar-total">7.55</span>
+        <div class="bar"><div class="seg build" style="width:15.1%">1.36</div><div class="seg prepaint" style="width:31.6%">2.84</div><div class="seg paint" style="width:36.9%">3.32</div></div>
+        <span class="bar-total">7.52</span>
       </div>
       <div class="bar-row">
         <span class="bar-name is-now">now</span>
-        <div class="bar"><div class="seg build" style="width:15.2%">1.37</div><div class="seg prepaint" style="width:4.8%"></div><div class="seg paint" style="width:22.0%">1.98</div></div>
-        <span class="bar-total">3.78</span>
+        <div class="bar"><div class="seg build" style="width:19.4%">1.75</div><div class="seg prepaint" style="width:6.3%"></div><div class="seg paint" style="width:10.8%">0.97</div></div>
+        <span class="bar-total">3.29</span>
       </div>
     </div>
 
@@ -343,19 +343,20 @@
       <h3>Everything changing — 100%</h3>
       <div class="bar-row">
         <span class="bar-name">as extracted</span>
-        <div class="bar"><div class="seg build" style="width:15.6%">1.40</div><div class="seg prepaint" style="width:32.1%">2.89</div><div class="seg paint" style="width:37.2%">3.35</div></div>
-        <span class="bar-total">7.64</span>
+        <div class="bar"><div class="seg build" style="width:15.7%">1.41</div><div class="seg prepaint" style="width:32.2%">2.90</div><div class="seg paint" style="width:37.1%">3.34</div></div>
+        <span class="bar-total">7.65</span>
       </div>
       <div class="bar-row">
         <span class="bar-name is-now">now</span>
-        <div class="bar"><div class="seg build" style="width:17.8%">1.60</div><div class="seg prepaint" style="width:20.8%">1.87</div><div class="seg paint" style="width:19.0%">1.71</div></div>
-        <span class="bar-total">5.18</span>
+        <div class="bar"><div class="seg build" style="width:17.0%">1.53</div><div class="seg prepaint" style="width:20.4%">1.84</div><div class="seg paint" style="width:19.3%">1.74</div></div>
+        <span class="bar-total">5.11</span>
       </div>
     </div>
 <!--/PHASES-->
 
     <div class="prose callout">
-      <p><strong>Prepaint falls from 2.83 ms to 0.43 ms at rest, and paint loses 40–50% at every share of change — 3.34 ms to 1.98 ms at rest, 3.35 ms to 1.71 ms with every cell changing.</strong> In a still frame, layout costs close to nothing: retained nodes are left alone. Paint did not move for a long time, because what it spent was ordering: every primitive is placed in a tree that finds what it overlaps, and that tree had grown thirteen levels deep where five would do. Kept balanced, it costs far less, whether or not anything changed. The phases add up to a little less than the main-thread time above; the rest is presenting the frame.</p>
+      <p><strong>Prepaint falls from 2.84 ms to 0.57 ms at rest, and paint from 3.32 ms to 0.97 ms at rest and from 3.34 ms to 1.74 ms with every cell changing.</strong> In a still frame, layout costs close to nothing: retained nodes are left alone. Paint did not move for a long time, because what it spent was ordering: every primitive is placed in a tree that finds what it overlaps, and that tree had grown thirteen levels deep where five would do. Kept balanced, it costs far less whether or not anything changed, and when nothing moved it is not consulted at all: the orderings a frame asks for are the ones the last frame was given. The phases add up to a little less than the main-thread time above; the rest is presenting the frame.</p>
+      <p>Build at rest is higher now than as extracted, 1.75 ms against 1.36 ms, though nothing in it got slower: the frame got light enough for the processor to clock down, and the same work takes longer at a lower clock. With another core kept busy, which holds the clock up, build takes 1.03 ms and the whole still frame 2.30 ms, against 5.05 ms for the tree before the last three steps under the same conditions. Every figure here is at whatever clock the processor chose, so the lightest frames understate what was saved.</p>
     </div>
   </section>
 
@@ -378,17 +379,17 @@
         </thead>
         <tbody>
 <!--SCROLL-ROWS-->
-          <tr><td class="label">still</td><td>6.56 ms</td><td>4.06 ms</td><td>3.83 ms</td><td class="gain">−41.6%</td><td><span>4.34</span> → 4.24 ms</td></tr>
-          <tr><td class="label">back and forth, unkeyed</td><td>8.22 ms</td><td class="worse">23.76 ms</td><td>4.50 ms</td><td class="gain">−45.3%</td><td><span class="worse">46.46</span> → 5.79 ms</td></tr>
-          <tr><td class="label">back and forth, keyed</td><td>8.48 ms</td><td>6.23 ms</td><td>4.59 ms</td><td class="gain">−45.9%</td><td><span>7.78</span> → 5.87 ms</td></tr>
-          <tr><td class="label">2 px/frame, unkeyed</td><td>7.60 ms</td><td>7.28 ms</td><td>3.70 ms</td><td class="gain">−51.3%</td><td><span class="worse">43.96</span> → 5.48 ms</td></tr>
-          <tr><td class="label">48 px/frame, unkeyed</td><td>9.60 ms</td><td>8.80 ms</td><td>6.33 ms</td><td class="gain">−34.1%</td><td><span>9.05</span> → 6.46 ms</td></tr>
+          <tr><td class="label">still</td><td>6.52 ms</td><td>4.04 ms</td><td>3.76 ms</td><td class="gain">−42.3%</td><td><span>4.27</span> → 4.07 ms</td></tr>
+          <tr><td class="label">back and forth, unkeyed</td><td>7.92 ms</td><td class="worse">23.48 ms</td><td>4.50 ms</td><td class="gain">−43.2%</td><td><span class="worse">45.13</span> → 5.59 ms</td></tr>
+          <tr><td class="label">back and forth, keyed</td><td>7.98 ms</td><td>5.09 ms</td><td>4.51 ms</td><td class="gain">−43.5%</td><td><span>6.27</span> → 5.62 ms</td></tr>
+          <tr><td class="label">2 px/frame, unkeyed</td><td>6.98 ms</td><td>6.90 ms</td><td>4.13 ms</td><td class="gain">−40.8%</td><td><span class="worse">43.40</span> → 6.21 ms</td></tr>
+          <tr><td class="label">48 px/frame, unkeyed</td><td>9.58 ms</td><td>8.81 ms</td><td>6.30 ms</td><td class="gain">−34.2%</td><td><span>9.05</span> → 6.43 ms</td></tr>
 <!--/SCROLL-ROWS-->
         </tbody>
       </table>
     </div>
     <div class="prose callout worse">
-      <p><strong>Retaining layout made unkeyed scrolling three times slower before it made it faster.</strong> "Before these steps" is the tree this report was first written about. A scrolled list of rows without an id cost 23.76 ms a frame there, against 8.22 ms as extracted, and 5% of frames took over 46 ms — a slowly dragged list stuttered every time it crossed a row. Retained text nodes had stopped asking the line cache for their lines, so the cache forgot them, and every row that moved into a neighbour's node shaped its text again. The steps below that fix it are the reason this table exists.</p>
+      <p><strong>Retaining layout made unkeyed scrolling three times slower before it made it faster.</strong> "Before these steps" is the tree this report was first written about. A scrolled list of rows without an id cost 23.48 ms a frame there, against 7.92 ms as extracted, and 5% of frames took over 45 ms — a slowly dragged list stuttered every time it crossed a row. Retained text nodes had stopped asking the line cache for their lines, so the cache forgot them, and every row that moved into a neighbour's node shaped its text again. The steps below that fix it are the reason this table exists.</p>
     </div>
   </section>
 
@@ -411,30 +412,32 @@
         </thead>
         <tbody>
 <!--STEP-ROWS-->
-          <tr><td class="step"><strong>As extracted from Zed</strong></td><td>8.15</td><td>8.30</td><td>8.22</td><td><span class="noisy" title="five runs: 8.04–8.56 ms">8.48</span></td><td>9.60</td></tr>
-          <tr><td class="step">Taffy layout nodes are kept between frames</td><td>5.58<span class="delta gain">−32%</span><span class="delta total gain">−32%</span></td><td>8.56<span class="delta worse">+3%</span><span class="delta total worse">+3%</span></td><td>15.87<span class="delta worse">+93%</span><span class="delta total worse">+93%</span></td><td>15.96<span class="delta worse">+88%</span><span class="delta total worse">+88%</span></td><td>9.51<span class="delta flat">−1%</span><span class="delta total flat">−1%</span></td></tr>
-          <tr><td class="step">An <code>ElementId</code> identifies a layout node wherever it is laid out</td><td>5.68<span class="delta flat">+2%</span><span class="delta total gain">−30%</span></td><td>8.39<span class="delta flat">−2%</span><span class="delta total flat">+1%</span></td><td>24.41<span class="delta worse">+54%</span><span class="delta total worse">+197%</span></td><td>6.23<span class="delta gain">−61%</span><span class="delta total gain">−27%</span></td><td>9.47<span class="delta flat">±0%</span><span class="delta total flat">−1%</span></td></tr>
-          <tr><td class="step">Shaped text is recoloured without being reshaped</td><td>5.72<span class="delta flat">+1%</span><span class="delta total gain">−30%</span></td><td>8.41<span class="delta flat">±0%</span><span class="delta total flat">+1%</span></td><td>24.42<span class="delta flat">±0%</span><span class="delta total worse">+197%</span></td><td>6.26<span class="delta flat">±0%</span><span class="delta total gain">−26%</span></td><td>9.45<span class="delta flat">±0%</span><span class="delta total flat">−2%</span></td></tr>
-          <tr><td class="step">Text that already fits its width is not reshaped</td><td>5.65<span class="delta flat">−1%</span><span class="delta total gain">−31%</span></td><td>7.95<span class="delta gain">−5%</span><span class="delta total gain">−4%</span></td><td>24.04<span class="delta flat">−2%</span><span class="delta total worse">+192%</span></td><td>6.21<span class="delta flat">−1%</span><span class="delta total gain">−27%</span></td><td>8.87<span class="delta gain">−6%</span><span class="delta total gain">−8%</span></td></tr>
-          <tr><td class="step">Measurements stop doing truncation and allocation work they do not use</td><td><span class="noisy" title="five runs: 5.60–6.04 ms">5.66</span><span class="delta flat">±0%</span><span class="delta total gain">−31%</span></td><td>7.86<span class="delta flat">−1%</span><span class="delta total gain">−5%</span></td><td>23.85<span class="delta flat">−1%</span><span class="delta total worse">+190%</span></td><td><span class="noisy" title="five runs: 5.90–6.40 ms">6.33</span><span class="delta flat">+2%</span><span class="delta total gain">−25%</span></td><td>8.92<span class="delta flat">+1%</span><span class="delta total gain">−7%</span></td></tr>
-          <tr><td class="step">A paint operation records where its primitive went</td><td>5.41<span class="delta gain">−4%</span><span class="delta total gain">−34%</span></td><td>7.60<span class="delta gain">−3%</span><span class="delta total gain">−8%</span></td><td>23.76<span class="delta flat">±0%</span><span class="delta total worse">+189%</span></td><td><span class="noisy" title="five runs: 5.16–6.28 ms">6.23</span><span class="delta flat">−2%</span><span class="delta total gain">−27%</span></td><td>8.80<span class="delta flat">−1%</span><span class="delta total gain">−8%</span></td></tr>
-          <tr><td class="step">A retained node's lines are handed back to the line cache</td><td>5.46<span class="delta flat">+1%</span><span class="delta total gain">−33%</span></td><td>7.70<span class="delta flat">+1%</span><span class="delta total gain">−7%</span></td><td><span class="noisy" title="five runs: 8.12–8.68 ms">8.64</span><span class="delta gain">−64%</span><span class="delta total worse">+5%</span></td><td><span class="noisy" title="five runs: 5.78–6.55 ms">6.22</span><span class="delta flat">±0%</span><span class="delta total gain">−27%</span></td><td>8.90<span class="delta flat">+1%</span><span class="delta total gain">−7%</span></td></tr>
-          <tr><td class="step">List items without an id are matched by their index</td><td>5.39<span class="delta flat">−1%</span><span class="delta total gain">−34%</span></td><td>7.69<span class="delta flat">±0%</span><span class="delta total gain">−7%</span></td><td><span class="noisy" title="five runs: 5.27–6.49 ms">5.35</span><span class="delta gain">−38%</span><span class="delta total gain">−35%</span></td><td>6.56<span class="delta worse">+5%</span><span class="delta total gain">−23%</span></td><td>8.38<span class="delta gain">−6%</span><span class="delta total gain">−13%</span></td></tr>
-          <tr><td class="step">A retained text node keeps the measurement closure it has</td><td>5.19<span class="delta gain">−4%</span><span class="delta total gain">−36%</span></td><td>7.73<span class="delta flat">+1%</span><span class="delta total gain">−7%</span></td><td><span class="noisy" title="five runs: 4.88–5.79 ms">5.30</span><span class="delta flat">−1%</span><span class="delta total gain">−36%</span></td><td><span class="noisy" title="five runs: 5.36–5.83 ms">5.80</span><span class="delta gain">−12%</span><span class="delta total gain">−32%</span></td><td>7.75<span class="delta gain">−8%</span><span class="delta total gain">−19%</span></td></tr>
-          <tr><td class="step">A node's style is left alone while its request is unchanged</td><td>4.99<span class="delta gain">−4%</span><span class="delta total gain">−39%</span></td><td>7.62<span class="delta flat">−1%</span><span class="delta total gain">−8%</span></td><td><span class="noisy" title="five runs: 4.71–5.07 ms">4.98</span><span class="delta gain">−6%</span><span class="delta total gain">−39%</span></td><td>5.00<span class="delta gain">−14%</span><span class="delta total gain">−41%</span></td><td>7.05<span class="delta gain">−9%</span><span class="delta total gain">−27%</span></td></tr>
-          <tr><td class="step">A removed node releases what its measurement held</td><td>5.01<span class="delta flat">±0%</span><span class="delta total gain">−39%</span></td><td>7.61<span class="delta flat">±0%</span><span class="delta total gain">−8%</span></td><td>4.70<span class="delta gain">−6%</span><span class="delta total gain">−43%</span></td><td>4.75<span class="delta gain">−5%</span><span class="delta total gain">−44%</span></td><td>6.53<span class="delta gain">−7%</span><span class="delta total gain">−32%</span></td></tr>
-          <tr><td class="step">Lines stay cached while something holds them</td><td>5.00<span class="delta flat">±0%</span><span class="delta total gain">−39%</span></td><td>7.65<span class="delta flat">+1%</span><span class="delta total gain">−8%</span></td><td>4.52<span class="delta gain">−4%</span><span class="delta total gain">−45%</span></td><td>4.59<span class="delta gain">−3%</span><span class="delta total gain">−46%</span></td><td>6.42<span class="delta flat">−2%</span><span class="delta total gain">−33%</span></td></tr>
-          <tr><td class="step">The bounds tree that orders primitives stays balanced</td><td>4.16<span class="delta gain">−17%</span><span class="delta total gain">−49%</span></td><td>5.92<span class="delta gain">−23%</span><span class="delta total gain">−29%</span></td><td>4.54<span class="delta flat">±0%</span><span class="delta total gain">−45%</span></td><td>4.63<span class="delta flat">+1%</span><span class="delta total gain">−45%</span></td><td>6.38<span class="delta flat">−1%</span><span class="delta total gain">−34%</span></td></tr>
-          <tr><td class="step">Only text that truncates takes a line wrapper</td><td>4.15<span class="delta flat">±0%</span><span class="delta total gain">−49%</span></td><td>5.53<span class="delta gain">−7%</span><span class="delta total gain">−33%</span></td><td>4.50<span class="delta flat">−1%</span><span class="delta total gain">−45%</span></td><td>4.59<span class="delta flat">−1%</span><span class="delta total gain">−46%</span></td><td>6.33<span class="delta flat">−1%</span><span class="delta total gain">−34%</span></td></tr>
+          <tr><td class="step"><strong>As extracted from Zed</strong></td><td>8.14</td><td>8.30</td><td>7.92</td><td>7.98</td><td>9.58</td></tr>
+          <tr><td class="step">Taffy layout nodes are kept between frames</td><td>5.68<span class="delta gain">−30%</span><span class="delta total gain">−30%</span></td><td>8.42<span class="delta flat">+1%</span><span class="delta total flat">+1%</span></td><td>15.53<span class="delta worse">+96%</span><span class="delta total worse">+96%</span></td><td>15.61<span class="delta worse">+96%</span><span class="delta total worse">+96%</span></td><td>9.48<span class="delta flat">−1%</span><span class="delta total flat">−1%</span></td></tr>
+          <tr><td class="step">An <code>ElementId</code> identifies a layout node wherever it is laid out</td><td><span class="noisy" title="five runs: 5.38–5.77 ms">5.63</span><span class="delta flat">−1%</span><span class="delta total gain">−31%</span></td><td>8.52<span class="delta flat">+1%</span><span class="delta total worse">+3%</span></td><td>24.12<span class="delta worse">+55%</span><span class="delta total worse">+205%</span></td><td>5.10<span class="delta gain">−67%</span><span class="delta total gain">−36%</span></td><td>9.50<span class="delta flat">±0%</span><span class="delta total flat">−1%</span></td></tr>
+          <tr><td class="step">Shaped text is recoloured without being reshaped</td><td><span class="noisy" title="five runs: 5.33–6.13 ms">5.62</span><span class="delta flat">±0%</span><span class="delta total gain">−31%</span></td><td>8.53<span class="delta flat">±0%</span><span class="delta total worse">+3%</span></td><td>24.12<span class="delta flat">±0%</span><span class="delta total worse">+205%</span></td><td>5.06<span class="delta flat">−1%</span><span class="delta total gain">−37%</span></td><td>9.46<span class="delta flat">±0%</span><span class="delta total flat">−1%</span></td></tr>
+          <tr><td class="step">Text that already fits its width is not reshaped</td><td>5.63<span class="delta flat">±0%</span><span class="delta total gain">−31%</span></td><td>8.02<span class="delta gain">−6%</span><span class="delta total gain">−3%</span></td><td>23.76<span class="delta flat">−1%</span><span class="delta total worse">+200%</span></td><td>5.03<span class="delta flat">−1%</span><span class="delta total gain">−37%</span></td><td>8.86<span class="delta gain">−6%</span><span class="delta total gain">−8%</span></td></tr>
+          <tr><td class="step">Measurements stop doing truncation and allocation work they do not use</td><td>5.61<span class="delta flat">±0%</span><span class="delta total gain">−31%</span></td><td>7.83<span class="delta flat">−2%</span><span class="delta total gain">−6%</span></td><td>23.61<span class="delta flat">−1%</span><span class="delta total worse">+198%</span></td><td>5.21<span class="delta worse">+4%</span><span class="delta total gain">−35%</span></td><td>8.93<span class="delta flat">+1%</span><span class="delta total gain">−7%</span></td></tr>
+          <tr><td class="step">A paint operation records where its primitive went</td><td>5.39<span class="delta gain">−4%</span><span class="delta total gain">−34%</span></td><td>7.61<span class="delta gain">−3%</span><span class="delta total gain">−8%</span></td><td>23.48<span class="delta flat">−1%</span><span class="delta total worse">+196%</span></td><td>5.09<span class="delta flat">−2%</span><span class="delta total gain">−36%</span></td><td>8.81<span class="delta flat">−1%</span><span class="delta total gain">−8%</span></td></tr>
+          <tr><td class="step">A retained node's lines are handed back to the line cache</td><td>5.36<span class="delta flat">−1%</span><span class="delta total gain">−34%</span></td><td>7.68<span class="delta flat">+1%</span><span class="delta total gain">−7%</span></td><td>8.09<span class="delta gain">−66%</span><span class="delta total flat">+2%</span></td><td>5.24<span class="delta worse">+3%</span><span class="delta total gain">−34%</span></td><td>8.90<span class="delta flat">+1%</span><span class="delta total gain">−7%</span></td></tr>
+          <tr><td class="step">List items without an id are matched by their index</td><td>5.36<span class="delta flat">±0%</span><span class="delta total gain">−34%</span></td><td>7.65<span class="delta flat">±0%</span><span class="delta total gain">−8%</span></td><td>5.26<span class="delta gain">−35%</span><span class="delta total gain">−34%</span></td><td>5.34<span class="delta flat">+2%</span><span class="delta total gain">−33%</span></td><td>8.34<span class="delta gain">−6%</span><span class="delta total gain">−13%</span></td></tr>
+          <tr><td class="step">A retained text node keeps the measurement closure it has</td><td>5.17<span class="delta gain">−4%</span><span class="delta total gain">−36%</span></td><td>7.74<span class="delta flat">+1%</span><span class="delta total gain">−7%</span></td><td>4.87<span class="delta gain">−7%</span><span class="delta total gain">−39%</span></td><td>4.89<span class="delta gain">−8%</span><span class="delta total gain">−39%</span></td><td>7.71<span class="delta gain">−8%</span><span class="delta total gain">−20%</span></td></tr>
+          <tr><td class="step">A node's style is left alone while its request is unchanged</td><td>5.06<span class="delta flat">−2%</span><span class="delta total gain">−38%</span></td><td>7.63<span class="delta flat">−1%</span><span class="delta total gain">−8%</span></td><td>4.60<span class="delta gain">−6%</span><span class="delta total gain">−42%</span></td><td>4.65<span class="delta gain">−5%</span><span class="delta total gain">−42%</span></td><td>6.92<span class="delta gain">−10%</span><span class="delta total gain">−28%</span></td></tr>
+          <tr><td class="step">A removed node releases what its measurement held</td><td>5.02<span class="delta flat">−1%</span><span class="delta total gain">−38%</span></td><td>7.64<span class="delta flat">±0%</span><span class="delta total gain">−8%</span></td><td>4.55<span class="delta flat">−1%</span><span class="delta total gain">−43%</span></td><td>4.57<span class="delta flat">−2%</span><span class="delta total gain">−43%</span></td><td>6.50<span class="delta gain">−6%</span><span class="delta total gain">−32%</span></td></tr>
+          <tr><td class="step">Lines stay cached while something holds them</td><td>4.96<span class="delta flat">−1%</span><span class="delta total gain">−39%</span></td><td>7.51<span class="delta flat">−2%</span><span class="delta total gain">−10%</span></td><td>4.53<span class="delta flat">±0%</span><span class="delta total gain">−43%</span></td><td>4.53<span class="delta flat">−1%</span><span class="delta total gain">−43%</span></td><td>6.40<span class="delta flat">−2%</span><span class="delta total gain">−33%</span></td></tr>
+          <tr><td class="step">The bounds tree that orders primitives stays balanced</td><td>4.12<span class="delta gain">−17%</span><span class="delta total gain">−49%</span></td><td>5.81<span class="delta gain">−23%</span><span class="delta total gain">−30%</span></td><td>4.51<span class="delta flat">±0%</span><span class="delta total gain">−43%</span></td><td>4.53<span class="delta flat">±0%</span><span class="delta total gain">−43%</span></td><td>6.38<span class="delta flat">±0%</span><span class="delta total gain">−33%</span></td></tr>
+          <tr><td class="step">Only text that truncates takes a line wrapper</td><td>4.10<span class="delta flat">±0%</span><span class="delta total gain">−50%</span></td><td>5.45<span class="delta gain">−6%</span><span class="delta total gain">−34%</span></td><td>4.50<span class="delta flat">±0%</span><span class="delta total gain">−43%</span></td><td>4.51<span class="delta flat">±0%</span><span class="delta total gain">−43%</span></td><td>6.31<span class="delta flat">−1%</span><span class="delta total gain">−34%</span></td></tr>
+          <tr><td class="step">Last frame's orderings are handed out while the bounds come in the same</td><td><span class="noisy" title="five runs: 3.61–3.84 ms">3.75</span><span class="delta gain">−9%</span><span class="delta total gain">−54%</span></td><td>5.46<span class="delta flat">±0%</span><span class="delta total gain">−34%</span></td><td>4.50<span class="delta flat">±0%</span><span class="delta total gain">−43%</span></td><td>4.51<span class="delta flat">±0%</span><span class="delta total gain">−43%</span></td><td>6.30<span class="delta flat">±0%</span><span class="delta total gain">−34%</span></td></tr>
 <!--/STEP-ROWS-->
         </tbody>
       </table>
     </div>
     <div class="prose">
       <p class="note">Scroll columns are the wide table going back and forth at 12 px/frame, unkeyed and keyed by index, and scrolling one way at 48 px/frame unkeyed.</p>
-      <p><strong>Two steps carry most of the grid:</strong> keeping layout nodes (−32% at rest) and keeping the bounds tree balanced (−17% at rest, −23% with everything changing). <strong>Two carry most of the scrolling:</strong> handing a retained node's lines back to the cache (−64% unkeyed) and matching unidentified list items by their index (−38% more). The measurement closure, the style fingerprint and releasing what removed nodes held each take another 4–14% off whichever workload they touch, and taking a line wrapper only for text that truncates another 7% off a grid whose every cell changes.</p>
+      <p><strong>Two steps carry most of the grid:</strong> keeping layout nodes (−30% at rest) and keeping the bounds tree balanced (−17% at rest, −23% with everything changing). <strong>Two carry most of the scrolling:</strong> handing a retained node's lines back to the cache (−66% unkeyed) and matching unidentified list items by their index (−35% more). The measurement closure, the style fingerprint and releasing what removed nodes held each take another 2–10% off whichever workload they touch, and taking a line wrapper only for text that truncates another 6% off a grid whose every cell changes.</p>
+      <p>Handing out last frame's orderings takes 9% off the grid at rest, and only there. It pays off for a frame whose every primitive lands exactly where it did the frame before — one where only colours, opacities or hover states changed. A frame where anything moves or changes size, even one label growing by a digit's width, stops matching at that primitive and orders the rest as before, having paid up to 1.5% to find out.</p>
       <p class="note">A figure with a dotted underline comes from runs that disagreed by more than 6%: the machine switched speed while that build was being measured, and its median, and the changes on either side of it, can be off by that much. Hover it for the range of its five runs.</p>
-      <p class="note">Not everything went one way. Keeping layout nodes costs 3% when every cell changes: a retained node pays for being found again — its key hashed, its style and children compared, its text keyed — and when nothing can be reused, that is all it gets. The build phase shows more than that, 0.29 ms, but most of it only moved there: extracted gpui dropped every measurement closure and text layout when it cleared the whole tree at the end of a frame, where no phase timer sees it, and a retained node drops its old ones as it is given new ones. A 10% loss for recolouring without reshaping, seen at 25% changing in the first round of measurements, did not survive seven more rounds of each build, which both put at 6.63 ms: that was a slow stretch of the machine, not the change. "Handing lines back" was later replaced by keeping lines cached while something holds them, which does the same job at a fraction of the cost.</p>
+      <p class="note">Not everything went one way. Keeping layout nodes costs 1–3% when every cell changes: a retained node pays for being found again — its key hashed, its style and children compared, its text keyed — and when nothing can be reused, that is all it gets. The build phase shows more than that, 0.27 ms, but most of it only moved there: extracted gpui dropped every measurement closure and text layout when it cleared the whole tree at the end of a frame, where no phase timer sees it, and a retained node drops its old ones as it is given new ones. A 10% loss for recolouring without reshaping, seen at 25% changing in the first round of measurements, did not survive seven more rounds of each build, which both put at 6.63 ms: that was a slow stretch of the machine, not the change. "Handing lines back" was later replaced by keeping lines cached while something holds them, which does the same job at a fraction of the cost.</p>
     </div>
   </section>
 
