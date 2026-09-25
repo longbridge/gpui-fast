@@ -7,8 +7,10 @@
 //! difference between two runs is the gpui underneath it.
 //!
 //! It also says where the frame went, through [`Window::layout_stats`]. A build
-//! old enough to lack those counters can still be compared on the wall clock,
-//! which is what the two have in common.
+//! old enough to lack those counters can still be compared on the wall clock
+//! and on main-thread CPU time, which is what the two have in common. On a
+//! display fast enough that a frame fits its refresh, the wall clock only
+//! reports the refresh rate, and CPU time is the one to compare.
 //!
 //! The third argument is the share of cells that change from one frame to the
 //! next, which is the axis worth sweeping: reuse can only save the work of
@@ -57,6 +59,11 @@ struct Grid {
     measuring_since: Option<Instant>,
     last_frame_at: Option<Instant>,
     slowest: Duration,
+    /// Main-thread CPU time when measuring started, at the last frame, and
+    /// what each measured frame took of it.
+    cpu_since: Option<Duration>,
+    last_main_cpu: Option<Duration>,
+    frame_main_cpu: Vec<Duration>,
 }
 
 impl Render for Grid {
@@ -73,12 +80,22 @@ impl Render for Grid {
         }
         self.last_frame_at = Some(now);
 
+        let main_cpu = main_thread_cpu_time();
+        if let (Some(main), Some(last)) = (main_cpu, self.last_main_cpu)
+            && self.measuring_since.is_some()
+        {
+            self.frame_main_cpu.push(main - last);
+        }
+        self.last_main_cpu = main_cpu;
+
         self.tick += 1;
         self.frames += 1;
         if self.frames == WARMUP_FRAMES {
             window.reset_layout_stats();
             self.measuring_since = Some(now);
             self.slowest = Duration::ZERO;
+            self.cpu_since = main_cpu;
+            self.frame_main_cpu.clear();
         } else if self.frames == WARMUP_FRAMES + MEASURED_FRAMES {
             self.report(window);
             cx.quit();
@@ -129,6 +146,9 @@ impl Grid {
             measuring_since: None,
             last_frame_at: None,
             slowest: Duration::ZERO,
+            cpu_since: None,
+            last_main_cpu: None,
+            frame_main_cpu: Vec::new(),
         }
     }
 
@@ -138,8 +158,26 @@ impl Grid {
             .map(|at| at.elapsed())
             .unwrap_or_default();
         let frames = MEASURED_FRAMES as f64;
+        let main_cpu = match (main_thread_cpu_time(), self.cpu_since) {
+            (Some(now), Some(since)) => {
+                format!(
+                    "{:>8.2} ms/frame",
+                    (now - since).as_secs_f64() * 1e3 / frames
+                )
+            }
+            _ => "     n/a".into(),
+        };
+        let mut frame_cpu = self.frame_main_cpu.clone();
+        frame_cpu.sort();
+        let percentile = |p: f64| {
+            frame_cpu
+                .get(((frame_cpu.len() as f64 - 1.) * p).round() as usize)
+                .map_or(0., |d| d.as_secs_f64() * 1e3)
+        };
+        let (p50, p95) = (percentile(0.5), percentile(0.95));
         println!(
             "\n  grid {}x{}, {}% of cells changing, over {} frames\n    \
+             main cpu          {main_cpu}  (per frame p50 {p50:.2}, p95 {p95:.2} ms)\n    \
              wall              {:>8.2} ms/frame  ({:.1} fps, slowest {:.2} ms)",
             self.rows,
             self.columns,
@@ -172,14 +210,33 @@ impl Grid {
             if stats.compute_layout_time.is_zero() {
                 0.0
             } else {
-                100.0 * stats.measure_time.as_secs_f64()
-                    / stats.compute_layout_time.as_secs_f64()
+                100.0 * stats.measure_time.as_secs_f64() / stats.compute_layout_time.as_secs_f64()
             },
             stats.nodes_created as f64 / counted,
             stats.nodes_reused as f64 / counted,
             stats.style_writes as f64 / counted,
         );
     }
+}
+
+/// CPU time the calling thread has used so far, which has to be the main
+/// thread, where gpui builds, lays out and paints.
+#[cfg(unix)]
+fn main_thread_cpu_time() -> Option<Duration> {
+    let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: `clock_gettime` fills in the whole struct when it returns 0.
+    let time = unsafe {
+        if libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, time.as_mut_ptr()) != 0 {
+            return None;
+        }
+        time.assume_init()
+    };
+    Some(Duration::new(time.tv_sec as u64, time.tv_nsec as u32))
+}
+
+#[cfg(not(unix))]
+fn main_thread_cpu_time() -> Option<Duration> {
+    None
 }
 
 fn run_example() {
