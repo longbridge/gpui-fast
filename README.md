@@ -5,9 +5,11 @@ monorepo as a self-contained cargo workspace, so it can be built and hacked on
 without checking out or compiling the editor — and then worked on, mostly in the
 layout engine.
 
-On a grid of 2500 live labels drawn into a real window, a frame costs
-**13.43 ms → 7.51 ms** when the grid is still and 13.76 ms → 11.60 ms when every
-cell changes. `docs/frame-budget.html` is the measurement in full.
+On a grid of 2500 live labels drawn into a real window, a frame's main-thread
+work goes from **8.30 ms to 3.72 ms** when the grid is still and from 8.70 ms to
+6.37 ms when every cell changes; a wide table scrolled back and forth goes from
+8.19 ms to 4.47 ms. That is on an Apple M4, against gpui as extracted.
+`docs/frame-budget.html` is the measurement in full, step by step.
 
 The public API is unchanged from upstream: everything added is additive, nothing
 was removed or altered, so code written against upstream gpui compiles here
