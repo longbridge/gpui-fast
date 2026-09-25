@@ -6,9 +6,10 @@ without checking out or compiling the editor — and then worked on, mostly in t
 layout engine.
 
 On a grid of 2500 live labels drawn into a real window, a frame's main-thread
-work goes from **8.30 ms to 3.72 ms** when the grid is still and from 8.70 ms to
-6.37 ms when every cell changes; a wide table scrolled back and forth goes from
-8.19 ms to 4.47 ms. That is on an Apple M4, against gpui as extracted.
+work goes from **8.15 ms to 4.15 ms** when the grid is still and from 8.30 ms to
+5.53 ms when every cell changes; a wide table scrolled back and forth goes from
+8.22 ms to 4.50 ms. That is on an Apple M4, against gpui as extracted, each
+figure the median of five runs.
 `docs/frame-budget.html` is the measurement in full, step by step.
 
 The public API is unchanged from upstream: everything added is additive, nothing
@@ -93,6 +94,8 @@ Each of these is one commit, with its own measurements in the commit message.
 - **The bounds tree that orders primitives stays balanced.** It never split a
   full node, so bounds arriving in painting order nested it dozens of levels
   deep; splitting like an R-tree halves what paint costs.
+- **Only text that truncates takes a line wrapper**, instead of every measurement
+  resolving a font and borrowing one from the pool on the chance it truncates.
 - **List items without an id are matched by their index**, so a scrolled
   `uniform_list` or `list` keeps the layout of every row still in view whether
   or not its rows are identified.
