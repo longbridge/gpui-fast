@@ -21,8 +21,8 @@ use crate::{
     Hsla, InputEvent as _, IntoElement, LineLayout, ListAlignment, ListOffset, ListState,
     MouseMoveEvent, NoopTextSystem, Pixels, PlatformTextSystem, Render, RenderGlyphParams, Result,
     SharedString, Size, StyleRefinement, TestAppContext, TextRenderingMode,
-    UniformListScrollHandle, Window, WindowHandle, div, hsla, list, point, prelude::*, px, size,
-    uniform_list,
+    UniformListScrollHandle, Window, WindowHandle, div, hsla, list, memo, point, prelude::*, px,
+    size, uniform_list,
 };
 
 const WORDS: [&str; 10] = [
@@ -58,7 +58,7 @@ enum CellFlag {
     Hover,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct CellState {
     word: usize,
     color: usize,
@@ -395,7 +395,14 @@ impl Render for OracleView {
                     .flex_wrap()
                     .w(px(420.))
                     .gap_1()
-                    .children(self.cells.iter().copied().map(render_cell)),
+                    // Every cell is a memo keyed by its state, so the window
+                    // drawing incrementally reuses the ones that did not change
+                    // while the one drawing from scratch builds them all.
+                    .children(self.cells.iter().copied().enumerate().map(|(ix, cell)| {
+                        memo(("cell", ix), cell, move |_, _| render_cell(cell))
+                            .w(px(cell.width))
+                            .h(px(18.))
+                    })),
             )
             .child(
                 div()

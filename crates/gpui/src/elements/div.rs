@@ -2796,12 +2796,14 @@ impl Interactivity {
 
                         let was_hovered = hitbox.is_hovered(window);
                         let current_view = window.current_view();
+                        let memos = window.enclosing_memos();
                         window.on_mouse_event({
                             let hitbox = hitbox.clone();
                             move |_: &MouseMoveEvent, phase, window, cx| {
                                 if phase == DispatchPhase::Capture {
                                     let hovered = hitbox.is_hovered(window);
                                     if hovered != was_hovered {
+                                        window.invalidate_memos(&memos);
                                         cx.notify(current_view)
                                     }
                                 }
@@ -2956,6 +2958,7 @@ impl Interactivity {
                     .cloned()
             });
             let current_view = window.current_view();
+            let memos = window.enclosing_memos();
 
             window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
                 let hovered = hitbox.is_hovered(window);
@@ -2965,6 +2968,7 @@ impl Interactivity {
                 if phase == DispatchPhase::Capture && hovered != was_hovered {
                     if let Some(hover_state) = &hover_state {
                         hover_state.borrow_mut().element = hovered;
+                        window.invalidate_memos(&memos);
                         cx.notify(current_view);
                     }
                 }
@@ -2978,6 +2982,7 @@ impl Interactivity {
                     .and_then(|element| element.hover_state.as_ref())
                     .cloned();
                 let current_view = window.current_view();
+                let memos = window.enclosing_memos();
 
                 window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
                     let group_hovered = group_hitbox_id.is_hovered(window);
@@ -2987,6 +2992,7 @@ impl Interactivity {
                     if phase == DispatchPhase::Capture && group_hovered != was_group_hovered {
                         if let Some(hover_state) = &hover_state {
                             hover_state.borrow_mut().group = group_hovered;
+                            window.invalidate_memos(&memos);
                             cx.notify(current_view);
                         }
                     }
@@ -3414,9 +3420,11 @@ impl Interactivity {
         if let Some(group_hitbox) = group_hitbox {
             let was_hovered = group_hitbox.is_hovered(window);
             let current_view = window.current_view();
+            let memos = window.enclosing_memos();
             window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
                 let hovered = group_hitbox.is_hovered(window);
                 if phase == DispatchPhase::Capture && hovered != was_hovered {
+                    window.invalidate_memos(&memos);
                     cx.notify(current_view);
                 }
             });
@@ -3438,6 +3446,7 @@ impl Interactivity {
             let line_height = window.line_height();
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
+            let memos = window.enclosing_memos();
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
                     let mut scroll_offset = scroll_offset.borrow_mut();
@@ -3481,6 +3490,7 @@ impl Interactivity {
                     scroll_offset.y += delta_y;
                     scroll_offset.x += delta_x;
                     if *scroll_offset != old_scroll_offset {
+                        window.invalidate_memos(&memos);
                         cx.notify(current_view);
                     }
                 }
@@ -3540,7 +3550,10 @@ impl Interactivity {
             if let Some(group_hover) = self.group_hover_style.as_ref() {
                 let is_group_hovered =
                     if let Some(group_hitbox_id) = GroupHitboxes::get(&group_hover.group, cx) {
-                        !window.last_input_was_touch() && group_hitbox_id.is_hovered(window)
+                        let hovered =
+                            !window.last_input_was_touch() && group_hitbox_id.is_hovered(window);
+                        window.note_memo_hover_dependency(group_hitbox_id, hovered);
+                        hovered
                     } else if let Some(element_state) = element_state.as_ref() {
                         !window.last_input_was_touch()
                             && element_state
@@ -3559,7 +3572,9 @@ impl Interactivity {
 
             if let Some(hover_style) = self.hover_style.as_ref() {
                 let is_hovered = if let Some(hitbox) = hitbox {
-                    !window.last_input_was_touch() && hitbox.is_hovered(window)
+                    let hovered = !window.last_input_was_touch() && hitbox.is_hovered(window);
+                    window.note_memo_hover_dependency(hitbox.id, hovered);
+                    hovered
                 } else if let Some(element_state) = element_state.as_ref() {
                     !window.last_input_was_touch()
                         && element_state

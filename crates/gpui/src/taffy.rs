@@ -195,6 +195,12 @@ pub struct TaffyLayoutEngine {
     /// matches the size of `retained` at the end of the frame, nothing has been
     /// orphaned and the sweep can be skipped entirely.
     claimed_this_frame: usize,
+    /// The keys claimed while [`TaffyLayoutEngine::record_claimed_keys`] is
+    /// recording, for a memo to keep its subtree's nodes by. See
+    /// [`crate::memo`].
+    claimed_key_log: Vec<u64>,
+    /// How many recordings are open, nested memos each having one.
+    open_key_recordings: usize,
     absolute_layout_bounds: FxHashMap<LayoutId, Bounds<Pixels>>,
     /// Unrounded absolute border-box top-left per-node coordinate in device pixels.
     absolute_outer_origins: FxHashMap<LayoutId, Point<f32>>,
@@ -218,6 +224,8 @@ impl TaffyLayoutEngine {
             unstretched_styles: FxHashMap::default(),
             frame: 0,
             claimed_this_frame: 0,
+            claimed_key_log: Vec::new(),
+            open_key_recordings: 0,
             absolute_layout_bounds: FxHashMap::default(),
             absolute_outer_origins: FxHashMap::default(),
             computed_layouts: FxHashSet::default(),
@@ -303,7 +311,47 @@ impl TaffyLayoutEngine {
         node.claimed_in_frame = frame;
         self.claimed_this_frame += 1;
         self.stats.nodes_reused += 1;
+        if self.open_key_recordings > 0 {
+            self.claimed_key_log.push(key);
+        }
         Claim::Reused(key, node.id)
+    }
+
+    /// Starts recording the keys of the nodes claimed or allocated from now
+    /// on, returning where the recording starts. Recordings nest.
+    pub(crate) fn record_claimed_keys(&mut self) -> usize {
+        self.open_key_recordings += 1;
+        self.claimed_key_log.len()
+    }
+
+    /// Ends the recording started at `start`, returning the keys it saw.
+    pub(crate) fn finish_recording_claimed_keys(&mut self, start: usize) -> Vec<u64> {
+        let keys = self.claimed_key_log[start..].to_vec();
+        self.open_key_recordings -= 1;
+        if self.open_key_recordings == 0 {
+            self.claimed_key_log.clear();
+        }
+        keys
+    }
+
+    /// Keeps the nodes retained under `keys` for another frame without
+    /// requesting them, for a subtree drawn from what it drew last frame
+    /// rather than laid out again: they are there to be reused when it is
+    /// built next. Keys already claimed this frame, or no longer retained,
+    /// are passed over.
+    pub(crate) fn keep_retained(&mut self, keys: &[u64]) {
+        let frame = self.frame;
+        for key in keys {
+            if let Some(node) = self.retained.get_mut(key)
+                && node.claimed_in_frame != frame
+            {
+                node.claimed_in_frame = frame;
+                self.claimed_this_frame += 1;
+                if self.open_key_recordings > 0 {
+                    self.claimed_key_log.push(*key);
+                }
+            }
+        }
     }
 
     /// Records a freshly allocated node under `key`, or as transient when there
@@ -331,6 +379,9 @@ impl TaffyLayoutEngine {
             },
         );
         self.claimed_this_frame += 1;
+        if self.open_key_recordings > 0 {
+            self.claimed_key_log.push(key);
+        }
     }
 
     /// Brings a retained node's style up to date with `style`, converting and

@@ -1219,6 +1219,19 @@ pub struct Window {
     pub(crate) root: Option<AnyView>,
     pub(crate) element_id_stack: SmallVec<[ElementId; 32]>,
     pub(crate) global_ids: crate::element::GlobalIdCache,
+    /// The memos whose subtree is being built or painted, innermost last. An
+    /// interaction inside one — a hover, a scroll — marks all of them to be
+    /// built again. See [`crate::memo`].
+    pub(crate) memo_stack: Vec<GlobalElementId>,
+    /// Memos that an interaction inside them changed since they were drawn.
+    pub(crate) dirty_memos: FxHashSet<GlobalElementId>,
+    /// Memos found out of date too late in a frame to build them again, which
+    /// become [`Window::dirty_memos`] for the next one.
+    pub(crate) memos_dirty_next_frame: FxHashSet<GlobalElementId>,
+    /// Whether each hitbox whose hover a memo's subtree was painted by was
+    /// hovered then, in painting order. A memo keeps the stretch its subtree
+    /// added and is built again once any of them is hovered differently.
+    pub(crate) memo_hover_dependencies: Vec<(HitboxId, bool)>,
     pub(crate) text_style_stack: Vec<TextStyleRefinement>,
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
@@ -2090,6 +2103,10 @@ impl Window {
             root: None,
             element_id_stack: SmallVec::default(),
             global_ids: Default::default(),
+            memo_stack: Vec::new(),
+            dirty_memos: FxHashSet::default(),
+            memos_dirty_next_frame: FxHashSet::default(),
+            memo_hover_dependencies: Vec::new(),
             text_style_stack: Vec::new(),
             rendered_entity_stack: Vec::new(),
             element_offset_stack: Vec::new(),
@@ -3292,6 +3309,8 @@ impl Window {
         self.layout_prepaint_scope = LAYOUT_ROOT_SEED;
         self.text_system().finish_frame();
         self.global_ids.finish_frame();
+        self.dirty_memos = mem::take(&mut self.memos_dirty_next_frame);
+        self.memo_hover_dependencies.clear();
         self.next_frame.finish(&mut self.rendered_frame);
 
         self.invalidator.set_phase(DrawPhase::Focus);
@@ -7144,6 +7163,43 @@ impl Window {
             }
         };
         self.refresh();
+    }
+
+    /// The memos around the element being painted, for a listener to mark if
+    /// what it listens for changes the element's look. See [`crate::memo`].
+    pub(crate) fn enclosing_memos(&self) -> SmallVec<[GlobalElementId; 2]> {
+        self.memo_stack.iter().cloned().collect()
+    }
+
+    /// Notes that what is being painted inside a memo looks the way it does
+    /// because `hitbox` is, or is not, hovered. See [`crate::memo`].
+    pub(crate) fn note_memo_hover_dependency(&mut self, hitbox: HitboxId, hovered: bool) {
+        if !self.memo_stack.is_empty() {
+            self.memo_hover_dependencies.push((hitbox, hovered));
+        }
+    }
+
+    /// See [`TaffyLayoutEngine::record_claimed_keys`].
+    pub(crate) fn record_claimed_layout_keys(&mut self) -> usize {
+        self.layout_engine.as_mut().unwrap().record_claimed_keys()
+    }
+
+    /// See [`TaffyLayoutEngine::finish_recording_claimed_keys`].
+    pub(crate) fn finish_recording_claimed_layout_keys(&mut self, start: usize) -> Vec<u64> {
+        self.layout_engine
+            .as_mut()
+            .unwrap()
+            .finish_recording_claimed_keys(start)
+    }
+
+    /// See [`TaffyLayoutEngine::keep_retained`].
+    pub(crate) fn keep_retained_layout(&mut self, keys: &[u64]) {
+        self.layout_engine.as_mut().unwrap().keep_retained(keys);
+    }
+
+    /// Marks memos to be built again rather than reused on the next frame.
+    pub(crate) fn invalidate_memos(&mut self, memos: &[GlobalElementId]) {
+        self.dirty_memos.extend(memos.iter().cloned());
     }
 
     /// Whether the inspector is open, so elements need the ids it finds them by.
