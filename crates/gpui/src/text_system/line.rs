@@ -1,7 +1,7 @@
 use crate::{
-    App, Bounds, DevicePixels, Half, Hsla, LineLayout, Pixels, Point, RenderGlyphParams, Result,
-    SharedString, StrikethroughStyle, TextAlign, UnderlineStyle, Window, WrapBoundary,
-    WrappedLineLayout, black, fill, point, px, size,
+    App, Bounds, DevicePixels, FontId, GlyphRunRendering, Half, Hsla, LineLayout, Pixels, Point,
+    RenderGlyphParams, Result, SharedString, StrikethroughStyle, TextAlign, UnderlineStyle, Window,
+    WrapBoundary, WrappedLineLayout, black, fill, point, px, size,
 };
 use derive_more::{Deref, DerefMut};
 use smallvec::SmallVec;
@@ -369,6 +369,11 @@ fn paint_line(
         let mut current_underline: Option<(Point<Pixels>, UnderlineStyle)> = None;
         let mut current_strikethrough: Option<(Point<Pixels>, StrikethroughStyle)> = None;
         let text_system = cx.text_system().clone();
+        // Nothing painted below changes the content mask, and a run's glyphs
+        // share their rendering, so neither is worked out again per glyph.
+        let content_mask = window.content_mask();
+        let snapped_content_mask = window.snapped_content_mask();
+        let mut run_rendering: Option<(FontId, Hsla, GlyphRunRendering)> = None;
         let mut glyph_origin = point(
             aligned_origin_x(
                 origin,
@@ -531,7 +536,6 @@ fn paint_line(
                     size: max_glyph_size,
                 };
 
-                let content_mask = window.content_mask();
                 if max_glyph_bounds.intersects(&content_mask.bounds) {
                     let vertical_offset = point(px(0.0), glyph.position.y);
                     if glyph.is_emoji {
@@ -542,12 +546,30 @@ fn paint_line(
                             layout.font_size,
                         )?;
                     } else {
-                        window.paint_glyph(
+                        let rendering = match run_rendering {
+                            Some((font_id, run_color, rendering))
+                                if font_id == run.font_id && run_color == color =>
+                            {
+                                rendering
+                            }
+                            _ => {
+                                let rendering = window.glyph_run_rendering(
+                                    run.font_id,
+                                    layout.font_size,
+                                    color,
+                                );
+                                run_rendering = Some((run.font_id, color, rendering));
+                                rendering
+                            }
+                        };
+                        window.paint_glyph_in_run(
                             glyph_origin + baseline_offset + vertical_offset,
                             run.font_id,
                             glyph.id,
                             layout.font_size,
                             color,
+                            rendering,
+                            snapped_content_mask,
                         )?;
                     }
                 }

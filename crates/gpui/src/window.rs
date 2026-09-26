@@ -1171,6 +1171,14 @@ enum InputModality {
     Touch,
 }
 
+/// How the glyphs of a run are rendered: what painting a glyph needs that
+/// depends on its run, not on the glyph. See [`Window::glyph_run_rendering`].
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct GlyphRunRendering {
+    subpixel_rendering: bool,
+    dilation: u8,
+}
+
 /// Holds the state for a specific window.
 pub struct Window {
     pub(crate) handle: AnyWindowHandle,
@@ -3099,7 +3107,7 @@ impl Window {
     }
 
     #[inline]
-    fn snapped_content_mask(&self) -> ContentMask<ScaledPixels> {
+    pub(crate) fn snapped_content_mask(&self) -> ContentMask<ScaledPixels> {
         ContentMask {
             bounds: self.cover_bounds(self.content_mask().bounds),
         }
@@ -4614,6 +4622,48 @@ impl Window {
         font_size: Pixels,
         color: Hsla,
     ) -> Result<()> {
+        let rendering = self.glyph_run_rendering(font_id, font_size, color);
+        let content_mask = self.snapped_content_mask();
+        self.paint_glyph_in_run(
+            origin,
+            font_id,
+            glyph_id,
+            font_size,
+            color,
+            rendering,
+            content_mask,
+        )
+    }
+
+    /// How the glyphs of a run in `font_id` at `font_size` and in `color` are
+    /// rendered, which [`Window::paint_glyph_in_run`] takes so that painting a
+    /// line works it out once a run rather than once a glyph: it asks the
+    /// window how it is drawn and converts the colour to find its dilation.
+    pub(crate) fn glyph_run_rendering(
+        &self,
+        font_id: FontId,
+        font_size: Pixels,
+        color: Hsla,
+    ) -> GlyphRunRendering {
+        GlyphRunRendering {
+            subpixel_rendering: self.should_use_subpixel_rendering(font_id, font_size),
+            dilation: self.text_system().glyph_dilation_for_color(color),
+        }
+    }
+
+    /// [`Window::paint_glyph`], for a glyph in a run whose rendering and
+    /// snapped content mask the caller has already worked out.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn paint_glyph_in_run(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        color: Hsla,
+        rendering: GlyphRunRendering,
+        content_mask: ContentMask<ScaledPixels>,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let element_opacity = self.element_opacity();
@@ -4631,8 +4681,10 @@ impl Window {
             (quantized_origin.y.fract() * SUBPIXEL_VARIANTS_Y as f32) as u8,
         );
         let integer_origin = quantized_origin.map(|c| ScaledPixels(c.trunc()));
-        let subpixel_rendering = self.should_use_subpixel_rendering(font_id, font_size);
-        let dilation = self.text_system().glyph_dilation_for_color(color);
+        let GlyphRunRendering {
+            subpixel_rendering,
+            dilation,
+        } = rendering;
         let params = RenderGlyphParams {
             font_id,
             glyph_id,
@@ -4657,7 +4709,6 @@ impl Window {
                 origin: integer_origin + raster_bounds.origin.map(Into::into),
                 size: tile.bounds.size.map(Into::into),
             };
-            let content_mask = self.snapped_content_mask();
 
             if subpixel_rendering {
                 self.next_frame.scene.insert_primitive(SubpixelSprite {
@@ -9417,7 +9468,9 @@ mod tests {
 
         cx.update_window(window.into(), |_, window, _| window.reset_layout_stats())
             .unwrap();
-        change_and_draw(&mut cx, window, |view| view.label = "a label to shape".into());
+        change_and_draw(&mut cx, window, |view| {
+            view.label = "a label to shape".into()
+        });
         let timed = stats(&mut cx);
         assert!(timed.compute_layout_time > Duration::ZERO);
     }
