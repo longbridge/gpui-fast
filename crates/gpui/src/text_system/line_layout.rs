@@ -9,7 +9,7 @@ use std::{
     ops::Range,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -483,6 +483,8 @@ pub(crate) struct LineLayoutCache {
     lines_shaped: AtomicU64,
     /// Time spent in those calls, in nanoseconds.
     shape_nanos: AtomicU64,
+    /// Whether to time shaping, which it does once the stats have been reset.
+    shape_timed: AtomicBool,
 }
 
 #[derive(Default)]
@@ -520,6 +522,7 @@ impl LineLayoutCache {
             platform_text_system,
             lines_shaped: AtomicU64::new(0),
             shape_nanos: AtomicU64::new(0),
+            shape_timed: AtomicBool::new(false),
         }
     }
 
@@ -533,19 +536,23 @@ impl LineLayoutCache {
         )
     }
 
-    /// Zeroes the counters reported by [`LineLayoutCache::shaping_stats`].
+    /// Zeroes the counters reported by [`LineLayoutCache::shaping_stats`], and
+    /// from then on times shaping too.
     pub fn reset_shaping_stats(&self) {
         self.lines_shaped.store(0, Ordering::Relaxed);
         self.shape_nanos.store(0, Ordering::Relaxed);
+        self.shape_timed.store(true, Ordering::Relaxed);
     }
 
     /// Shapes a line the cache does not have, counting it.
     fn shape_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout {
-        let started_at = Instant::now();
+        let started_at = self.shape_timed.load(Ordering::Relaxed).then(Instant::now);
         let layout = self.platform_text_system.layout_line(text, font_size, runs);
         self.lines_shaped.fetch_add(1, Ordering::Relaxed);
-        self.shape_nanos
-            .fetch_add(started_at.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        if let Some(started_at) = started_at {
+            self.shape_nanos
+                .fetch_add(started_at.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
         layout
     }
 

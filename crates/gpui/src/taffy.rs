@@ -60,9 +60,11 @@ fn remove_node(taffy: &mut TaffyTree<NodeContext>, id: LayoutId) {
 /// and profiling.
 ///
 /// Counts accumulate across frames until [`TaffyLayoutEngine::reset_stats`] is
-/// called; clearing the tree between frames does not reset them. Collection is
+/// called; clearing the tree between frames does not reset them. Counting is
 /// cheap enough to leave enabled in release builds: a few integer increments per
-/// node, plus one clock read per call to [`TaffyLayoutEngine::compute_layout`].
+/// node. The times that would take a clock read per measurement or per shaped
+/// line are kept only once [`TaffyLayoutEngine::reset_stats`] has been called,
+/// which is how a benchmark asks for them, and are zero until then.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LayoutStats {
     /// Frames laid out, counted once per `Window::draw`.
@@ -87,6 +89,7 @@ pub struct LayoutStats {
     pub measure_calls: u64,
     /// Time spent inside those measurements, which is time `compute_layout_time`
     /// also counts. The difference between the two is Taffy's own solving.
+    /// Kept only once the stats have been reset.
     pub measure_time: Duration,
     /// Measurements that answered from a result the element had already
     /// computed, rather than computing a new one. Taffy probes a node more than
@@ -104,7 +107,8 @@ pub struct LayoutStats {
     pub prepaint_time: Duration,
     /// Time spent in the paint walk, turning laid-out elements into the scene.
     pub paint_time: Duration,
-    /// Time spent inside Taffy's own layout computation.
+    /// Time spent inside Taffy's own layout computation. Kept only once the
+    /// stats have been reset.
     pub compute_layout_time: Duration,
     /// Lines of text handed to the platform to be shaped. A line the text
     /// cache still held from this frame or the last one is not counted, so this
@@ -112,7 +116,7 @@ pub struct LayoutStats {
     pub lines_shaped: u64,
     /// Time spent shaping those lines. Shaping done while measuring is also
     /// part of `measure_time`; shaping done while painting is part of
-    /// `paint_time`.
+    /// `paint_time`. Kept only once the stats have been reset.
     pub shape_time: Duration,
 }
 
@@ -197,6 +201,8 @@ pub struct TaffyLayoutEngine {
     computed_layouts: FxHashSet<LayoutId>,
     layout_bounds_scratch_space: Vec<LayoutId>,
     stats: LayoutStats,
+    /// Whether to time layout and measurements. See [`LayoutStats`].
+    timed: bool,
 }
 
 const EXPECT_MESSAGE: &str = "we should avoid taffy layout errors by construction if possible";
@@ -217,6 +223,7 @@ impl TaffyLayoutEngine {
             computed_layouts: FxHashSet::default(),
             layout_bounds_scratch_space: Vec::new(),
             stats: LayoutStats::default(),
+            timed: false,
         }
     }
 
@@ -226,8 +233,10 @@ impl TaffyLayoutEngine {
     }
 
     /// Zeroes the counters returned by [`Self::stats`].
+    /// From then on the times are kept too.
     pub fn reset_stats(&mut self) {
         self.stats = LayoutStats::default();
+        self.timed = true;
     }
 
     /// How many nodes the tree is currently holding, retained and transient
@@ -725,7 +734,8 @@ impl TaffyLayoutEngine {
         let mut measure_calls = 0;
         let mut measure_time = Duration::ZERO;
 
-        let compute_started_at = Instant::now();
+        let timed = self.timed;
+        let compute_started_at = timed.then(Instant::now);
         self.taffy
             .compute_layout_with_measure(
                 id.into(),
@@ -734,7 +744,7 @@ impl TaffyLayoutEngine {
                     let Some(node_context) = node_context else {
                         return taffy::geometry::Size::default();
                     };
-                    let measure_started_at = Instant::now();
+                    let measure_started_at = timed.then(Instant::now);
 
                     let known_dimensions = Size {
                         width: known_dimensions.width.map(|e| Pixels(e / scale_factor)),
@@ -757,13 +767,17 @@ impl TaffyLayoutEngine {
                     let measured_size: Size<Pixels> =
                         (node_context.measure)(known_dimensions, available_space, window, cx);
                     measure_calls += 1;
-                    measure_time += measure_started_at.elapsed();
+                    if let Some(started_at) = measure_started_at {
+                        measure_time += started_at.elapsed();
+                    }
                     snap_measured_size_to_device_pixels(measured_size, scale_factor).into()
                 },
             )
             .expect(EXPECT_MESSAGE);
         self.stats.compute_layout_calls += 1;
-        self.stats.compute_layout_time += compute_started_at.elapsed();
+        if let Some(started_at) = compute_started_at {
+            self.stats.compute_layout_time += started_at.elapsed();
+        }
         self.stats.measure_calls += measure_calls;
         self.stats.measure_time += measure_time;
         self.stats.measure_reuses += std::mem::take(&mut window.pending_measure_reuses);

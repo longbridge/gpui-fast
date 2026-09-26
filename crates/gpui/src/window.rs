@@ -9392,6 +9392,36 @@ mod tests {
         assert_eq!(*plain_probes.borrow(), *keyed_probes.borrow());
     }
 
+    /// Timing a measurement or a shaped line reads the clock twice, which is
+    /// not free on a frame full of text, so the times are kept only once the
+    /// stats have been reset — which is how a benchmark asks for them. The
+    /// counts are kept all along.
+    #[test]
+    fn layout_times_are_kept_only_once_the_stats_are_reset() {
+        let mut cx = TestAppContext::single();
+        let probes = Rc::new(RefCell::new(Vec::new()));
+        let window = retained_layout_window(&mut cx, probes);
+        let stats = |cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+                window.layout_stats()
+            })
+            .unwrap()
+        };
+
+        let untimed = stats(&mut cx);
+        assert!(untimed.compute_layout_calls > 0 && untimed.lines_shaped > 0);
+        assert_eq!(untimed.compute_layout_time, Duration::ZERO);
+        assert_eq!(untimed.measure_time, Duration::ZERO);
+        assert_eq!(untimed.shape_time, Duration::ZERO);
+
+        cx.update_window(window.into(), |_, window, _| window.reset_layout_stats())
+            .unwrap();
+        change_and_draw(&mut cx, window, |view| view.label = "a label to shape".into());
+        let timed = stats(&mut cx);
+        assert!(timed.compute_layout_time > Duration::ZERO);
+    }
+
     /// Elements are given the ids the inspector finds them by only while it is
     /// open, since building one copies the whole element id stack. Opening it
     /// has to bring them back on the next frame.
