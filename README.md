@@ -6,15 +6,21 @@ without checking out or compiling the editor — and then worked on, mostly in t
 layout engine.
 
 On a grid of 2500 live labels drawn into a real window, a frame's main-thread
-work goes from **8.27 ms to 3.71 ms** when the grid is still and from 8.27 ms to
-5.44 ms when every cell changes; a wide table scrolled back and forth goes from
-7.82 ms to 4.29 ms. That is on an Apple M4, against gpui as extracted, each
-figure the median of five runs.
+work goes from **8.20 ms to 3.64 ms** when the grid is still and from 8.25 ms to
+5.18 ms when every cell changes; a wide table scrolled back and forth goes from
+7.89 ms to 4.07 ms. That is on an Apple M4, against gpui as extracted, each
+figure the median of five runs. In gpui-kit's DataTable story, a table whose
+cells carry ids and take new values 30 times a second, drawing it costs 37% less
+than with the gpui-pre snapshot gpui-kit used before, and 48% less once the
+table memoizes its rows.
 `docs/frame-budget.html` is the measurement in full, step by step.
 
-The public API is unchanged from upstream: everything added is additive, nothing
-was removed or altered, so code written against upstream gpui compiles here
-untouched.
+The public API is upstream's, with additions and two changes. `GlobalElementId`
+no longer implements `DerefMut`, since it now keeps its path's hash and a path
+changed under it would no longer match it. `Window::with_inspector_state` returns
+`Option<R>` and calls its closure only for the element being inspected, as
+upstream's does since it was extracted. Code written against upstream gpui that
+uses neither compiles here untouched.
 
 ## Provenance
 
@@ -105,11 +111,31 @@ Each of these is one commit, with its own measurements in the commit message.
 - **List items without an id are matched by their index**, so a scrolled
   `uniform_list` or `list` keeps the layout of every row still in view whether
   or not its rows are identified.
+- **Element identity is cheap.** A global id hashes its path once, when it is
+  made, and an element whose path is the one it had last frame is given the id
+  it had then, instead of every element copying and hashing the whole element id
+  stack several times a frame.
+- **An element's listener lists and accessibility stay out of line** until it
+  has some, which takes a `div` from 1360 bytes to 752, copied every time it
+  moves through a call of its builder.
+- **Replaying last frame's orderings goes on past the bounds that changed**,
+  ordering afresh only what meets them.
+- **Inspector ids and inspector state are built only while the inspector is
+  open**, as upstream has since done; debug builds and builds with the
+  `inspector` feature paid for both on every element.
+- **`memo(id, key, build)` draws a subtree again from what it drew** while its
+  key is unchanged, without building, laying out or painting it. The key is any
+  `PartialEq` value that stands for everything the subtree depends on;
+  `Version`, `ContentHash` and `AnyMemoKey` are ready-made ones. Hover, scrolls,
+  bounds and refreshes are taken care of by the framework.
 - **Anything can carry a key.** `.key(id)` gives any element, components
   included, an identity among its siblings without adding a layout box. A
   component's own id never reached that far.
 - **Diagnostics**: `Window::layout_stats()` reports where a frame's time went,
-  text shaping included.
+  text shaping included; the times are kept once `reset_layout_stats()` has been
+  called.
+- **An oracle test** drives two windows through the same random history, one
+  drawing incrementally and one from scratch, and requires the frames to match.
 - **Benchmarks that draw through a real window**: a grid whose labels change,
   `cargo run -p gpui --example grid_frames --release -- 50 50 25`, and a list
   being scrolled,
