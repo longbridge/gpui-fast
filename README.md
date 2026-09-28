@@ -61,6 +61,28 @@ views with 64 labels each, in release builds on Linux:
 `GPUI_VIEW_RETENTION=0`; the figures come from the `retained_bench` test. The
 gain follows how little of the window changes.
 
+Against upstream GPUI itself, in a real window: the `gpui_perf` showcase, a
+component gallery laid out like GPUI Kit's (a sidebar of 243 pages, a page of
+component sections, a 5,000-row data table, a `gpui::list` of 5,000 messages),
+built once on gpui-fast and once on the `gpui-pre` 0.3.7 snapshot of upstream
+GPUI, scrolling at 32 px a frame as a fast scrollbar drag does. Main-thread
+CPU per frame (median), and the CPU of the whole process, at 144 frames per
+second on Linux:
+
+| Scenario                         | Upstream gpui-pre | gpui-fast              |
+| -------------------------------- | ----------------- | ---------------------- |
+| Idle, a status bar redrawn       | 6.19 ms, 84% CPU  | 0.36 ms, 6% CPU (−94%) |
+| Scrolling the sidebar            | 5.51 ms, 83% CPU  | 0.88 ms, 13% CPU (−84%) |
+| Scrolling a page of components   | 5.51 ms, 82% CPU  | 1.31 ms, 18% CPU (−76%) |
+| Scrolling the data table         | 3.20 ms, 53% CPU  | 1.18 ms, 17% CPU (−63%) |
+| Refreshing the table every 33 ms | 3.03 ms, 53% CPU  | 0.59 ms, 12% CPU (−81%) |
+| Scrolling the list               | 2.74 ms, 47% CPU  | 0.92 ms, 14% CPU (−66%) |
+
+```sh
+cargo run -p gpui_perf --release -- --auto
+cargo run -p gpui_perf --release --no-default-features --features upstream -- --auto
+```
+
 A retained frame is checked against the frame drawing from scratch would
 have produced: a test drives two windows through the same random history, one
 drawing incrementally and one from scratch, and requires every frame to match.
