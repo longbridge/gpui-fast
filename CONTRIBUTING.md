@@ -77,6 +77,24 @@ cargo run -p gpui_perf --release -- --auto --only ScrollPage --retention on --fr
 To profile one scenario, run it for longer under a profiler, for instance
 `samply record ./target/release/gpui_perf --auto --only ScrollPage --frames 5000`.
 
+### Comparing with upstream GPUI
+
+The `upstream` feature builds the same showcase against upstream GPUI, the
+`gpui-pre` snapshot GPUI Kit pins (`gpui-pre` and `gpui-pre-platform`
+`=0.3.7`), instead of this repository's, so both can run the same screens
+and the same `--auto` scenarios:
+
+```sh
+cargo run -p gpui_perf --release -- --auto                       # gpui-fast
+cargo run -p gpui_perf --release --features upstream -- --auto   # upstream
+```
+
+Upstream has no retained views and does not time the phases of a frame, so
+its showcase hides the `Retained views` switch, and its status bar and report
+show frame rate and CPU only (`-` in the other columns). Add
+`--no-default-features` to the upstream build to skip building this
+repository's GPUI. `--headless` runs on gpui-fast only.
+
 ### Headless scenarios
 
 `--headless` measures simulated screens — forms, lists, tables, settings —

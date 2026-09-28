@@ -1,12 +1,15 @@
 //! `--auto`: every scenario with retained views on and then off, measured over
-//! a fixed number of frames, then a report.
+//! a fixed number of frames, then a report. Upstream GPUI has no retained
+//! views, so built with the `upstream` feature it runs every scenario once.
 
 use std::time::Duration;
 
-use gpui::{Context, Window};
+use std::cell::RefCell;
+
+use gpui::{App, Window};
 
 use super::{
-    BUTTON_PAGE, Scroll, Showcase, list_page,
+    BUTTON_PAGE, Driver, Handles, Scroll, backend, list_page,
     metrics::{Cost, Sample, main_thread_cpu_time},
     table_page,
 };
@@ -43,15 +46,16 @@ fn flag(name: &str) -> Option<String> {
 
 struct Result {
     scenario: Scenario,
-    retention: bool,
+    retention: Option<bool>,
     cost: Cost,
     p50: f64,
     p95: f64,
 }
 
 pub struct AutoRun {
-    /// The scenarios to run, each with retention on or off.
-    runs: Vec<(Scenario, bool)>,
+    /// The scenarios to run, each with retention on or off, or neither
+    /// where GPUI has no retained views.
+    runs: Vec<(Scenario, Option<bool>)>,
     measured_frames: usize,
     index: usize,
     frame: usize,
@@ -68,12 +72,20 @@ impl AutoRun {
     pub fn new() -> Self {
         let only = flag("--only").map(|only| only.to_lowercase());
         let retention = flag("--retention").map(|retention| retention.to_lowercase());
-        let runs = [true, false]
-            .into_iter()
+        let modes: &[Option<bool>] = if cfg!(feature = "upstream") {
+            &[None]
+        } else {
+            &[Some(true), Some(false)]
+        };
+        let runs = modes
+            .iter()
+            .copied()
             .filter(|on| {
-                retention
-                    .as_deref()
-                    .is_none_or(|retention| (retention == "on") == *on)
+                on.is_none_or(|on| {
+                    retention
+                        .as_deref()
+                        .is_none_or(|retention| (retention == "on") == on)
+                })
             })
             .flat_map(|on| SCENARIOS.map(|scenario| (scenario, on)))
             .filter(|(scenario, _)| {
@@ -98,9 +110,10 @@ impl AutoRun {
     /// Runs before each frame. Returns whether to keep asking for frames.
     pub fn step(
         &mut self,
-        showcase: &mut Showcase,
+        driver: &RefCell<Driver>,
+        handles: &Handles,
         window: &mut Window,
-        cx: &mut Context<Showcase>,
+        cx: &mut App,
     ) -> bool {
         let Some(&(scenario, retention)) = self.runs.get(self.index) else {
             self.report();
@@ -109,43 +122,35 @@ impl AutoRun {
         };
         let idle = matches!(scenario, Scenario::Idle | Scenario::RefreshTable);
         if self.frame == 0 {
-            window.set_view_retention(retention);
-            showcase.scroll = Scroll::Off;
-            showcase.container.update(cx, |container, cx| {
-                if container.refreshing {
-                    container.toggle_refresh(window, cx);
-                }
-            });
-            match scenario {
-                Scenario::Idle => showcase.select(BUTTON_PAGE, cx),
-                Scenario::ScrollSidebar => {
-                    showcase.select(BUTTON_PAGE, cx);
-                    showcase.scroll = Scroll::Sidebar;
-                }
-                Scenario::ScrollPage => {
-                    showcase.select(BUTTON_PAGE, cx);
-                    showcase.scroll = Scroll::Page;
-                }
-                Scenario::ScrollTable => {
-                    showcase.select(table_page(), cx);
-                    showcase.scroll = Scroll::Table;
-                }
-                Scenario::ScrollList => {
-                    showcase.select(list_page(), cx);
-                    showcase.scroll = Scroll::List;
-                }
-                Scenario::RefreshTable => {
-                    showcase.select(table_page(), cx);
-                    showcase
-                        .container
-                        .update(cx, |container, cx| container.toggle_refresh(window, cx));
-                }
+            if let Some(retention) = retention {
+                backend::set_view_retention(window, retention);
             }
+            let (page, scroll) = match scenario {
+                Scenario::Idle => (BUTTON_PAGE, Scroll::Off),
+                Scenario::ScrollSidebar => (BUTTON_PAGE, Scroll::Sidebar),
+                Scenario::ScrollPage => (BUTTON_PAGE, Scroll::Page),
+                Scenario::ScrollTable => (table_page(), Scroll::Table),
+                Scenario::ScrollList => (list_page(), Scroll::List),
+                Scenario::RefreshTable => (table_page(), Scroll::Off),
+            };
+            driver.borrow_mut().scroll = scroll;
+            let refresh = matches!(scenario, Scenario::RefreshTable);
+            handles
+                .showcase
+                .update(cx, |showcase, cx| {
+                    showcase.scroll = scroll;
+                    // Toggling the refresh shows the table, so it goes first.
+                    if showcase.refreshing != refresh {
+                        showcase.toggle_refresh(window, cx);
+                    }
+                    showcase.select(page, cx);
+                })
+                .ok();
         }
         if idle {
             // Something has to ask for frames when nothing scrolls; a
             // notified status bar is the least a frame can do.
-            showcase.status_bar.update(cx, |_, cx| cx.notify());
+            cx.notify(handles.status_bar.entity_id());
         }
 
         let cpu = main_thread_cpu_time();
@@ -200,28 +205,35 @@ impl AutoRun {
             "built",
             "reused"
         );
+        let ms = |value: Option<f64>| value.map_or("-".to_string(), |v| format!("{v:.2}ms"));
+        let count = |value: Option<f64>| value.map_or("-".to_string(), |v| format!("{v:.1}"));
         for result in &self.results {
             let cost = &result.cost;
+            let phases = cost.phases;
             println!(
-                "{:<16} {:>9} {:>6.0} {:>7.2}ms {:>7.2}ms {:>6.0}% {:>6.2}ms {:>7.2}ms {:>6.2}ms {:>6.2}ms {:>6.1} {:>6.1}",
+                "{:<16} {:>9} {:>6.0} {:>7.2}ms {:>7.2}ms {:>6.0}% {:>8} {:>9} {:>8} {:>8} {:>6} {:>6}",
                 format!("{:?}", result.scenario),
-                if result.retention { "on" } else { "off" },
+                match result.retention {
+                    Some(true) => "on",
+                    Some(false) => "off",
+                    None => "upstream",
+                },
                 cost.fps,
                 result.p50,
                 result.p95,
                 cost.process_cpu_percent,
-                cost.build_ms,
-                cost.prepaint_ms,
-                cost.layout_ms,
-                cost.paint_ms,
-                cost.views_built,
-                cost.views_reused,
+                ms(phases.map(|p| p.build_ms)),
+                ms(phases.map(|p| p.prepaint_ms)),
+                ms(phases.map(|p| p.layout_ms)),
+                ms(phases.map(|p| p.paint_ms)),
+                count(phases.map(|p| p.views_built)),
+                count(phases.map(|p| p.views_reused)),
             );
         }
         println!(
             "\ncpu p50/p95: main thread CPU per frame. proc: the whole process, render threads \
              included. build, prepaint, paint: per frame; layout is Taffy's share of prepaint. \
-             built, reused: views per frame."
+             built, reused: views per frame. \"-\": not counted by upstream GPUI."
         );
     }
 }

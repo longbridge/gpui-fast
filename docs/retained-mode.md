@@ -42,10 +42,22 @@ Nothing is drawn from the last frame while the window is being refreshed
 something is dragged, while the inspector is picking, or while accessibility
 is active.
 
-A notified view is built again together with the views around it, which have
-to be walked to reach it; the views beside it and inside it that did not
-change are still drawn from the last frame. The more of a window is split into
-views, the less a change costs.
+A notified view marks the views around it dirty, because they have to be
+walked to reach it. A view that is dirty only for that reason — it was not
+notified, nothing it read itself changed and it is hovered as it was — is not
+built again: it is drawn from the last frame stretch by stretch, with the
+nested views that changed built again in the gaps where they were, at their
+own layout nodes and with what they inherited there. If a nested view asks for
+another layout, the view around it is built after all, taking over the nested
+view already built rather than building it twice. The more of a window is
+split into views, the less a change costs. The code is in
+`crates/gpui/src/fast/splice.rs`.
+
+A view counts as having read itself, so an application that changes a view
+outside drawing (`entity.update(..)`) without notifying it gets it built again
+on the next frame. A frame driver or timer that only needs to notify another
+view should notify it by id (`cx.notify(entity_id)`) rather than updating the
+view that owns the driver.
 
 ### Records per retained subtree
 

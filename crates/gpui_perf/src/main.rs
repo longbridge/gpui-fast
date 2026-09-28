@@ -8,6 +8,13 @@
 //! cargo run -p gpui_perf --release -- --auto
 //! ```
 //!
+//! With the `upstream` feature the showcase runs on upstream GPUI instead, the
+//! `gpui-pre` snapshot GPUI Kit pins, to compare the two:
+//!
+//! ```text
+//! cargo run -p gpui_perf --release --features upstream -- --auto
+//! ```
+//!
 //! With `--headless` it measures what simulated application screens cost to
 //! draw, frame by frame, with and without retained views, without a window:
 //!
@@ -17,6 +24,8 @@
 //!
 //! Showcase flags:
 //!
+//! - `--demo`: scroll the sidebar, a page, the table and the list in turn,
+//!   for as long as it is open, to watch or record two GPUIs side by side.
 //! - `--auto`: run every scenario with retention on and off, print what each
 //!   cost, and quit.
 //! - `--only <scenario>`, `--retention on|off`, `--frames N`: narrow `--auto`
@@ -34,19 +43,32 @@
 //!   same quads every frame.
 //! - `--list`: print the scenarios and exit.
 
+// The GPUI the showcase runs on, named `gpui` and `gpui_platform` either way:
+// upstream's `gpui-pre` snapshot with the `upstream` feature, this
+// repository's otherwise.
+#[cfg(all(feature = "fast", not(feature = "upstream")))]
+extern crate gpui_fast as gpui;
+#[cfg(all(feature = "fast", not(feature = "upstream")))]
+extern crate gpui_platform_fast as gpui_platform;
+#[cfg(feature = "upstream")]
+extern crate gpui_pre as gpui;
+#[cfg(feature = "upstream")]
+extern crate gpui_pre_platform as gpui_platform;
+#[cfg(not(any(feature = "fast", feature = "upstream")))]
+compile_error!("gpui_perf needs the `fast` feature (the default) or `upstream`");
+
 mod showcase;
 
 use std::process::ExitCode;
 
-use gpui_perf::{
-    alloc::CountingAllocator,
-    runner::{self, Options, RetentionModes},
-};
+use gpui_perf::alloc::CountingAllocator;
+#[cfg(not(feature = "upstream"))]
+use gpui_perf::runner::{self, Options, RetentionModes};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const USAGE: &str = "usage: gpui_perf [--auto [--only SCENARIO] [--retention on|off] [--frames N]]\n       \
+const USAGE: &str = "usage: gpui_perf [--demo | --auto [--only SCENARIO] [--retention on|off] [--frames N]]\n       \
 gpui_perf --headless [--scenario SUBSTRING]... [--frames N] [--warmup N] \
 [--retention on|off|both] [--json PATH] [--verify] [--list]";
 
@@ -57,12 +79,25 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if !args.iter().any(|arg| arg == "--headless") {
-        showcase::run(args.iter().any(|arg| arg == "--auto"));
+        showcase::run(
+            args.iter().any(|arg| arg == "--auto"),
+            args.iter().any(|arg| arg == "--demo"),
+        );
         return ExitCode::SUCCESS;
     }
     headless()
 }
 
+#[cfg(feature = "upstream")]
+fn headless() -> ExitCode {
+    eprintln!(
+        "--headless measures gpui-fast's own counters and runs only on gpui-fast; \
+         build without the `upstream` feature"
+    );
+    ExitCode::from(2)
+}
+
+#[cfg(not(feature = "upstream"))]
 fn headless() -> ExitCode {
     let mut options = Options::default();
     let mut json_path = None;

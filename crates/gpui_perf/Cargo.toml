@@ -17,10 +17,29 @@ doctest = false
 name = "gpui_perf"
 path = "src/main.rs"
 
+[[example]]
+name = "views_frames"
+required-features = ["fast"]
+
+[features]
+default = ["fast"]
+# Build against this repository's GPUI: the showcase, `--headless` and the
+# examples, with gpui-fast's counters.
+fast = ["dep:gpui_fast", "dep:gpui_platform_fast", "dep:gpui_wgpu"]
+# Build the showcase against upstream GPUI instead, the `gpui-pre` snapshot
+# GPUI Kit pins, to compare the two on the same screens:
+# `cargo run -p gpui_perf --release --features upstream`, or with
+# `--no-default-features` too, to skip building this repository's GPUI.
+upstream = ["dep:gpui_pre", "dep:gpui_pre_platform"]
+
 [dependencies]
-gpui = { workspace = true, features = ["test-support"] }
-gpui_wgpu.workspace = true
+# Named `gpui_fast` and `gpui_platform_fast` so that either GPUI can be named
+# `gpui` by the crate roots; see `src/main.rs`.
+gpui_fast = { package = "gpui", path = "../gpui", default-features = false, features = ["test-support"], optional = true }
+gpui_platform_fast = { package = "gpui_platform", path = "../gpui_platform", default-features = false, features = ["font-kit", "wayland", "x11"], optional = true }
+gpui_wgpu = { workspace = true, optional = true }
+gpui_pre = { package = "gpui-pre", version = "=0.3.7", optional = true }
+gpui_pre_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = ["font-kit", "x11", "wayland"], optional = true }
 serde.workspace = true
 serde_json.workspace = true
 libc.workspace = true
-gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }

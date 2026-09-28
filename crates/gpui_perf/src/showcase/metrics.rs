@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 
 use gpui::{Context, IntoElement, Render, Window, div, prelude::*};
 
-use super::theme::theme;
+use super::{
+    backend::{self, FrameTimes},
+    theme::theme,
+};
 
 /// The window's counters and the CPU time used, at one moment.
 #[derive(Clone, Copy)]
@@ -15,28 +18,17 @@ pub struct Sample {
     process_cpu: Duration,
     main_cpu: Duration,
     frames: u64,
-    build: Duration,
-    prepaint: Duration,
-    layout: Duration,
-    paint: Duration,
-    views_built: u64,
-    views_reused: u64,
+    times: Option<FrameTimes>,
 }
 
 impl Sample {
     pub fn take(window: &Window) -> Self {
-        let stats = window.layout_stats();
         Self {
             at: Instant::now(),
             process_cpu: process_cpu_time(),
             main_cpu: main_thread_cpu_time(),
-            frames: stats.frames,
-            build: stats.build_time,
-            prepaint: stats.prepaint_time,
-            layout: stats.compute_layout_time,
-            paint: stats.paint_time,
-            views_built: stats.views_built,
-            views_reused: stats.views_reused,
+            frames: backend::frames(window),
+            times: backend::frame_times(window),
         }
     }
 }
@@ -48,6 +40,14 @@ pub struct Cost {
     pub process_cpu_percent: f64,
     pub main_cpu_percent: f64,
     pub main_cpu_per_frame_ms: f64,
+    /// What GPUI's own counters say, where it has them: gpui-fast does,
+    /// upstream does not.
+    pub phases: Option<PhaseCost>,
+}
+
+/// Per frame: the time each phase took, and the views built and reused.
+#[derive(Default, Clone, Copy)]
+pub struct PhaseCost {
     pub build_ms: f64,
     pub prepaint_ms: f64,
     pub layout_ms: f64,
@@ -73,12 +73,14 @@ impl Cost {
             process_cpu_percent: (to.process_cpu - from.process_cpu).as_secs_f64() * 100. / seconds,
             main_cpu_percent: (to.main_cpu - from.main_cpu).as_secs_f64() * 100. / seconds,
             main_cpu_per_frame_ms: per_frame(to.main_cpu - from.main_cpu),
-            build_ms: per_frame(to.build - from.build),
-            prepaint_ms: per_frame(to.prepaint - from.prepaint),
-            layout_ms: per_frame(to.layout - from.layout),
-            paint_ms: per_frame(to.paint - from.paint),
-            views_built: per_frame_count(to.views_built - from.views_built),
-            views_reused: per_frame_count(to.views_reused - from.views_reused),
+            phases: from.times.zip(to.times).map(|(from, to)| PhaseCost {
+                build_ms: per_frame(to.build - from.build),
+                prepaint_ms: per_frame(to.prepaint - from.prepaint),
+                layout_ms: per_frame(to.layout - from.layout),
+                paint_ms: per_frame(to.paint - from.paint),
+                views_built: per_frame_count(to.views_built - from.views_built),
+                views_reused: per_frame_count(to.views_reused - from.views_reused),
+            }),
         }
     }
 }
@@ -87,7 +89,7 @@ impl Cost {
 pub struct StatusBar {
     last: Option<Sample>,
     cost: Option<Cost>,
-    retention: bool,
+    retention: Option<bool>,
 }
 
 impl StatusBar {
@@ -95,7 +97,7 @@ impl StatusBar {
         Self {
             last: None,
             cost: None,
-            retention: true,
+            retention: None,
         }
     }
 
@@ -104,7 +106,7 @@ impl StatusBar {
         if let Some(last) = &self.last {
             self.cost = Some(Cost::between(last, &now));
         }
-        self.retention = window.view_retention();
+        self.retention = backend::view_retention(window);
         self.last = Some(now);
     }
 }
@@ -147,63 +149,74 @@ impl Render for StatusBar {
         };
         let separator = || div().w_px().h_3().bg(theme.border);
 
+        let bar = match self.retention {
+            Some(retention) => bar.child(field(
+                "Retained views",
+                vec![
+                    div()
+                        .text_color(theme.foreground)
+                        .child(if retention { "on" } else { "off" })
+                        .into_any_element(),
+                ],
+            )),
+            None => bar.child(div().text_color(theme.foreground).child(backend::GPUI)),
+        };
+        let bar = bar
+            .child(separator())
+            .child(field(
+                "FPS",
+                vec![value(format!("{:.0}", cost.fps), |d| d.w_7()).into_any_element()],
+            ))
+            .child(field(
+                "CPU",
+                vec![
+                    value(format!("{:.0}%", cost.process_cpu_percent), |d| d.w_8())
+                        .into_any_element(),
+                ],
+            ))
+            .child(field(
+                "Main thread",
+                vec![
+                    value(format!("{:.0}%", cost.main_cpu_percent), |d| d.w_8()).into_any_element(),
+                ],
+            ))
+            .child(separator())
+            .child(field(
+                "Frame",
+                vec![
+                    value(format!("{:.2}", cost.main_cpu_per_frame_ms), |d| d.w_10())
+                        .into_any_element(),
+                    div().child("ms").into_any_element(),
+                ],
+            ));
+        // Upstream has no counters of its own to show.
+        let Some(phases) = cost.phases else {
+            return bar;
+        };
         bar.child(field(
-            "Retained views",
-            vec![
-                div()
-                    .text_color(theme.foreground)
-                    .child(if self.retention { "on" } else { "off" })
-                    .into_any_element(),
-            ],
-        ))
-        .child(separator())
-        .child(field(
-            "FPS",
-            vec![value(format!("{:.0}", cost.fps), |d| d.w_7()).into_any_element()],
-        ))
-        .child(field(
-            "CPU",
-            vec![
-                value(format!("{:.0}%", cost.process_cpu_percent), |d| d.w_8()).into_any_element(),
-            ],
-        ))
-        .child(field(
-            "Main thread",
-            vec![value(format!("{:.0}%", cost.main_cpu_percent), |d| d.w_8()).into_any_element()],
-        ))
-        .child(separator())
-        .child(field(
-            "Frame",
-            vec![
-                value(format!("{:.2}", cost.main_cpu_per_frame_ms), |d| d.w_10())
-                    .into_any_element(),
-                div().child("ms").into_any_element(),
-            ],
-        ))
-        .child(field(
             "Build",
-            vec![value(format!("{:.2}", cost.build_ms), |d| d.w_10()).into_any_element()],
+            vec![value(format!("{:.2}", phases.build_ms), |d| d.w_10()).into_any_element()],
         ))
         .child(field(
             "Prepaint",
-            vec![value(format!("{:.2}", cost.prepaint_ms), |d| d.w_10()).into_any_element()],
+            vec![value(format!("{:.2}", phases.prepaint_ms), |d| d.w_10()).into_any_element()],
         ))
         .child(field(
             "Layout",
-            vec![value(format!("{:.2}", cost.layout_ms), |d| d.w_10()).into_any_element()],
+            vec![value(format!("{:.2}", phases.layout_ms), |d| d.w_10()).into_any_element()],
         ))
         .child(field(
             "Paint",
-            vec![value(format!("{:.2}", cost.paint_ms), |d| d.w_10()).into_any_element()],
+            vec![value(format!("{:.2}", phases.paint_ms), |d| d.w_10()).into_any_element()],
         ))
         .child(separator())
         .child(field(
             "Views built",
-            vec![value(format!("{:.1}", cost.views_built), |d| d.w_8()).into_any_element()],
+            vec![value(format!("{:.1}", phases.views_built), |d| d.w_8()).into_any_element()],
         ))
         .child(field(
             "reused",
-            vec![value(format!("{:.1}", cost.views_reused), |d| d.w_8()).into_any_element()],
+            vec![value(format!("{:.1}", phases.views_reused), |d| d.w_8()).into_any_element()],
         ))
     }
 }

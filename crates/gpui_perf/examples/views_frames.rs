@@ -15,6 +15,9 @@
 //! GPUI_VIEW_RETENTION=0 cargo run -p gpui_perf --example views_frames --release -- 60 64 2
 //! ```
 
+extern crate gpui_fast as gpui;
+extern crate gpui_platform_fast as gpui_platform;
+
 #[path = "../../gpui/examples/example_support/fonts.rs"]
 mod example_support;
 

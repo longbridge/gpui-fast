@@ -29,6 +29,12 @@ pub struct Theme {
     pub danger: Hsla,
     /// Text on a `danger` fill, such as a count badge.
     pub danger_foreground: Hsla,
+    /// Which GPUI the showcase runs on, marked in the toolbar so that two
+    /// windows side by side cannot be mistaken: upstream in red, gpui-fast
+    /// in green, with `build_foreground` on either.
+    pub build_upstream: Hsla,
+    pub build_fast: Hsla,
+    pub build_foreground: Hsla,
     /// Tooltips and other surfaces above the window.
     pub popover: Hsla,
     pub radius: Pixels,
@@ -53,6 +59,9 @@ impl Theme {
             success: rgb(0x15803d).into(),
             danger: rgb(0xdc2626).into(),
             danger_foreground: rgb(0xffffff).into(),
+            build_upstream: rgb(0xdc2626).into(),
+            build_fast: rgb(0x16a34a).into(),
+            build_foreground: rgb(0xffffff).into(),
             popover: rgb(0xffffff).into(),
             radius: px(6.),
         }
@@ -74,6 +83,9 @@ impl Theme {
             success: rgb(0x4ade80).into(),
             danger: rgb(0xdc2626).into(),
             danger_foreground: rgb(0xffffff).into(),
+            build_upstream: rgb(0xdc2626).into(),
+            build_fast: rgb(0x16a34a).into(),
+            build_foreground: rgb(0xffffff).into(),
             popover: rgb(0x18181b).into(),
             radius: px(6.),
         }

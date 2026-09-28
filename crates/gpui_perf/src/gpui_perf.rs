@@ -8,13 +8,22 @@
 //! headlessly, with real text shaping, once with retained views and once
 //! without, and reports what each frame cost.
 
+// This repository's GPUI, named `gpui`. The headless scenarios measure
+// gpui-fast's own counters, so they are built only against it.
+#[cfg(feature = "fast")]
+extern crate gpui_fast as gpui;
+
 pub mod alloc;
+#[cfg(feature = "fast")]
 pub mod runner;
+#[cfg(feature = "fast")]
 pub mod scenarios;
 
+#[cfg(feature = "fast")]
 use gpui::{AnyView, App, Window};
 
 /// One simulated workload.
+#[cfg(feature = "fast")]
 ///
 /// `build` creates the root view once. `step` is then called before every
 /// frame with the frame's number, and changes whatever this frame changes,
@@ -37,6 +46,7 @@ pub trait Scenario {
 }
 
 /// Every scenario, in the order they are reported.
+#[cfg(feature = "fast")]
 pub fn all_scenarios() -> Vec<Box<dyn Scenario>> {
     let mut scenarios = Vec::new();
     scenarios.extend(scenarios::form::scenarios());

@@ -20,8 +20,12 @@
 //! With `--auto`, it runs every scenario with retained views on and then off,
 //! prints what each cost per frame, and quits. `--only <scenario>`,
 //! `--retention on|off` and `--frames <n>` narrow it down.
+//!
+//! Built with the `upstream` feature it runs on upstream GPUI, the
+//! `gpui-pre` snapshot GPUI Kit pins, for comparison; see `backend.rs`.
 
 mod auto;
+mod backend;
 mod controls;
 mod metrics;
 mod pages;
@@ -30,11 +34,16 @@ mod theme;
 #[path = "../../../gpui/examples/example_support/fonts.rs"]
 mod example_support;
 
-use std::time::Duration;
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, FontWeight, KeyBinding, Render, ScrollHandle,
-    Subscription, Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
+    App, Bounds, Context, Entity, FocusHandle, FontWeight, KeyBinding, Pixels, Render,
+    ScrollHandle, Subscription, WeakEntity, Window, WindowBounds, WindowOptions, actions, div,
+    prelude::*, px, size,
 };
 use gpui_platform::application;
 
@@ -61,15 +70,13 @@ actions!(
 
 const KEY_CONTEXT: &str = "Showcase";
 
-/// The sidebar's groups and the pages in each.
-const GROUPS: [(&str, &[&str]); 2] = [
-    (
-        "Getting started",
-        &["Introduction", "Installation", "Theming"],
-    ),
-    (
-        "Components",
-        &[
+/// The sidebar's groups and the pages in each: as many as a large component
+/// library's gallery has, so that scrolling it goes a long way.
+fn groups() -> &'static [(&'static str, Vec<&'static str>)] {
+    static GROUPS: std::sync::OnceLock<Vec<(&'static str, Vec<&'static str>)>> =
+        std::sync::OnceLock::new();
+    GROUPS.get_or_init(|| {
+        const COMPONENTS: [&str; 48] = [
             "Accordion",
             "Alert",
             "Avatar",
@@ -118,17 +125,36 @@ const GROUPS: [(&str, &[&str]); 2] = [
             "Tabs",
             "Tag",
             "Tooltip",
-        ],
-    ),
-];
+        ];
+        let mut groups = vec![
+            (
+                "Getting started",
+                vec!["Introduction", "Installation", "Theming"],
+            ),
+            ("Components", COMPONENTS.to_vec()),
+        ];
+        // Further groups of examples, each an entry per component, named
+        // once and kept for the life of the program.
+        for group in ["Recipes", "Patterns", "Layouts", "Accessibility"] {
+            let pages = COMPONENTS
+                .iter()
+                .map(|component| {
+                    &*Box::leak(format!("{component} {}", group.to_lowercase()).into_boxed_str())
+                })
+                .collect();
+            groups.push((group, pages));
+        }
+        groups
+    })
+}
 
 /// Every page, in sidebar order.
 fn pages() -> impl Iterator<Item = &'static str> {
-    GROUPS.iter().flat_map(|(_, pages)| pages.iter().copied())
+    groups().iter().flat_map(|(_, pages)| pages.iter().copied())
 }
 
 fn page_count() -> usize {
-    GROUPS.iter().map(|(_, pages)| pages.len()).sum()
+    groups().iter().map(|(_, pages)| pages.len()).sum()
 }
 
 fn page_name(page: usize) -> &'static str {
@@ -171,7 +197,14 @@ pub enum Scroll {
 }
 
 /// Opens the showcase, running every scenario and quitting if `auto`.
-pub fn run(auto: bool) {
+/// How long `--demo` scrolls each thing.
+const DEMO_STEP: Duration = Duration::from_secs(6);
+
+/// Opens the showcase. With `auto`, it runs every scenario and quits; with
+/// `demo`, it scrolls the sidebar, a page, the table and the list in turn,
+/// for as long as it is open, for recording or watching two GPUIs side by
+/// side.
+pub fn run(auto: bool, demo: bool) {
     application().run(move |cx: &mut App| {
         if !example_support::load_fonts(cx) {
             return;
@@ -200,7 +233,7 @@ pub fn run(auto: bool) {
             },
             |window, cx| {
                 Theme::follow(window, cx);
-                cx.new(|cx| Showcase::new(auto, window, cx))
+                cx.new(|cx| Showcase::new(auto, demo, window, cx))
             },
         )
         .unwrap();
@@ -214,17 +247,148 @@ pub struct Showcase {
     sidebar_scroll: ScrollHandle,
     container: Entity<Container>,
     status_bar: Entity<StatusBar>,
+    /// What scrolls, as the toolbar shows it; the driver does the scrolling.
     scroll: Scroll,
-    scroll_direction: f32,
-    auto: Option<AutoRun>,
+    /// Whether the table's rows are being refreshed, as the toolbar shows
+    /// it. Kept here rather than read from the container, so that this view
+    /// does not depend on the container, which scrolling the page notifies.
+    refreshing: bool,
+    driver: Rc<RefCell<Driver>>,
     _appearance: Subscription,
 }
 
+/// What steps the showcase before every frame: the scroll and the automatic
+/// run. It lives outside the views and only notifies the view that owns what
+/// it scrolls, as a scroll wheel or a dragged scrollbar would, so that no
+/// other view counts as changed.
+pub struct Driver {
+    scroll: Scroll,
+    direction: f32,
+    auto: Option<AutoRun>,
+    /// When `--demo` started, for it to scroll the sidebar, a page, the
+    /// table and the list in turn, [`DEMO_STEP`] each.
+    demo: Option<Instant>,
+    /// Whether frames are being asked for.
+    running: bool,
+}
+
+/// The views and state the driver steps.
+#[derive(Clone)]
+pub struct Handles {
+    showcase: WeakEntity<Showcase>,
+    sidebar_scroll: ScrollHandle,
+    container: Entity<Container>,
+    status_bar: Entity<StatusBar>,
+}
+
+/// How far each frame scrolls: as fast as a scrollbar dragged a long way in
+/// one go.
+fn scroll_speed(_: Scroll) -> Pixels {
+    px(32.)
+}
+
+/// Asks for the next frame, stepping the driver before it is drawn.
+fn drive(driver: Rc<RefCell<Driver>>, handles: Handles, window: &mut Window) {
+    window.on_next_frame(move |window, cx| {
+        if step(&driver, &handles, window, cx) {
+            drive(driver, handles, window);
+        } else {
+            driver.borrow_mut().running = false;
+        }
+    });
+}
+
+/// Moves whatever scrolls by one frame's worth and notifies the view that
+/// owns it. Returns whether to keep going.
+fn step(
+    driver: &Rc<RefCell<Driver>>,
+    handles: &Handles,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let demo = driver.borrow().demo;
+    if let Some(started) = demo {
+        const ORDER: [Scroll; 4] = [Scroll::Sidebar, Scroll::Page, Scroll::Table, Scroll::List];
+        let scroll =
+            ORDER[(started.elapsed().as_secs() / DEMO_STEP.as_secs()) as usize % ORDER.len()];
+        if scroll != driver.borrow().scroll {
+            let mut driver = driver.borrow_mut();
+            driver.scroll = scroll;
+            driver.direction = 1.;
+            drop(driver);
+            handles
+                .showcase
+                .update(cx, |showcase, cx| showcase.show_scroll(scroll, cx))
+                .ok();
+        }
+    }
+    let auto = driver.borrow_mut().auto.take();
+    if let Some(mut auto) = auto {
+        let keep_going = auto.step(driver, handles, window, cx);
+        driver.borrow_mut().auto = Some(auto);
+        if !keep_going {
+            return false;
+        }
+    }
+    let mut driver = driver.borrow_mut();
+    let scroll = driver.scroll;
+    let speed = scroll_speed(scroll) * driver.direction;
+    let mut bounce = |handle: &ScrollHandle| {
+        let max = handle.max_offset().y;
+        let mut offset = handle.offset();
+        offset.y -= speed;
+        if offset.y <= -max {
+            offset.y = -max;
+            driver.direction = -1.;
+        } else if offset.y >= px(0.) {
+            offset.y = px(0.);
+            driver.direction = 1.;
+        }
+        handle.set_offset(offset);
+    };
+    match scroll {
+        Scroll::Off => return driver.auto.is_some(),
+        Scroll::Sidebar => {
+            bounce(&handles.sidebar_scroll);
+            cx.notify(handles.showcase.entity_id());
+        }
+        Scroll::Page => {
+            let handle = handles.container.read(cx).scroll.clone();
+            bounce(&handle);
+            cx.notify(handles.container.entity_id());
+        }
+        Scroll::Table => {
+            let Some(table) = handles.container.read(cx).table.clone() else {
+                return true;
+            };
+            let handle = table.read(cx).scroll.0.borrow().base_handle.clone();
+            bounce(&handle);
+            cx.notify(table.entity_id());
+        }
+        Scroll::List => {
+            let Some(messages) = handles.container.read(cx).messages.clone() else {
+                return true;
+            };
+            let state = messages.read(cx).state.clone();
+            let offset = -state.scroll_px_offset_for_scrollbar().y;
+            let max = state.max_offset_for_scrollbar().y;
+            if offset + speed >= max {
+                driver.direction = -1.;
+            } else if offset + speed <= px(0.) {
+                driver.direction = 1.;
+            }
+            state.scroll_by(speed);
+            cx.notify(messages.entity_id());
+        }
+    }
+    true
+}
+
 impl Showcase {
-    fn new(auto: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(auto: bool, demo: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let container = cx.new(|cx| Container::new(BUTTON_PAGE, cx));
         let status_bar = cx.new(|_| StatusBar::new());
-        window.reset_layout_stats();
+        backend::reset_stats(window);
 
         let sampled = status_bar.downgrade();
         cx.spawn_in(window, async move |_, cx| {
@@ -261,11 +425,17 @@ impl Showcase {
             container,
             status_bar,
             scroll: Scroll::Off,
-            scroll_direction: 1.,
-            auto: auto.then(AutoRun::new),
+            refreshing: false,
+            driver: Rc::new(RefCell::new(Driver {
+                scroll: Scroll::Off,
+                direction: 1.,
+                auto: auto.then(AutoRun::new),
+                demo: demo.then(Instant::now),
+                running: false,
+            })),
             _appearance: appearance,
         };
-        if this.auto.is_some() {
+        if auto || demo {
             this.start_frames(window, cx);
         }
         this
@@ -280,7 +450,15 @@ impl Showcase {
     }
 
     fn set_scroll(&mut self, scroll: Scroll, window: &mut Window, cx: &mut Context<Self>) {
-        let was_off = self.scroll == Scroll::Off;
+        self.driver.borrow_mut().scroll = scroll;
+        self.show_scroll(scroll, cx);
+        if scroll != Scroll::Off {
+            self.start_frames(window, cx);
+        }
+    }
+
+    /// Shows what scrolls in the toolbar, and the page it scrolls.
+    fn show_scroll(&mut self, scroll: Scroll, cx: &mut Context<Self>) {
         self.scroll = scroll;
         match scroll {
             Scroll::Table if self.active != table_page() => self.select(table_page(), cx),
@@ -289,9 +467,6 @@ impl Showcase {
                 self.select(BUTTON_PAGE, cx)
             }
             _ => {}
-        }
-        if was_off && scroll != Scroll::Off {
-            self.start_frames(window, cx);
         }
         cx.notify();
     }
@@ -302,101 +477,47 @@ impl Showcase {
         }
         self.container
             .update(cx, |container, cx| container.toggle_refresh(window, cx));
+        self.refreshing = self.container.read(cx).refreshing;
         cx.notify();
     }
 
     fn toggle_retention(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let enabled = window.view_retention();
-        window.set_view_retention(!enabled);
-        cx.notify();
+        if let Some(enabled) = backend::view_retention(window) {
+            backend::set_view_retention(window, !enabled);
+            cx.notify();
+        }
     }
 
-    /// Asks for the next frame, stepping the scroll before it is drawn, for as
-    /// long as something scrolls or an automatic run is under way.
+    /// Asks for frames, stepping the scroll before each one, for as long as
+    /// something scrolls or an automatic run is under way.
     fn start_frames(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let this = cx.entity().downgrade();
-        window.on_next_frame(move |window, cx| {
-            let Some(this) = this.upgrade() else {
-                return;
-            };
-            this.update(cx, |this, cx| {
-                if this.step(window, cx) {
-                    this.start_frames(window, cx);
-                }
-            });
-        });
-    }
-
-    /// Moves whatever scrolls by one frame's worth and notifies the view that
-    /// owns it, as a scroll wheel or a dragged scrollbar would. Returns
-    /// whether to keep going.
-    fn step(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if let Some(mut auto) = self.auto.take() {
-            let keep_going = auto.step(self, window, cx);
-            self.auto = Some(auto);
-            if !keep_going {
-                return false;
-            }
+        let mut driver = self.driver.borrow_mut();
+        if driver.running {
+            return;
         }
-        let speed = px(14.) * self.scroll_direction;
-        let mut bounce = |handle: &ScrollHandle| {
-            let max = handle.max_offset().y;
-            let mut offset = handle.offset();
-            offset.y -= speed;
-            if offset.y <= -max {
-                offset.y = -max;
-                self.scroll_direction = -1.;
-            } else if offset.y >= px(0.) {
-                offset.y = px(0.);
-                self.scroll_direction = 1.;
-            }
-            handle.set_offset(offset);
+        driver.running = true;
+        drop(driver);
+        let handles = Handles {
+            showcase: cx.entity().downgrade(),
+            sidebar_scroll: self.sidebar_scroll.clone(),
+            container: self.container.clone(),
+            status_bar: self.status_bar.clone(),
         };
-        match self.scroll {
-            Scroll::Off => return self.auto.is_some(),
-            Scroll::Sidebar => {
-                bounce(&self.sidebar_scroll.clone());
-                cx.notify();
-            }
-            Scroll::Page => {
-                let handle = self.container.read(cx).scroll.clone();
-                bounce(&handle);
-                self.container.update(cx, |_, cx| cx.notify());
-            }
-            Scroll::Table => {
-                let Some(table) = self.container.read(cx).table.clone() else {
-                    return true;
-                };
-                let handle = table.read(cx).scroll.0.borrow().base_handle.clone();
-                bounce(&handle);
-                table.update(cx, |_, cx| cx.notify());
-            }
-            Scroll::List => {
-                let Some(messages) = self.container.read(cx).messages.clone() else {
-                    return true;
-                };
-                let state = messages.read(cx).state.clone();
-                let offset = -state.scroll_px_offset_for_scrollbar().y;
-                let max = state.max_offset_for_scrollbar().y;
-                if offset + speed >= max {
-                    self.scroll_direction = -1.;
-                } else if offset + speed <= px(0.) {
-                    self.scroll_direction = 1.;
-                }
-                state.scroll_by(speed);
-                messages.update(cx, |_, cx| cx.notify());
-            }
-        }
-        true
+        drive(self.driver.clone(), handles, window);
     }
 
     fn toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (border, muted_foreground) = {
+        let (border, build, build_foreground) = {
             let theme = theme(cx);
-            (theme.border, theme.muted_foreground)
+            let build = if backend::UPSTREAM {
+                theme.build_upstream
+            } else {
+                theme.build_fast
+            };
+            (theme.border, build, theme.build_foreground)
         };
-        let refreshing = self.container.read(cx).refreshing;
-        let retention = window.view_retention();
+        let refreshing = self.refreshing;
+        let retention = backend::view_retention(window);
         let scroll_option = |scroll: Scroll,
                              label: &'static str,
                              tip: &'static str,
@@ -421,15 +542,14 @@ impl Showcase {
             .child(
                 div()
                     .flex()
-                    .items_baseline()
-                    .gap_2()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Showcase"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted_foreground)
-                            .child("gpui-fast frame cost"),
-                    ),
+                    .items_center()
+                    .h_6()
+                    .px_2()
+                    .rounded(theme(cx).radius)
+                    .bg(build)
+                    .text_color(build_foreground)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(backend::GPUI),
             )
             .child(div().flex_1())
             .child(
@@ -472,20 +592,25 @@ impl Showcase {
                     .tooltip(Tooltip::text("Update table rows every 33 ms", Some("R")))
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_refresh(window, cx))),
             )
-            .child(
-                switch("retention", "Retained views", retention, cx)
-                    .tooltip(Tooltip::text(
-                        "Draw unchanged views from the last frame",
-                        Some("V"),
-                    ))
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_retention(window, cx))),
-            )
+            // Upstream GPUI has no retained views to switch.
+            .when_some(retention, |this, retention| {
+                this.child(
+                    switch("retention", "Retained views", retention, cx)
+                        .tooltip(Tooltip::text(
+                            "Draw unchanged views from the last frame",
+                            Some("V"),
+                        ))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.toggle_retention(window, cx)),
+                        ),
+                )
+            })
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx);
         let mut index = 0;
-        let groups = GROUPS.iter().map(|(title, pages)| {
+        let groups = groups().iter().map(|(title, pages)| {
             let rows = pages.iter().map(|name| {
                 let page = index;
                 index += 1;
@@ -632,5 +757,6 @@ impl Render for Showcase {
                     ),
             )
             .child(self.status_bar.clone())
+            .children(backend::frame_counter())
     }
 }
