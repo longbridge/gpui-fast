@@ -40,7 +40,7 @@ impl From<bool> for PaddedBool32 {
 #[expect(missing_docs)]
 pub struct Scene {
     pub(crate) paint_operations: Vec<PaintOperation>,
-    primitive_bounds: BoundsTree<ScaledPixels>,
+    pub(crate) primitive_bounds: BoundsTree<ScaledPixels>,
     layer_stack: Vec<DrawOrder>,
     pub shadows: Vec<Shadow>,
     pub quads: Vec<Quad>,

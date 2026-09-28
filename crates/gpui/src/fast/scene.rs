@@ -1,8 +1,15 @@
-//! A finished scene described as text, for tests to compare two frames by.
+//! Scene helpers for tests: a finished scene described as text, to compare two
+//! frames by, and forgetting the orderings the bounds tree replays.
 
 use crate::{PaintOperation, Scene};
 
 impl Scene {
+    /// Forgets the orderings recorded for replaying, so the next frame orders
+    /// every primitive from scratch.
+    pub(crate) fn forget_orderings(&mut self) {
+        self.primitive_bounds.forget();
+    }
+
     /// Everything this finished scene draws, in drawing order, as text two
     /// scenes can be compared by: each primitive with its bounds, clip, colours
     /// and ordering, and each layer's bounds. Atlas tiles are left out, since
