@@ -1,22 +1,14 @@
 # GPUI Fast
 
-**An experimental project exploring Retained Mode and window composition for
-GPUI.**
+**An experimental project exploring Retained Mode for GPUI.**
 
-- **Retained Mode**: redraw only what changed since the last frame.
-- **Window composition** (coming next): native views such as a WebView drawn
-  inside a GPUI window, with GPUI's popovers, menus and dialogs still above
-  them. This will merge [zed#62379](https://github.com/zed-industries/zed/pull/62379),
-  proposed to GPUI upstream and still under review there.
-
-Both take deep changes to GPUI, so they are tried out here first. Once they
-work, we plan to propose them to [Zed's GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
+Retained Mode takes deep changes to GPUI, so it is tried out here first. Once
+it works, we plan to propose it to [Zed's GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
 
 Every change here keeps to two rules:
 
 - **GPUI's existing API stays unchanged.** Code written for upstream GPUI
-  compiles and runs here as is. New capabilities are added beside the
-  existing API, and applications opt into them.
+  compiles and runs here as is.
 - **GPUI's own code is changed as little as possible.** gpui-fast's code lives
   in `fast/` directories beside upstream's, upstream files get only small
   hooks into it, and upstream's changes are merged in as Zed makes them. Each
@@ -82,6 +74,13 @@ Point a project at it in place of upstream GPUI:
 gpui = { git = "https://github.com/longbridge/gpui-fast" }
 ```
 
+## Next: window composition
+
+gpui-fast will also merge [zed#62379](https://github.com/zed-industries/zed/pull/62379),
+which gives GPUI windows composition: native views such as a WebView drawn
+inside a GPUI window, with GPUI's popovers, menus and dialogs still above them.
+It is proposed to GPUI upstream and still under review there.
+
 ## gpui-fast, gpui-pre and gpui-ce
 
 Several projects build on GPUI outside Zed:
@@ -92,9 +91,8 @@ Several projects build on GPUI outside Zed:
   not part of it.
 - **gpui-ce** is a community-maintained GPUI.
 
-gpui-fast has a narrower focus: Retained Mode and window composition for
-GPUI. Work that makes it
-into upstream GPUI reaches all of these projects, and Zed itself.
+gpui-fast has a narrower focus. Work that makes it into upstream GPUI
+reaches all of these projects, and Zed itself.
 
 ## Following upstream
 
@@ -103,6 +101,20 @@ takes upstream's changes as Zed makes them. Its own code is kept apart from
 upstream's, so a new upstream is a merge rather than a port. See
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for how that is kept true, and for building,
 testing and measuring.
+
+## Contributing
+
+Issues are not open for now. If a change is needed, open a pull request
+directly, but only for:
+
+- fixes and improvements to Retained Mode, or
+- needs that are clearly reasonable and pressing, and that keep gpui-fast in
+  step with GPUI upstream.
+
+Anything else — new features, API changes, bugs that upstream GPUI has too —
+please propose to [GPUI upstream](https://github.com/zed-industries/zed)
+instead. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the rules a pull request
+must follow.
 
 ## License
 
