@@ -163,22 +163,18 @@ impl App {
     }
 
     /// Whether anything in `dependencies` may have changed since they were
-    /// recorded: one of the entities is among `notified` or was updated since,
-    /// or one of the globals has been written.
-    pub(crate) fn dependencies_changed(
-        &self,
-        dependencies: &RenderDependencies,
-        notified: &FxHashSet<EntityId>,
-    ) -> bool {
-        (!notified.is_empty()
-            && dependencies
-                .entities
-                .iter()
-                .any(|entity| notified.contains(entity)))
-            || self
-                .entities
-                .access_log
-                .updated_since(&dependencies.entities, dependencies.updates)
+    /// recorded: one of the entities was updated, or notified while drawing,
+    /// since, or one of the globals has been written.
+    ///
+    /// An entity notified without being updated — as a scroll wheel, a
+    /// dragged scrollbar or an animation notifies the view to draw again —
+    /// holds what it held: the view notified is built again, but a view that
+    /// read it is not. What scrolled is tracked by the scroll state's own
+    /// version.
+    pub(crate) fn dependencies_changed(&self, dependencies: &RenderDependencies) -> bool {
+        self.entities
+            .access_log
+            .updated_since(&dependencies.entities, dependencies.updates)
             || dependencies.globals.iter().any(|global| {
                 self.dependencies
                     .global_changed_at
@@ -247,6 +243,20 @@ impl EntityMap {
     pub(crate) fn note_access(&self, entity_id: EntityId) {
         if self.access_log.recordings.get() > 0 {
             self.access_log.access_log.borrow_mut().push(entity_id);
+        }
+    }
+
+    /// Records that `entity_id` is notified. A notification while a subtree
+    /// is being drawn — a view changing a model it read as it renders — counts
+    /// as an update: nothing else tells whether it changed what the model
+    /// holds. One outside drawing that follows an update was counted by the
+    /// update; one alone changes nothing a view could have read.
+    #[inline]
+    pub(crate) fn note_notify(&mut self, entity_id: EntityId) {
+        let log = &mut self.access_log;
+        if log.recordings.get() > 0 {
+            log.update_generation += 1;
+            log.updated_at.insert(entity_id, log.update_generation);
         }
     }
 

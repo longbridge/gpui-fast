@@ -16,7 +16,8 @@ use super::{
 
 #[derive(Clone, Copy, Debug)]
 enum Scenario {
-    Idle,
+    /// Nothing scrolls; a spinner in the toolbar animates every frame.
+    Spinner,
     ScrollSidebar,
     ScrollPage,
     ScrollTable,
@@ -25,7 +26,7 @@ enum Scenario {
 }
 
 const SCENARIOS: [Scenario; 6] = [
-    Scenario::Idle,
+    Scenario::Spinner,
     Scenario::ScrollSidebar,
     Scenario::ScrollPage,
     Scenario::ScrollTable,
@@ -120,13 +121,12 @@ impl AutoRun {
             cx.quit();
             return false;
         };
-        let idle = matches!(scenario, Scenario::Idle | Scenario::RefreshTable);
         if self.frame == 0 {
             if let Some(retention) = retention {
                 backend::set_view_retention(window, retention);
             }
             let (page, scroll) = match scenario {
-                Scenario::Idle => (BUTTON_PAGE, Scroll::Off),
+                Scenario::Spinner => (BUTTON_PAGE, Scroll::Off),
                 Scenario::ScrollSidebar => (BUTTON_PAGE, Scroll::Sidebar),
                 Scenario::ScrollPage => (BUTTON_PAGE, Scroll::Page),
                 Scenario::ScrollTable => (table_page(), Scroll::Table),
@@ -139,18 +139,14 @@ impl AutoRun {
                 .showcase
                 .update(cx, |showcase, cx| {
                     showcase.scroll = scroll;
+                    showcase.spinning = matches!(scenario, Scenario::Spinner);
                     // Toggling the refresh shows the table, so it goes first.
-                    if showcase.refreshing != refresh {
+                    if showcase.container.read(cx).refreshing != refresh {
                         showcase.toggle_refresh(window, cx);
                     }
                     showcase.select(page, cx);
                 })
                 .ok();
-        }
-        if idle {
-            // Something has to ask for frames when nothing scrolls; a
-            // notified status bar is the least a frame can do.
-            cx.notify(handles.status_bar.entity_id());
         }
 
         let cpu = main_thread_cpu_time();

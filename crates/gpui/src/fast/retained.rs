@@ -420,7 +420,7 @@ impl Window {
         }
         let index = self.rendered_frame.retained.find(id)?;
         let record = &self.rendered_frame.retained.records[index];
-        if cx.dependencies_changed(&record.dependencies, &self.retained_state.notified_entities)
+        if cx.dependencies_changed(&record.dependencies)
             || !self.hovers_unchanged(&record.hover_dependencies)
         {
             return None;

@@ -258,10 +258,7 @@ impl Window {
         let layout = record.layout.as_ref()?;
         if layout.rem_size != self.rem_size()
             || layout.text_style != self.text_style()
-            || cx.dependencies_changed(
-                &record.own_dependencies,
-                &self.retained_state.notified_entities,
-            )
+            || cx.dependencies_changed(&record.own_dependencies)
             || !self.hovers_unchanged(&record.own_hovers)
         {
             return None;

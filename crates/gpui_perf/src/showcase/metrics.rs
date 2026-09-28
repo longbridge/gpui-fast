@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use gpui::{Context, IntoElement, Render, Window, div, prelude::*};
+use gpui::{App, IntoElement, Window, div, prelude::*};
 
 use super::{
     backend::{self, FrameTimes},
@@ -92,13 +92,16 @@ impl Cost {
 }
 
 /// The status bar: what the last half second of frames cost.
-pub struct StatusBar {
+/// What the frames of the last half second cost, sampled by a timer. A model
+/// the root view reads to draw its status bar, as an application's status
+/// bar reads its state.
+pub struct Stats {
     last: Option<Sample>,
     cost: Option<Cost>,
     retention: Option<bool>,
 }
 
-impl StatusBar {
+impl Stats {
     pub fn new() -> Self {
         Self {
             last: None,
@@ -117,8 +120,9 @@ impl StatusBar {
     }
 }
 
-impl Render for StatusBar {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+/// The status bar, drawn by the root view from the [`Stats`] it reads.
+pub fn status_bar(stats: &Stats, cx: &App) -> impl IntoElement {
+    {
         let theme = theme(cx);
         let bar = div()
             .flex()
@@ -132,7 +136,7 @@ impl Render for StatusBar {
             .bg(theme.sidebar)
             .text_xs()
             .text_color(theme.muted_foreground);
-        let Some(cost) = self.cost else {
+        let Some(cost) = stats.cost else {
             return bar.child("Measuring…");
         };
 
@@ -155,7 +159,7 @@ impl Render for StatusBar {
         };
         let separator = || div().w_px().h_3().bg(theme.border);
 
-        let bar = match self.retention {
+        let bar = match stats.retention {
             Some(retention) => bar.child(field(
                 "Retained views",
                 vec![

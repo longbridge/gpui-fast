@@ -4,6 +4,7 @@
 
 use gpui::{App, Global, Hsla, Pixels, Window, WindowAppearance, hsla, px, rgb};
 
+#[derive(Clone)]
 pub struct Theme {
     /// The window's main surface and the text on it.
     pub background: Hsla,

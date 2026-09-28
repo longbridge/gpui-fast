@@ -25,6 +25,7 @@
 //! Built with the `upstream` feature it runs on upstream GPUI, the
 //! `gpui-pre` snapshot GPUI Kit pins, for comparison; see `backend.rs`.
 
+mod app_state;
 mod auto;
 mod backend;
 mod controls;
@@ -42,15 +43,16 @@ use std::{
 };
 
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, FontWeight, KeyBinding, Pixels, Render,
-    ScrollHandle, Subscription, WeakEntity, Window, WindowBounds, WindowOptions, actions, div,
-    prelude::*, px, size,
+    Animation, AnimationExt as _, App, Bounds, Context, Entity, FocusHandle, FontWeight,
+    KeyBinding, Pixels, Render, ScrollHandle, SharedString, Subscription, WeakEntity, Window,
+    WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
 };
 use gpui_platform::application;
 
+use app_state::{AppState, SharedAppState, app_state};
 use auto::AutoRun;
 use controls::{Tooltip, segment, segment_track, segmented, switch};
-use metrics::StatusBar;
+use metrics::Stats;
 use pages::{Container, PageKind};
 use theme::{Theme, theme};
 
@@ -187,6 +189,9 @@ const BUTTON_PAGE: usize = 8;
 
 const SAMPLE_EVERY: Duration = Duration::from_millis(500);
 
+/// How often the application's state changes.
+const APP_STATE_EVERY: Duration = Duration::from_secs(2);
+
 /// What scrolls itself, one step every frame.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Scroll {
@@ -247,13 +252,15 @@ pub struct Showcase {
     active: usize,
     sidebar_scroll: ScrollHandle,
     container: Entity<Container>,
-    status_bar: Entity<StatusBar>,
+    /// What the frames cost, which the status bar shows.
+    stats: Entity<Stats>,
+    /// One entity per page, holding its name, which the sidebar reads, as
+    /// GPUI Kit's gallery reads its stories'.
+    stories: Vec<Entity<Story>>,
+    /// Whether the toolbar shows a spinner, animating every frame.
+    spinning: bool,
     /// What scrolls, as the toolbar shows it; the driver does the scrolling.
     scroll: Scroll,
-    /// Whether the table's rows are being refreshed, as the toolbar shows
-    /// it. Kept here rather than read from the container, so that this view
-    /// does not depend on the container, which scrolling the page notifies.
-    refreshing: bool,
     driver: Rc<RefCell<Driver>>,
     _appearance: Subscription,
 }
@@ -279,7 +286,11 @@ pub struct Handles {
     showcase: WeakEntity<Showcase>,
     sidebar_scroll: ScrollHandle,
     container: Entity<Container>,
-    status_bar: Entity<StatusBar>,
+}
+
+/// A page of the gallery.
+pub struct Story {
+    name: SharedString,
 }
 
 /// How far each frame scrolls: as fast as a scrollbar dragged a long way in
@@ -387,20 +398,48 @@ fn step(
 
 impl Showcase {
     fn new(auto: bool, demo: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let container = cx.new(|cx| Container::new(BUTTON_PAGE, cx));
-        let status_bar = cx.new(|_| StatusBar::new());
+        let container = cx.new(|cx| {
+            let mut container = Container::new(BUTTON_PAGE, cx);
+            container.title = page_name(BUTTON_PAGE).into();
+            container
+        });
+        let stats = cx.new(|_| Stats::new());
+        let stories = pages()
+            .map(|name| cx.new(|_| Story { name: name.into() }))
+            .collect();
         backend::reset_stats(window);
 
-        let sampled = status_bar.downgrade();
+        // The application's state, which changes every couple of seconds.
+        let app_state = cx.new(|_| AppState {
+            unread: 3,
+            compact: false,
+        });
+        cx.set_global(SharedAppState(app_state.clone()));
+        let ticked = app_state.downgrade();
+        cx.spawn(async move |_, cx| {
+            loop {
+                cx.background_executor().timer(APP_STATE_EVERY).await;
+                let Some(app_state) = ticked.upgrade() else {
+                    break;
+                };
+                app_state.update(cx, |state, cx| {
+                    state.unread += 1;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+
+        let sampled = stats.downgrade();
         cx.spawn_in(window, async move |_, cx| {
             loop {
                 cx.background_executor().timer(SAMPLE_EVERY).await;
-                let Some(status_bar) = sampled.upgrade() else {
+                let Some(stats) = sampled.upgrade() else {
                     break;
                 };
                 let sampled = cx.update(|window, cx| {
-                    status_bar.update(cx, |status_bar, cx| {
-                        status_bar.sample(window);
+                    stats.update(cx, |stats, cx| {
+                        stats.sample(window);
                         cx.notify();
                     })
                 });
@@ -424,9 +463,10 @@ impl Showcase {
             active: BUTTON_PAGE,
             sidebar_scroll: ScrollHandle::new(),
             container,
-            status_bar,
+            stats,
+            stories,
+            spinning: false,
             scroll: Scroll::Off,
-            refreshing: false,
             driver: Rc::new(RefCell::new(Driver {
                 scroll: Scroll::Off,
                 direction: 1.,
@@ -445,7 +485,7 @@ impl Showcase {
     fn select(&mut self, page: usize, cx: &mut Context<Self>) {
         self.active = page;
         self.container.update(cx, |container, cx| {
-            container.show(page, page_kind(page), cx);
+            container.show(page, page_name(page).into(), page_kind(page), cx);
         });
         cx.notify();
     }
@@ -478,7 +518,6 @@ impl Showcase {
         }
         self.container
             .update(cx, |container, cx| container.toggle_refresh(window, cx));
-        self.refreshing = self.container.read(cx).refreshing;
         cx.notify();
     }
 
@@ -502,7 +541,6 @@ impl Showcase {
             showcase: cx.entity().downgrade(),
             sidebar_scroll: self.sidebar_scroll.clone(),
             container: self.container.clone(),
-            status_bar: self.status_bar.clone(),
         };
         drive(self.driver.clone(), handles, window);
     }
@@ -517,7 +555,7 @@ impl Showcase {
             };
             (theme.border, build, theme.build_foreground)
         };
-        let refreshing = self.refreshing;
+        let refreshing = self.container.read(cx).refreshing;
         let retention = backend::view_retention(window);
         let scroll_option = |scroll: Scroll,
                              label: &'static str,
@@ -552,6 +590,7 @@ impl Showcase {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(backend::GPUI),
             )
+            .when(self.spinning, |this| this.child(spinner(cx)))
             .child(div().flex_1())
             .child(
                 segmented("Auto-scroll", cx).child(
@@ -612,7 +651,7 @@ impl Showcase {
         let theme = theme(cx);
         let mut index = 0;
         let groups = groups().iter().map(|(title, pages)| {
-            let rows = pages.iter().map(|name| {
+            let rows = pages.iter().map(|_| {
                 let page = index;
                 index += 1;
                 let selected = page == self.active;
@@ -631,7 +670,7 @@ impl Showcase {
                     .when(!selected, |this| {
                         this.hover(|this| this.bg(theme.sidebar_accent.opacity(0.6)))
                     })
-                    .child(*name)
+                    .child(self.stories[page].read(cx).name.clone())
                     .on_click(cx.listener(move |this, _, _, cx| this.select(page, cx)))
             });
             div()
@@ -670,11 +709,12 @@ impl Showcase {
                     .pb_4()
                     .children(groups.collect::<Vec<_>>()),
             )
+            .child(unread(cx))
     }
 
     fn page_header(&self, cx: &App) -> impl IntoElement {
         let theme = theme(cx);
-        let name = page_name(self.active);
+        let name = self.container.read(cx).title.clone();
         div()
             .flex()
             .flex_col()
@@ -688,7 +728,7 @@ impl Showcase {
                 div()
                     .text_xl()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(name),
+                    .child(name.clone()),
             )
             .child(div().text_sm().text_color(theme.muted_foreground).child(
                 if self.active == table_page() {
@@ -700,6 +740,36 @@ impl Showcase {
                 },
             ))
     }
+}
+
+/// A spinner, animating every frame as a loading indicator does. The
+/// animation asks for each frame by notifying the view it is drawn in.
+fn spinner(cx: &App) -> impl IntoElement {
+    let theme = theme(cx);
+    div()
+        .size_3()
+        .rounded_full()
+        .bg(theme.foreground)
+        .with_animation(
+            "spinner",
+            Animation::new(Duration::from_millis(800)).repeat(),
+            |this, delta| this.opacity(0.2 + 0.8 * delta),
+        )
+}
+
+/// The unread count, read from the application's state, at the foot of the
+/// sidebar.
+fn unread(cx: &App) -> impl IntoElement {
+    let theme = theme(cx);
+    div()
+        .flex_shrink_0()
+        .px_4()
+        .py_2()
+        .border_t_1()
+        .border_color(theme.border)
+        .text_xs()
+        .text_color(theme.muted_foreground)
+        .child(format!("{} unread", app_state(cx).unread))
 }
 
 impl Render for Showcase {
@@ -757,7 +827,7 @@ impl Render for Showcase {
                             .child(self.container.clone()),
                     ),
             )
-            .child(self.status_bar.clone())
+            .child(metrics::status_bar(self.stats.read(cx), cx))
             .children(backend::frame_counter())
     }
 }

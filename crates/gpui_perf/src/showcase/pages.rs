@@ -6,12 +6,16 @@
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, Hsla, IntoElement, ListAlignment, ListState, Render,
-    ScrollHandle, SharedString, Task, UniformListScrollHandle, Window, div, hsla, list, point,
-    prelude::*, px, uniform_list,
+    AnyElement, App, Context, Entity, FontWeight, Hsla, IntoElement, ListAlignment, ListState,
+    Render, ScrollHandle, SharedString, Task, UniformListScrollHandle, Window, div, hsla, list,
+    point, prelude::*, px, uniform_list,
 };
 
-use super::theme::{Theme, theme};
+use super::{
+    app_state::app_state,
+    controls::Tooltip,
+    theme::{Theme, theme},
+};
 
 pub const TABLE_ROWS: usize = 5_000;
 pub const MESSAGES: usize = 5_000;
@@ -34,6 +38,9 @@ pub struct Container {
     pub messages: Option<Entity<MessageList>>,
     showing: PageKind,
     pub refreshing: bool,
+    /// The page's name, which the root view reads for its header, as GPUI
+    /// Kit's gallery reads its stories'.
+    pub title: SharedString,
 }
 
 impl Container {
@@ -46,11 +53,19 @@ impl Container {
             messages: None,
             showing: PageKind::Components,
             refreshing: false,
+            title: SharedString::default(),
         }
     }
 
-    /// Shows the page `seed` stands for, of the given kind.
-    pub fn show(&mut self, seed: usize, kind: PageKind, cx: &mut Context<Self>) {
+    /// Shows the page `seed` stands for, named `title`, of the given kind.
+    pub fn show(
+        &mut self,
+        seed: usize,
+        title: SharedString,
+        kind: PageKind,
+        cx: &mut Context<Self>,
+    ) {
+        self.title = title;
         self.scroll.set_offset(point(px(0.), px(0.)));
         self.showing = kind;
         match kind {
@@ -106,20 +121,27 @@ impl Render for Container {
 }
 
 /// A page of component sections, as a GPUI Kit story is: one view whose
-/// sections are plain elements.
+/// sections are plain elements, some of them holding state of their own in
+/// keyed entities, as GPUI Kit's inputs and switches do.
 pub struct ComponentsPage {
     seed: usize,
 }
 
 impl Render for ComponentsPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let seed = self.seed;
-        let theme = theme(cx);
+        let theme = theme(cx).clone();
+        let compact = app_state(cx).compact;
+        let unread = app_state(cx).unread;
+        let sections: Vec<AnyElement> = (0..24)
+            .map(|section_ix| section(seed, section_ix, unread, &theme, window, cx))
+            .collect();
         div()
             .flex()
             .flex_col()
-            .gap_6()
-            .children((0..24).map(|section_ix| section(seed, section_ix, theme)))
+            .when(compact, |this| this.gap_4())
+            .when(!compact, |this| this.gap_6())
+            .children(sections)
     }
 }
 
@@ -129,10 +151,24 @@ enum Kind {
     Avatars,
     Badges,
     Inputs,
+    Switches,
 }
 
-fn section(seed: usize, section_ix: usize, theme: &Theme) -> impl IntoElement {
-    let kind = [Kind::Buttons, Kind::Avatars, Kind::Badges, Kind::Inputs][(seed + section_ix) % 4];
+fn section(
+    seed: usize,
+    section_ix: usize,
+    unread: usize,
+    theme: &Theme,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let kind = [
+        Kind::Buttons,
+        Kind::Avatars,
+        Kind::Badges,
+        Kind::Inputs,
+        Kind::Switches,
+    ][(seed + section_ix) % 5];
     let items = 3 + (seed * 7 + section_ix * 5) % 9;
     let (title, description): (SharedString, &str) = match kind {
         Kind::Buttons => (
@@ -149,9 +185,22 @@ fn section(seed: usize, section_ix: usize, theme: &Theme) -> impl IntoElement {
         ),
         Kind::Inputs => (
             format!("Inputs {}", section_ix + 1).into(),
-            "Empty inputs showing their placeholder.",
+            "Inputs holding their state in keyed entities; click one to focus it.",
+        ),
+        Kind::Switches => (
+            format!("Switches {}", section_ix + 1).into(),
+            "Switches holding their state in keyed entities; click one to toggle it.",
         ),
     };
+    let items: Vec<AnyElement> = (0..items)
+        .map(|item| match kind {
+            Kind::Buttons => button(section_ix, item, theme).into_any_element(),
+            Kind::Avatars => avatar(section_ix, item, unread, theme).into_any_element(),
+            Kind::Badges => badge(item, theme).into_any_element(),
+            Kind::Inputs => input(section_ix, item, theme, window, cx).into_any_element(),
+            Kind::Switches => toggle(section_ix, item, theme, window, cx).into_any_element(),
+        })
+        .collect();
     div()
         .flex()
         .flex_col()
@@ -188,14 +237,10 @@ fn section(seed: usize, section_ix: usize, theme: &Theme) -> impl IntoElement {
                         .justify_center()
                         .items_center()
                         .gap_4()
-                        .children((0..items).map(|item| match kind {
-                            Kind::Buttons => button(section_ix, item, theme).into_any_element(),
-                            Kind::Avatars => avatar(section_ix, item, theme).into_any_element(),
-                            Kind::Badges => badge(item, theme).into_any_element(),
-                            Kind::Inputs => input(item, theme).into_any_element(),
-                        })),
+                        .children(items),
                 ),
         )
+        .into_any_element()
 }
 
 fn button(section_ix: usize, item: usize, theme: &Theme) -> impl IntoElement {
@@ -207,6 +252,7 @@ fn button(section_ix: usize, item: usize, theme: &Theme) -> impl IntoElement {
         "Archive",
         "Rename…",
     ];
+    let label = LABELS[item % LABELS.len()];
     let base = div()
         .id(("button", section_ix * 100 + item))
         .flex()
@@ -217,7 +263,9 @@ fn button(section_ix: usize, item: usize, theme: &Theme) -> impl IntoElement {
         .rounded(theme.radius)
         .text_sm()
         .font_weight(FontWeight::MEDIUM)
-        .child(LABELS[item % LABELS.len()]);
+        .tooltip(Tooltip::text(label, None))
+        .on_click(|_, _, _| {})
+        .child(label);
     match item % 3 {
         // Default.
         0 => base
@@ -239,10 +287,10 @@ fn button(section_ix: usize, item: usize, theme: &Theme) -> impl IntoElement {
     }
 }
 
-fn avatar(section_ix: usize, item: usize, theme: &Theme) -> impl IntoElement {
+fn avatar(section_ix: usize, item: usize, unread: usize, theme: &Theme) -> impl IntoElement {
     // An avatar's color stands for the person, so it is data, not a token.
     let hue = ((section_ix * 31 + item * 17) % 100) as f32 / 100.;
-    let unread = item * 7 % 120;
+    let unread = (item * 7 + unread) % 120;
     div()
         .relative()
         .size_10()
@@ -291,9 +339,24 @@ fn badge(item: usize, theme: &Theme) -> impl IntoElement {
         .child(LABELS[item % LABELS.len()])
 }
 
-fn input(item: usize, theme: &Theme) -> impl IntoElement {
+/// An input's state, kept in a keyed entity as GPUI Kit's inputs keep theirs.
+struct InputState {
+    focused: bool,
+}
+
+fn input(
+    section_ix: usize,
+    item: usize,
+    theme: &Theme,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement {
     const PLACEHOLDERS: [&str; 4] = ["Name", "Email address", "Search", "Project"];
+    let id = ("input", section_ix * 100 + item);
+    let state = window.use_keyed_state(id, cx, |_, _| InputState { focused: false });
+    let focused = state.read(cx).focused;
     div()
+        .id(id)
         .w_48()
         .h_8()
         .px_3()
@@ -301,10 +364,69 @@ fn input(item: usize, theme: &Theme) -> impl IntoElement {
         .items_center()
         .rounded(theme.radius)
         .border_1()
-        .border_color(theme.border)
+        .border_color(if focused {
+            theme.foreground
+        } else {
+            theme.border
+        })
         .text_sm()
         .text_color(theme.muted_foreground)
+        .on_click(move |_, _, cx| {
+            state.update(cx, |state, cx| {
+                state.focused = !state.focused;
+                cx.notify();
+            })
+        })
         .child(PLACEHOLDERS[item % PLACEHOLDERS.len()])
+}
+
+/// A switch's state, kept in a keyed entity.
+struct SwitchState {
+    on: bool,
+}
+
+fn toggle(
+    section_ix: usize,
+    item: usize,
+    theme: &Theme,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement {
+    const LABELS: [&str; 4] = ["Notifications", "Sync", "Auto-save", "Dark mode"];
+    let id = ("switch", section_ix * 100 + item);
+    let state = window.use_keyed_state(id, cx, move |_, _| SwitchState {
+        on: item.is_multiple_of(2),
+    });
+    let on = state.read(cx).on;
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_sm()
+        .on_click(move |_, _, cx| {
+            state.update(cx, |state, cx| {
+                state.on = !state.on;
+                cx.notify();
+            })
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .w_7()
+                .h_4()
+                .p_0p5()
+                .rounded_full()
+                .bg(if on { theme.primary } else { theme.border })
+                .when(on, |this| this.justify_end())
+                .child(div().size_3().rounded_full().bg(if on {
+                    theme.primary_foreground
+                } else {
+                    theme.background
+                })),
+        )
+        .child(LABELS[item % LABELS.len()])
 }
 
 /// The page around the data table, as GPUI Kit's DataTable story has it: its
@@ -479,9 +601,10 @@ impl Render for Table {
             .child(
                 uniform_list("rows", self.rows.len(), move |range, _, cx| {
                     let theme = super::theme::theme(cx);
+                    let compact = app_state(cx).compact;
                     let rows = &table.read(cx).rows;
                     range
-                        .map(|ix| row(ix, &rows[ix], theme).into_any_element())
+                        .map(|ix| row(ix, &rows[ix], compact, theme).into_any_element())
                         .collect::<Vec<_>>()
                 })
                 .flex_1()
@@ -490,7 +613,7 @@ impl Render for Table {
     }
 }
 
-fn row(ix: usize, stock: &Stock, theme: &Theme) -> impl IntoElement {
+fn row(ix: usize, stock: &Stock, compact: bool, theme: &Theme) -> impl IntoElement {
     // A gain or a loss is told by its sign as well as its color.
     let change_color: Hsla = if stock.change > 0. {
         theme.success
@@ -520,6 +643,7 @@ fn row(ix: usize, stock: &Stock, theme: &Theme) -> impl IntoElement {
         .h_8()
         .border_b_1()
         .border_color(theme.border)
+        .when(compact, |this| this.text_xs())
         .when(ix % 2 == 1, |this| this.bg(theme.stripe))
         .hover(|this| this.bg(theme.accent))
         .children(
@@ -595,12 +719,15 @@ impl Render for MessageList {
         let this = cx.entity();
         list(self.state.clone(), move |ix, _, cx| {
             let theme = super::theme::theme(cx);
+            // The newest few are marked unread, as many as the app counts.
+            let unread = ix < app_state(cx).unread % 20;
             let message = &this.read(cx).messages[ix];
             div()
                 .flex()
                 .gap_3()
                 .px_6()
                 .py_3()
+                .when(unread, |this| this.bg(theme.accent))
                 .child(
                     div()
                         .flex()

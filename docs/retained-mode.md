@@ -55,7 +55,12 @@ split into views, the less a change costs. The code is in
 
 A view counts as having read itself, so an application that changes a view
 outside drawing (`entity.update(..)`) without notifying it gets it built again
-on the next frame. A frame driver or timer that only needs to notify another
+on the next frame. Conversely, an entity notified without being updated — as a
+scroll wheel, a dragged scrollbar or an animation notifies a view to draw it
+again — is built again itself, but a view that read it is not: nothing it
+holds has changed. An application that changes what an entity holds through
+interior mutability (`entity.read(cx).cell.borrow_mut()`) has to change it
+with `update` instead for the views reading it to see it. A frame driver or timer that only needs to notify another
 view should notify it by id (`cx.notify(entity_id)`) rather than updating the
 view that owns the driver.
 

@@ -825,3 +825,75 @@ fn text_that_did_not_change_keeps_its_measurement() {
     .unwrap();
     assert_eq!(changed, draw_siblings(&mut cx, s.window));
 }
+
+/// A view that reads what a nested view holds, as a gallery reads the name of
+/// the page it shows.
+struct Reader {
+    child: Entity<Counted>,
+    builds: Rc<Cell<usize>>,
+}
+
+impl Render for Reader {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.builds.set(self.builds.get() + 1);
+        let label = self.child.read(cx).label;
+        div()
+            .flex()
+            .flex_col()
+            .child(format!("showing {label}"))
+            .child(self.child.clone())
+    }
+}
+
+/// A view notified without being updated, as a scroll wheel or a dragged
+/// scrollbar notifies it, is drawn again on its own: a view that read it is
+/// drawn around it from last frame. Once it is updated, what that view read
+/// may have changed, and it is built again.
+#[test]
+fn a_view_that_read_a_notified_view_is_built_again_only_if_it_was_updated() {
+    let mut cx = TestAppContext::single();
+    let reader_builds = Rc::new(Cell::new(0));
+    let child_builds = Rc::new(Cell::new(0));
+    let window = cx.add_window({
+        let (reader_builds, child_builds) = (reader_builds.clone(), child_builds.clone());
+        move |_, cx| Reader {
+            child: cx.new(|_| Counted {
+                label: 1,
+                model: None,
+                builds: child_builds,
+            }),
+            builds: reader_builds,
+        }
+    });
+    let child = window.read_with(&cx, |view, _| view.child.clone()).unwrap();
+    let draw = |cx: &mut TestAppContext| {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.describe_rendered_frame()
+        })
+        .unwrap()
+    };
+    draw(&mut cx);
+    let first = (reader_builds.get(), child_builds.get());
+
+    cx.update(|cx| cx.notify(child.entity_id()));
+    draw(&mut cx);
+    assert_eq!(
+        (reader_builds.get(), child_builds.get()),
+        (first.0, first.1 + 1),
+        "a notification alone changes nothing the reader read"
+    );
+
+    child.update(&mut cx, |child, cx| {
+        child.label = 2;
+        cx.notify();
+    });
+    let updated = draw(&mut cx);
+    assert_eq!(
+        (reader_builds.get(), child_builds.get()),
+        (first.0 + 1, first.1 + 2)
+    );
+    cx.update_window(window.into(), |_, window, _| window.forget_retained_state())
+        .unwrap();
+    assert_eq!(updated, draw(&mut cx));
+}
