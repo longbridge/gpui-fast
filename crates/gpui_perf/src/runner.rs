@@ -36,7 +36,7 @@ use gpui::{
 };
 use serde::Serialize;
 
-use crate::{Scenario, alloc::allocations, all_scenarios};
+use crate::{Scenario, all_scenarios, alloc::allocations};
 
 /// Which retention modes to run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
