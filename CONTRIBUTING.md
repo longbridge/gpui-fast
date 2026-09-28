@@ -1,5 +1,11 @@
 # Contributing to GPUI Fast
 
+Issues are not open for now. Pull requests are welcome for fixes and
+improvements to Retained Mode, and for needs that are clearly reasonable and
+pressing and keep gpui-fast in step with GPUI upstream. Anything else belongs
+in [GPUI upstream](https://github.com/zed-industries/zed); see the
+[README](README.md#contributing).
+
 ## Staying in step with upstream
 
 gpui-fast tracks Zed's `crates/gpui` and the Zed crates it depends on. The
