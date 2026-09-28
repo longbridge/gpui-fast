@@ -3,10 +3,11 @@
 use std::{
     any::TypeId,
     cell::{Cell, RefCell},
+    ops::Range,
     rc::Rc,
 };
 
-use collections::{FxHashSet, TypeIdHashMap};
+use collections::{FxHashMap, FxHashSet, TypeIdHashMap};
 
 use crate::{App, EntityId, EntityMap, ListOffset};
 
@@ -25,6 +26,18 @@ pub(crate) struct AppDependencies {
     /// Every [`StateVersion`] read while a recording is open, with the
     /// version it was at.
     state_read_log: RefCell<Vec<(StateVersion, u64)>>,
+    /// For each open recording, innermost last, the stretches of the logs that
+    /// recordings nested in it, or dependencies replayed into it, took up:
+    /// what it read through a nested subtree rather than itself.
+    nested: Vec<Vec<LogRanges>>,
+}
+
+/// Stretches of the three read logs.
+#[derive(Clone)]
+struct LogRanges {
+    entities: Range<usize>,
+    globals: Range<usize>,
+    states: Range<usize>,
 }
 
 impl AppDependencies {
@@ -44,42 +57,76 @@ impl App {
     /// while none of it changes. Recordings nest; each sees everything read
     /// while it is open, including what nested ones saw.
     pub(crate) fn begin_recording_dependencies(&mut self) -> DependencyRecording {
+        self.dependencies.nested.push(Vec::new());
         DependencyRecording {
             entities: self.entities.begin_recording(),
             globals: self.dependencies.global_read_log.get_mut().len(),
             states: self.dependencies.state_read_log.get_mut().len(),
             generation: self.dependencies.global_generation,
+            updates: self.entities.access_log.update_generation,
         }
     }
 
-    /// Ends `recording`, returning what was read while it was open.
+    /// Ends `recording`, returning what was read while it was open: all of
+    /// it, and what was read outside the recordings nested in it.
     pub(crate) fn finish_recording_dependencies(
         &mut self,
         recording: DependencyRecording,
-    ) -> RenderDependencies {
+    ) -> RecordedDependencies {
         let log = &mut self.dependencies;
-        let mut globals = log.global_read_log.get_mut()[recording.globals..].to_vec();
-        let states = dedup_states(&log.state_read_log.get_mut()[recording.states..]);
+        let nested = log.nested.pop().unwrap_or_default();
+        let ranges = LogRanges {
+            entities: recording.entities..self.entities.access_log.len(),
+            globals: recording.globals..log.global_read_log.get_mut().len(),
+            states: recording.states..log.state_read_log.get_mut().len(),
+        };
+        let globals_log = log.global_read_log.get_mut();
+        let states_log = log.state_read_log.get_mut();
+        let own_globals = outside(
+            globals_log,
+            &ranges.globals,
+            nested.iter().map(|n| &n.globals),
+        );
+        let own_states = outside(states_log, &ranges.states, nested.iter().map(|n| &n.states));
+        let mut globals = globals_log[recording.globals..].to_vec();
+        let states = dedup_states(&states_log[recording.states..]);
+        let own_entities = outside(
+            &self.entities.access_log.access_log.borrow(),
+            &ranges.entities,
+            nested.iter().map(|n| &n.entities),
+        );
         let entities = self.entities.finish_recording(recording.entities);
+        if let Some(parent) = self.dependencies.nested.last_mut() {
+            parent.push(ranges);
+        }
         if !self.entities.is_recording() {
             self.dependencies.global_read_log.get_mut().clear();
             self.dependencies.state_read_log.get_mut().clear();
         }
         globals.sort_unstable();
         globals.dedup();
-        RenderDependencies {
-            entities: entities.into(),
-            globals: globals.into(),
-            states,
-            // As of when the recording began, so that a global written while
-            // it was open, after being read, counts as changed.
-            generation: recording.generation,
+        RecordedDependencies {
+            all: RenderDependencies {
+                entities: entities.into(),
+                globals: globals.into(),
+                states,
+                // As of when the recording began, so that a global written
+                // while it was open, after being read, counts as changed.
+                generation: recording.generation,
+                updates: recording.updates,
+            },
+            own: RenderDependencies::from_reads(own_entities, own_globals, &own_states, &recording),
         }
     }
 
     /// Tells the window, and any recording that is open, that `dependencies`
     /// were read again, as they are when a subtree built from them is reused.
     pub(crate) fn replay_dependencies(&mut self, dependencies: &RenderDependencies) {
+        let start = LogRanges {
+            entities: self.entities.access_log.len()..0,
+            globals: self.dependencies.global_read_log.get_mut().len()..0,
+            states: self.dependencies.state_read_log.get_mut().len()..0,
+        };
         self.entities.extend_accessed(dependencies.entities.iter());
         if self.entities.is_recording() {
             self.dependencies
@@ -90,6 +137,16 @@ impl App {
                 .state_read_log
                 .get_mut()
                 .extend(dependencies.states.iter().cloned());
+            // Read through the subtree being reused, not by the recording
+            // it is reused in.
+            let ranges = LogRanges {
+                entities: start.entities.start..self.entities.access_log.len(),
+                globals: start.globals.start..self.dependencies.global_read_log.get_mut().len(),
+                states: start.states.start..self.dependencies.state_read_log.get_mut().len(),
+            };
+            if let Some(open) = self.dependencies.nested.last_mut() {
+                open.push(ranges);
+            }
         }
     }
 
@@ -106,8 +163,8 @@ impl App {
     }
 
     /// Whether anything in `dependencies` may have changed since they were
-    /// recorded: one of the entities is among `notified`, or one of the
-    /// globals has been written.
+    /// recorded: one of the entities is among `notified` or was updated since,
+    /// or one of the globals has been written.
     pub(crate) fn dependencies_changed(
         &self,
         dependencies: &RenderDependencies,
@@ -118,6 +175,10 @@ impl App {
                 .entities
                 .iter()
                 .any(|entity| notified.contains(entity)))
+            || self
+                .entities
+                .access_log
+                .updated_since(&dependencies.entities, dependencies.updates)
             || dependencies.globals.iter().any(|global| {
                 self.dependencies
                     .global_changed_at
@@ -149,6 +210,34 @@ pub(crate) struct EntityAccessLog {
     access_log: RefCell<Vec<EntityId>>,
     /// How many recordings are open.
     recordings: Cell<usize>,
+    /// Counts the entities updated while no recording is open, each of which
+    /// is stamped into `updated_at`.
+    update_generation: u64,
+    /// When each entity was last updated while no recording was open. See
+    /// [`EntityMap::note_update`].
+    updated_at: FxHashMap<EntityId, u64>,
+}
+
+impl EntityAccessLog {
+    /// How many accesses the log holds.
+    fn len(&self) -> usize {
+        self.access_log.borrow().len()
+    }
+
+    /// Whether any of `entities` was updated after `generation`.
+    fn updated_since(&self, entities: &[EntityId], generation: u64) -> bool {
+        generation != self.update_generation
+            && entities.iter().any(|entity| {
+                self.updated_at
+                    .get(entity)
+                    .is_some_and(|updated_at| *updated_at > generation)
+            })
+    }
+
+    /// Forgets when a released entity was updated.
+    pub(crate) fn forget(&mut self, entity_id: EntityId) {
+        self.updated_at.remove(&entity_id);
+    }
 }
 
 impl EntityMap {
@@ -158,6 +247,25 @@ impl EntityMap {
     pub(crate) fn note_access(&self, entity_id: EntityId) {
         if self.access_log.recordings.get() > 0 {
             self.access_log.access_log.borrow_mut().push(entity_id);
+        }
+    }
+
+    /// Records that `entity_id` is being updated, as [`Self::note_access`]
+    /// does for an access.
+    ///
+    /// An entity updated outside of drawing — by a task, a listener, an
+    /// action — may have changed without being notified, as when a view
+    /// changes a model it renders and notifies only itself. A retained subtree
+    /// that read it is built again, as upstream builds every view under a
+    /// notified one again. Updates while a subtree is being built, a view
+    /// rendering itself for one, are part of drawing it and are not stamped.
+    #[inline]
+    pub(crate) fn note_update(&mut self, entity_id: EntityId) {
+        self.note_access(entity_id);
+        let log = &mut self.access_log;
+        if log.recordings.get() == 0 {
+            log.update_generation += 1;
+            log.updated_at.insert(entity_id, log.update_generation);
         }
     }
 
@@ -191,6 +299,7 @@ impl EntityMap {
         let EntityAccessLog {
             access_log,
             recordings,
+            ..
         } = &mut self.access_log;
         let log = access_log.get_mut();
         let mut entities = log[start..].to_vec();
@@ -212,6 +321,35 @@ pub(crate) struct DependencyRecording {
     globals: usize,
     states: usize,
     generation: u64,
+    updates: u64,
+}
+
+/// What a recording saw: everything read while it was open, and what was read
+/// outside the recordings nested in it, by the subtree itself.
+pub(crate) struct RecordedDependencies {
+    pub(crate) all: RenderDependencies,
+    pub(crate) own: RenderDependencies,
+}
+
+/// The entries of `log` in `range` that fall outside every range in `nested`,
+/// which lie within `range`, in order.
+fn outside<'a, T: Clone>(
+    log: &[T],
+    range: &Range<usize>,
+    nested: impl Iterator<Item = &'a Range<usize>>,
+) -> Vec<T> {
+    let mut own = Vec::new();
+    let mut cursor = range.start;
+    for nested in nested {
+        if nested.start > cursor {
+            own.extend_from_slice(&log[cursor..nested.start]);
+        }
+        cursor = cursor.max(nested.end);
+    }
+    if range.end > cursor {
+        own.extend_from_slice(&log[cursor..range.end]);
+    }
+    own
 }
 
 /// What a retained subtree read while it was built: the entities it accessed
@@ -225,6 +363,9 @@ pub(crate) struct RenderDependencies {
     /// — with the version each was read at.
     pub(crate) states: Rc<[(StateVersion, u64)]>,
     pub(crate) generation: u64,
+    /// The entity update generation the recording began at. See
+    /// [`EntityMap::note_update`].
+    pub(crate) updates: u64,
 }
 
 /// A counter that state shared outside of entities — a scroll handle, a list
@@ -290,6 +431,26 @@ fn dedup_states(states: &[(StateVersion, u64)]) -> Rc<[(StateVersion, u64)]> {
 }
 
 impl RenderDependencies {
+    /// Dependencies on what was read, as of when `recording` began.
+    fn from_reads(
+        mut entities: Vec<EntityId>,
+        mut globals: Vec<TypeId>,
+        states: &[(StateVersion, u64)],
+        recording: &DependencyRecording,
+    ) -> Self {
+        entities.sort_unstable();
+        entities.dedup();
+        globals.sort_unstable();
+        globals.dedup();
+        Self {
+            entities: entities.into(),
+            globals: globals.into(),
+            states: dedup_states(states),
+            generation: recording.generation,
+            updates: recording.updates,
+        }
+    }
+
     /// Both sets of dependencies at once, as of the earlier generation, so
     /// that a change either would have seen is still seen.
     pub(crate) fn union(&self, other: &Self) -> Self {
@@ -311,6 +472,7 @@ impl RenderDependencies {
             globals: globals.into(),
             states: dedup_states(&states),
             generation: self.generation.min(other.generation),
+            updates: self.updates.min(other.updates),
         }
     }
 }

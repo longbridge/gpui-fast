@@ -27,8 +27,13 @@ nodes and primitives are copied from the last frame. A view depends on:
   `ScrollHandle`s its elements track. Those two bump a version whenever their
   state changes, so a view is drawn again when one it read moved, notified or
   not.
+- **What it was updated with.** An entity updated (`entity.update(..)`) while
+  no view is being drawn — by a task, a listener, an action — counts as
+  changed even if nobody notified it, since upstream would have rendered the
+  view reading it again anyway when the view around it was notified.
 - **Where it is drawn.** Its bounds, content mask, text style and opacity. A
-  view that moved is built again, at the layout nodes it kept.
+  view that moved is built again, at the layout nodes it kept, and laid out at
+  the size its parent gave it.
 - **The hovers it was painted by**, and interactions inside it: a hover,
   scroll or press that changes how it looks draws it again.
 
@@ -76,6 +81,13 @@ element finds its node again by:
 
 A node unclaimed for a frame is released.
 
+A text element measures itself, and a measured node given a new closure would
+be dirtied every frame, with every node above it. Instead, when last frame's
+text element at the same place measured the same text, runs and text style,
+the new element takes a copy of that measurement and the node is left clean.
+A view built again, because it moved or because the view around it was
+notified, is then not laid out again unless something in it changed.
+
 ## What an application needs to know
 
 Nothing, as long as what a view's render reads lives in entities, globals and
@@ -99,23 +111,37 @@ A retained frame has to be the frame drawing from scratch would have produced.
   global, and asserts that views really were reused.
 - `crates/gpui/src/fast/tests/retained.rs` covers reuse, rebuilding when a
   dependency or a hover changes, moved views and retention turned off.
-- `cargo run -p gpui_perf --release -- --verify` compares the quads painted with
-  retention on and off on every frame of every simulated screen.
+- `cargo run -p gpui_perf --release -- --headless --verify` compares the quads
+  painted with retention on and off on every frame of every simulated screen.
 
 ```sh
 cargo test -p gpui --features test-support
-cargo run -p gpui_perf --release -- --verify
+cargo run -p gpui_perf --release -- --headless --verify
 ```
 
 ## How it is measured
 
-`crates/gpui_perf` drives simulated screens — forms, lists, a data table, a
-settings page — headlessly with real text shaping, with retention on and off,
-and compares what each frame cost:
+Measure release builds only. [`CONTRIBUTING.md`](../CONTRIBUTING.md#measuring)
+has the full usage.
+
+`cargo run -p gpui_perf --release` opens the showcase: a component gallery
+shaped like GPUI Kit's, which scrolls its sidebar, a page or a data table by
+itself, refreshes the table on a timer, and shows in its status bar what each
+frame costs. `--auto` runs each of those with retention on and off and prints
+the comparison:
 
 ```sh
 cargo run -p gpui_perf --release
-cargo run -p gpui_perf --release -- --scenario table --frames 200
+cargo run -p gpui_perf --release -- --auto
+```
+
+With `--headless`, `gpui_perf` drives simulated screens — forms, lists, a
+data table, a settings page — without a window, with real text shaping, with
+retention on and off, and compares what each frame cost:
+
+```sh
+cargo run -p gpui_perf --release -- --headless
+cargo run -p gpui_perf --release -- --headless --scenario table --frames 200
 ```
 
 The `views_frames` example draws a dashboard of panel views into a real

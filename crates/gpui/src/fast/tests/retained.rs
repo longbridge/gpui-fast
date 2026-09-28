@@ -680,3 +680,148 @@ fn a_reused_cached_view_hands_the_platform_its_input_handler() {
         assert_eq!(handed(&mut cx).as_deref(), Some("inside"));
     }
 }
+
+/// A card whose width comes from the column it sits in, not from its content.
+struct Card;
+
+impl Render for Card {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(div().h(px(10.)).bg(crate::black()).child("card"))
+    }
+}
+
+struct Stretched {
+    card: Entity<Card>,
+    spacer: f32,
+}
+
+impl Render for Stretched {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .w(px(300.))
+            .child(div().h(px(self.spacer)))
+            .child(self.card.clone())
+    }
+}
+
+/// A view stretched by the column it is in keeps that width when it moves,
+/// as when a scrolled list moves every view in it: it is laid out again at
+/// the size its parent gave it, not at the size its content asks for.
+#[test]
+fn a_moved_view_keeps_the_size_its_parent_gave_it() {
+    let mut cx = TestAppContext::single();
+    let window = cx.add_window(|_, cx| Stretched {
+        card: cx.new(|_| Card),
+        spacer: 10.,
+    });
+    let draw = |cx: &mut TestAppContext| {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.describe_rendered_frame()
+        })
+        .unwrap()
+    };
+    draw(&mut cx);
+    window
+        .update(&mut cx, |view, _, cx| {
+            view.spacer = 30.;
+            cx.notify();
+        })
+        .unwrap();
+    let moved = draw(&mut cx);
+    cx.update_window(window.into(), |_, window, _| window.forget_retained_state())
+        .unwrap();
+    assert_eq!(moved, draw(&mut cx));
+}
+
+/// A view that read a model updated without being notified is built again
+/// when the view around it is, as upstream builds every view under a
+/// notified one again: a view often changes a model it renders and notifies
+/// only itself.
+#[test]
+fn a_view_is_rendered_again_when_a_model_it_read_was_updated_without_a_notify() {
+    let mut cx = TestAppContext::single();
+    let s = siblings(&mut cx);
+    draw_siblings(&mut cx, s.window);
+    assert_eq!((s.first_builds.get(), s.second_builds.get()), (1, 1));
+
+    s.model.update(&mut cx, |model, _| model.0 = 7);
+    s.window.update(&mut cx, |_, _, cx| cx.notify()).unwrap();
+    let updated = draw_siblings(&mut cx, s.window);
+    assert_eq!(
+        (s.first_builds.get(), s.second_builds.get()),
+        (1, 2),
+        "only the view that read the model is built again"
+    );
+
+    s.window.update(&mut cx, |_, _, cx| cx.notify()).unwrap();
+    draw_siblings(&mut cx, s.window);
+    assert_eq!(
+        (s.first_builds.get(), s.second_builds.get()),
+        (1, 2),
+        "an update is seen once"
+    );
+
+    cx.update_window(s.window.into(), |_, window, _| {
+        window.forget_retained_state()
+    })
+    .unwrap();
+    assert_eq!(updated, draw_siblings(&mut cx, s.window));
+}
+
+/// A view built again keeps the measurements of the text that did not
+/// change, rather than measuring and laying it out again, and measures the
+/// text that did.
+#[test]
+fn text_that_did_not_change_keeps_its_measurement() {
+    let mut cx = TestAppContext::single();
+    let s = siblings(&mut cx);
+    draw_siblings(&mut cx, s.window);
+    let stats = |cx: &mut TestAppContext| {
+        cx.update_window(s.window.into(), |_, window, _| window.layout_stats())
+            .unwrap()
+    };
+    let reset = |cx: &mut TestAppContext| {
+        cx.update_window(s.window.into(), |_, window, _| window.reset_layout_stats())
+            .unwrap()
+    };
+
+    reset(&mut cx);
+    s.window
+        .update(&mut cx, |view, _, cx| {
+            view.spacer = 30.;
+            cx.notify();
+        })
+        .unwrap();
+    draw_siblings(&mut cx, s.window);
+    let after_move = stats(&mut cx);
+    assert_eq!(
+        after_move.measure_rebinds, 0,
+        "moved text is not measured again"
+    );
+    assert_eq!(after_move.measurements_kept, 2);
+
+    reset(&mut cx);
+    s.first.update(&mut cx, |first, cx| {
+        first.label = 9;
+        cx.notify();
+    });
+    let changed = draw_siblings(&mut cx, s.window);
+    let after_change = stats(&mut cx);
+    assert_eq!(
+        after_change.measure_rebinds, 1,
+        "changed text is measured again"
+    );
+
+    cx.update_window(s.window.into(), |_, window, _| {
+        window.forget_retained_state()
+    })
+    .unwrap();
+    assert_eq!(changed, draw_siblings(&mut cx, s.window));
+}

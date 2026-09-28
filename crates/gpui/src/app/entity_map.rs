@@ -138,7 +138,7 @@ impl EntityMap {
         self.assert_valid_context(pointer);
         let mut accessed_entities = self.accessed_entities.get_mut();
         accessed_entities.insert(pointer.entity_id);
-        self.note_access(pointer.entity_id);
+        self.note_update(pointer.entity_id);
 
         let entity = Some(
             self.entities
@@ -194,6 +194,7 @@ impl EntityMap {
                     "dropped an entity that was referenced"
                 );
                 accessed_entities.remove(&entity_id);
+                self.access_log.forget(entity_id);
                 // If the EntityId was allocated with `Context::reserve`,
                 // the entity may not have been inserted.
                 Some((entity_id, self.entities.remove(entity_id)?))

@@ -20,6 +20,7 @@ pub(crate) mod layout_key;
 pub(crate) mod retained;
 #[cfg(test)]
 pub(crate) mod scene;
+pub(crate) mod splice;
 pub(crate) mod stats;
 pub(crate) mod text;
 

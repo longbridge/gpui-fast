@@ -30,6 +30,9 @@ pub struct LayoutStats {
     pub children_writes: u64,
     /// Measure closures bound onto a node in a way that dirties it.
     pub measure_rebinds: u64,
+    /// Measured nodes whose element took over last frame's measurement, and
+    /// were left clean rather than measured again.
+    pub measurements_kept: u64,
     /// Times Taffy actually invoked a measurement. A node can be measured more
     /// than once in a layout — for its intrinsic size and then for its final
     /// one — so this runs ahead of the number of measured nodes.
@@ -60,6 +63,12 @@ pub struct LayoutStats {
     /// part of `measure_time`; shaping done while painting is part of
     /// `paint_time`. Kept only once the stats have been reset.
     pub shape_time: Duration,
+    /// Views and cached views built, whether rendered, or laid out again
+    /// where they moved to.
+    pub views_built: u64,
+    /// Views and cached views drawn again from what they drew on the last
+    /// frame, without being built.
+    pub views_reused: u64,
 }
 
 /// How long each phase of the frame took, waiting to be folded into the

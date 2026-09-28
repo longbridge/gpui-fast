@@ -611,16 +611,16 @@ impl IntoElement for StyledText {
 
 /// The Layout for TextElement. This can be used to map indices to pixels and vice versa.
 #[derive(Default, Clone)]
-pub struct TextLayout(Rc<RefCell<Option<TextLayoutInner>>>);
+pub struct TextLayout(pub(crate) Rc<RefCell<Option<TextLayoutInner>>>);
 
-struct TextLayoutInner {
-    len: usize,
-    lines: SmallVec<[WrappedLine; 1]>,
-    line_height: Pixels,
-    wrap_width: Option<Pixels>,
-    truncate_width: Option<Pixels>,
-    size: Option<Size<Pixels>>,
-    bounds: Option<Bounds<Pixels>>,
+pub(crate) struct TextLayoutInner {
+    pub(crate) len: usize,
+    pub(crate) lines: SmallVec<[WrappedLine; 1]>,
+    pub(crate) line_height: Pixels,
+    pub(crate) wrap_width: Option<Pixels>,
+    pub(crate) truncate_width: Option<Pixels>,
+    pub(crate) size: Option<Size<Pixels>>,
+    pub(crate) bounds: Option<Bounds<Pixels>>,
 }
 
 impl TextLayout {
@@ -644,7 +644,14 @@ impl TextLayout {
         } else {
             vec![text_style.to_run(text.len())]
         };
-        window.request_measured_layout(Default::default(), {
+        let inputs = crate::fast::text::TextMeasureInputs::new(
+            &text,
+            &runs,
+            &text_style,
+            font_size,
+            line_height,
+        );
+        crate::fast::text::request_text_layout(self, inputs, window, {
             let element_state = self.clone();
 
             move |known_dimensions, available_space, window, cx| {

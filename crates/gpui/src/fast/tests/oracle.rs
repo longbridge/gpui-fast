@@ -16,12 +16,12 @@ use std::{borrow::Cow, sync::Arc};
 use rand::{Rng as _, SeedableRng as _, rngs::StdRng};
 
 use crate::{
-    AnyElement, Bounds, Context, DevicePixels, Entity, Font, FontId, FontMetrics, FontRun, Global,
-    GlyphId, Hsla, InputEvent as _, IntoElement, LineLayout, ListAlignment, ListOffset, ListState,
-    MouseMoveEvent, NoopTextSystem, Pixels, PlatformTextSystem, Render, RenderGlyphParams, Result,
-    SharedString, Size, StyleRefinement, TestAppContext, TextRenderingMode,
-    UniformListScrollHandle, Window, WindowHandle, anchored, deferred, div, hsla, list, point,
-    prelude::*, px, size, uniform_list,
+    AnyElement, App, Bounds, Context, DevicePixels, Entity, Font, FontId, FontMetrics, FontRun,
+    Global, GlyphId, Hsla, InputEvent as _, IntoElement, LineLayout, ListAlignment, ListOffset,
+    ListState, MouseMoveEvent, NoopTextSystem, Pixels, PlatformTextSystem, Render,
+    RenderGlyphParams, Result, SharedString, Size, StyleRefinement, TestAppContext,
+    TextRenderingMode, UniformListScrollHandle, Window, WindowHandle, anchored, deferred, div,
+    hsla, list, point, prelude::*, px, size, uniform_list,
 };
 
 const WORDS: [&str; 10] = [
@@ -130,6 +130,17 @@ enum Change {
     Leaf {
         panel: usize,
     },
+    /// Changes only the colors of a panel, notifying only it: its layout
+    /// stays as it was, so the view around it is drawn from last frame
+    /// around it.
+    TintPanel {
+        panel: usize,
+    },
+    /// Changes only the colors of the leaf in a panel, notifying only it: the
+    /// views around it are drawn from last frame around it.
+    TintLeaf {
+        panel: usize,
+    },
     /// Changes the model some panels read without observing it, notifying
     /// only the model.
     Shared {
@@ -153,7 +164,7 @@ enum Change {
 impl Change {
     fn random(rng: &mut StdRng) -> Self {
         let cell = rng.random_range(0..GRID_CELLS);
-        match rng.random_range(0..116) {
+        match rng.random_range(0..124) {
             0..20 => Change::Word {
                 cell,
                 word: rng.random_range(0..WORDS.len()),
@@ -219,6 +230,12 @@ impl Change {
             },
             113..116 => Change::Global {
                 value: rng.random_range(0..PALETTE.len()),
+            },
+            116..120 => Change::TintPanel {
+                panel: rng.random_range(0..PANELS),
+            },
+            120..124 => Change::TintLeaf {
+                panel: rng.random_range(0..PANELS),
             },
             92..95 => Change::Resize {
                 width: rng.random_range(300.0..1000.0),
@@ -291,8 +308,9 @@ impl OracleView {
                         cx.new(|cx| Panel {
                             ix,
                             value: ix,
+                            tint: 0,
                             shared,
-                            leaf: cx.new(|_| Leaf { count: ix }),
+                            leaf: cx.new(|_| Leaf { count: ix, tint: 0 }),
                         })
                     })
                     .collect()
@@ -357,35 +375,13 @@ impl OracleView {
             }
             Change::RowIdentity(identity) => self.row_identity = identity,
             Change::Direction => self.column = !self.column,
-            Change::Badge => {
-                // Only the child is notified, so the parent's frame reuses
-                // whatever it can of the last one around it.
-                self.badge.update(cx, |badge, cx| {
-                    badge.count += 1;
-                    cx.notify();
-                });
-                return;
-            }
-            Change::Panel { panel, value } => {
-                self.panels[panel].update(cx, |panel, cx| {
-                    panel.value = value;
-                    cx.notify();
-                });
-                return;
-            }
-            Change::Leaf { panel } => {
-                let leaf = self.panels[panel].read(cx).leaf.clone();
-                leaf.update(cx, |leaf, cx| {
-                    leaf.count += 1;
-                    cx.notify();
-                });
-                return;
-            }
-            Change::Shared { value } => {
-                self.shared.update(cx, |shared, cx| {
-                    shared.value = value;
-                    cx.notify();
-                });
+            Change::Badge
+            | Change::Panel { .. }
+            | Change::Leaf { .. }
+            | Change::TintPanel { .. }
+            | Change::TintLeaf { .. }
+            | Change::Shared { .. } => {
+                self.children().apply_to_children(change, cx);
                 return;
             }
             Change::Global { .. }
@@ -394,6 +390,16 @@ impl OracleView {
             | Change::Redraw => return,
         }
         cx.notify();
+    }
+
+    /// The views nested in this one and the model, for changes applied to
+    /// them alone.
+    fn children(&self) -> Children {
+        Children {
+            badge: self.badge.clone(),
+            panels: self.panels.clone(),
+            shared: self.shared.clone(),
+        }
     }
 
     /// Changes a cell and notifies its view; the parent is notified too,
@@ -410,6 +416,65 @@ impl OracleView {
             view.0 = cell;
             cx.notify();
         });
+    }
+}
+
+/// Handles on the views nested in an [`OracleView`], and on its model.
+struct Children {
+    badge: Entity<Badge>,
+    panels: Vec<Entity<Panel>>,
+    shared: Entity<Shared>,
+}
+
+impl Children {
+    /// Changes a nested view, or the model, notifying only it.
+    /// The harness applies these without updating this view, so that it is
+    /// dirty only because of what is nested in it, as it is when an
+    /// application notifies a nested view on its own.
+    fn apply_to_children(&self, change: &Change, cx: &mut App) {
+        match *change {
+            Change::Badge => {
+                // Only the child is notified, so the parent's frame reuses
+                // whatever it can of the last one around it.
+                self.badge.update(cx, |badge, cx| {
+                    badge.count += 1;
+                    cx.notify();
+                });
+            }
+            Change::Panel { panel, value } => {
+                self.panels[panel].update(cx, |panel, cx| {
+                    panel.value = value;
+                    cx.notify();
+                });
+            }
+            Change::Leaf { panel } => {
+                let leaf = self.panels[panel].read(cx).leaf.clone();
+                leaf.update(cx, |leaf, cx| {
+                    leaf.count += 1;
+                    cx.notify();
+                });
+            }
+            Change::TintPanel { panel } => {
+                self.panels[panel].update(cx, |panel, cx| {
+                    panel.tint += 1;
+                    cx.notify();
+                });
+            }
+            Change::TintLeaf { panel } => {
+                let leaf = self.panels[panel].read(cx).leaf.clone();
+                leaf.update(cx, |leaf, cx| {
+                    leaf.tint += 1;
+                    cx.notify();
+                });
+            }
+            Change::Shared { value } => {
+                self.shared.update(cx, |shared, cx| {
+                    shared.value = value;
+                    cx.notify();
+                });
+            }
+            _ => unreachable!("not a change to a nested view"),
+        }
     }
 }
 
@@ -616,6 +681,8 @@ impl Global for Accent {}
 struct Panel {
     ix: usize,
     value: usize,
+    /// Shifts its colors, leaving its layout as it was.
+    tint: usize,
     shared: Entity<Shared>,
     leaf: Entity<Leaf>,
 }
@@ -636,7 +703,7 @@ impl Render for Panel {
             .flex()
             .flex_col()
             .p_1()
-            .bg(PALETTE[(self.value + accent) % PALETTE.len()])
+            .bg(PALETTE[(self.value + accent + self.tint) % PALETTE.len()])
             .when(self.ix == 1, |this| {
                 this.hover(|style| style.bg(PALETTE[4]))
             })
@@ -648,6 +715,7 @@ impl Render for Panel {
 /// A view nested in a panel, notified on its own.
 struct Leaf {
     count: usize,
+    tint: usize,
 }
 
 impl Render for Leaf {
@@ -659,7 +727,7 @@ impl Render for Leaf {
                 div()
                     .w(px(4. + ix as f32 * 5.))
                     .h(px(6.))
-                    .bg(PALETTE[(self.count + ix) % PALETTE.len()])
+                    .bg(PALETTE[(self.count + ix + self.tint) % PALETTE.len()])
             }))
     }
 }
@@ -764,6 +832,15 @@ fn apply(cx: &mut TestAppContext, window: WindowHandle<OracleView>, change: &Cha
             cx.simulate_window_resize(window.into(), size(px(width), px(height)));
         }
         Change::Global { value } => cx.update(|cx| cx.set_global(Accent(value))),
+        Change::Badge
+        | Change::Panel { .. }
+        | Change::Leaf { .. }
+        | Change::TintPanel { .. }
+        | Change::TintLeaf { .. }
+        | Change::Shared { .. } => {
+            let view = window.read_with(cx, |view, _| view.children()).unwrap();
+            cx.update(|cx| view.apply_to_children(change, cx));
+        }
         _ => window
             .update(cx, |view, _, cx| view.apply(change, cx))
             .unwrap(),

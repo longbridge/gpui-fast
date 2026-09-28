@@ -1,11 +1,28 @@
-//! Measures what simulated application screens cost to draw, frame by frame,
-//! with and without retained views.
+//! gpui-fast's performance tools.
+//!
+//! With no arguments it opens the showcase, a component gallery that scrolls
+//! itself and shows what each frame costs; see `showcase.rs`:
 //!
 //! ```text
-//! cargo run -p gpui_perf --release -- --frames 200
+//! cargo run -p gpui_perf --release
+//! cargo run -p gpui_perf --release -- --auto
 //! ```
 //!
-//! Flags:
+//! With `--headless` it measures what simulated application screens cost to
+//! draw, frame by frame, with and without retained views, without a window:
+//!
+//! ```text
+//! cargo run -p gpui_perf --release -- --headless --frames 200
+//! ```
+//!
+//! Showcase flags:
+//!
+//! - `--auto`: run every scenario with retention on and off, print what each
+//!   cost, and quit.
+//! - `--only <scenario>`, `--retention on|off`, `--frames N`: narrow `--auto`
+//!   down.
+//!
+//! Headless flags:
 //!
 //! - `--scenario <substring>`: run only scenarios whose name contains it;
 //!   repeatable.
@@ -17,6 +34,8 @@
 //!   same quads every frame.
 //! - `--list`: print the scenarios and exit.
 
+mod showcase;
+
 use std::process::ExitCode;
 
 use gpui_perf::{
@@ -27,10 +46,24 @@ use gpui_perf::{
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const USAGE: &str = "usage: gpui_perf [--scenario SUBSTRING]... [--frames N] [--warmup N] \
+const USAGE: &str = "usage: gpui_perf [--auto [--only SCENARIO] [--retention on|off] [--frames N]]\n       \
+gpui_perf --headless [--scenario SUBSTRING]... [--frames N] [--warmup N] \
 [--retention on|off|both] [--json PATH] [--verify] [--list]";
 
 fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+        println!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
+    if !args.iter().any(|arg| arg == "--headless") {
+        showcase::run(args.iter().any(|arg| arg == "--auto"));
+        return ExitCode::SUCCESS;
+    }
+    headless()
+}
+
+fn headless() -> ExitCode {
     let mut options = Options::default();
     let mut json_path = None;
     let mut list = false;
@@ -67,6 +100,7 @@ fn main() -> ExitCode {
             "--json" => json_path = Some(value("--json")),
             "--verify" => options.verify = true,
             "--list" => list = true,
+            "--headless" => {}
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;

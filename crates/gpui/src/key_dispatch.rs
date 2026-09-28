@@ -66,13 +66,13 @@ use std::{
 /// ID of a node within `DispatchTree`. Note that these are **not** stable between frames, and so a
 /// `DispatchNodeId` should only be used with the `DispatchTree` that provided it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub(crate) struct DispatchNodeId(usize);
+pub(crate) struct DispatchNodeId(pub(crate) usize);
 
 pub(crate) struct DispatchTree {
     node_stack: Vec<DispatchNodeId>,
     pub(crate) context_stack: Vec<KeyContext>,
     view_stack: Vec<EntityId>,
-    nodes: Vec<DispatchNode>,
+    pub(crate) nodes: Vec<DispatchNode>,
     focusable_node_ids: FxHashMap<FocusId, DispatchNodeId>,
     view_node_ids: FxHashMap<EntityId, DispatchNodeId>,
     keymap: Rc<RefCell<Keymap>>,
@@ -87,7 +87,7 @@ pub(crate) struct DispatchNode {
     pub context: Option<KeyContext>,
     pub focus_id: Option<FocusId>,
     view_id: Option<EntityId>,
-    parent: Option<DispatchNodeId>,
+    pub(crate) parent: Option<DispatchNodeId>,
 }
 
 pub(crate) struct ReusedSubtree {
@@ -243,7 +243,7 @@ impl DispatchTree {
         self.node_stack.pop();
     }
 
-    fn move_node(&mut self, source: &mut DispatchNode) {
+    pub(crate) fn move_node(&mut self, source: &mut DispatchNode) {
         self.push_node();
         if let Some(context) = source.context.clone() {
             self.set_key_context(context);

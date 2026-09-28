@@ -1,8 +1,150 @@
-//! Where a reused range of shaped lines falls in a new frame, and shaping statistics.
+//! Where a reused range of shaped lines falls in a new frame, text measurements
+//! carried from one frame to the next, and shaping statistics.
 
-use crate::{FontRun, LineLayout, LineLayoutIndex, Pixels, PlatformTextSystem, WindowTextSystem};
+use crate::{
+    App, AvailableSpace, FontRun, LayoutId, LineLayout, LineLayoutIndex, Pixels,
+    PlatformTextSystem, SharedString, Size, Style, TextLayout, TextLayoutInner, TextRun, TextStyle,
+    Window, WindowTextSystem, WrappedLine,
+};
 use scheduler::Instant;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::{
+    any::Any,
+    rc::Rc,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
+
+/// Everything a text element's measurement is taken from. Two measurements
+/// taken from equal inputs come out the same, whatever space they are given.
+#[derive(PartialEq)]
+pub(crate) struct TextMeasureInputs {
+    text: SharedString,
+    runs: Vec<TextRun>,
+    text_style: TextStyle,
+    font_size: Pixels,
+    line_height: Pixels,
+}
+
+impl TextMeasureInputs {
+    pub(crate) fn new(
+        text: &SharedString,
+        runs: &[TextRun],
+        text_style: &TextStyle,
+        font_size: Pixels,
+        line_height: Pixels,
+    ) -> Self {
+        Self {
+            text: text.clone(),
+            runs: runs.to_vec(),
+            text_style: text_style.clone(),
+            font_size,
+            line_height,
+        }
+    }
+}
+
+/// A text element's measurement, carried to the next frame's element at the
+/// same place for it to take over.
+struct TextMeasurement {
+    inputs: TextMeasureInputs,
+    layout: TextLayout,
+}
+
+/// Requests the layout of a text element whose measurement `measure` takes
+/// from `inputs` and keeps in `layout`.
+///
+/// A measured node is given a new closure every frame, and would be dirtied
+/// for it, with every node above it: a view built again would have all of its
+/// text measured and laid out again, though none of it changed. When last
+/// frame's element at this place measured the same inputs, its measurement is
+/// copied into `layout` instead, and the node is left clean, keeping what
+/// Taffy cached for it. The new closure is still installed, for when Taffy
+/// measures it again under other constraints.
+pub(crate) fn request_text_layout(
+    layout: &TextLayout,
+    inputs: TextMeasureInputs,
+    window: &mut Window,
+    measure: impl Fn(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
+    + 'static,
+) -> LayoutId {
+    let measurement = Rc::new(TextMeasurement {
+        inputs,
+        layout: layout.clone(),
+    });
+    let adopt = {
+        let measurement = measurement.clone();
+        move |previous: &dyn Any| {
+            let Some(previous) = previous.downcast_ref::<TextMeasurement>() else {
+                return false;
+            };
+            if previous.inputs != measurement.inputs {
+                return false;
+            }
+            let Some(inner) = previous.layout.0.borrow().as_ref().map(copy_measurement) else {
+                return false;
+            };
+            *measurement.layout.0.borrow_mut() = Some(inner);
+            true
+        }
+    };
+    window.request_carried_measured_layout(measurement, adopt, measure)
+}
+
+/// A copy of what a measurement left, without where it was last painted.
+fn copy_measurement(inner: &TextLayoutInner) -> TextLayoutInner {
+    TextLayoutInner {
+        len: inner.len,
+        lines: inner
+            .lines
+            .iter()
+            .map(|line| WrappedLine {
+                layout: line.layout.clone(),
+                text: line.text.clone(),
+                decoration_runs: line.decoration_runs.clone(),
+            })
+            .collect(),
+        line_height: inner.line_height,
+        wrap_width: inner.wrap_width,
+        truncate_width: inner.truncate_width,
+        size: inner.size,
+        bounds: None,
+    }
+}
+
+impl Window {
+    /// Requests a self-measuring leaf, as [`Window::request_measured_layout`]
+    /// does, whose measurement can be carried over from the element at the
+    /// same place last frame. `adopt` is given what that element left in
+    /// `memo`, and takes its measurement over if it still stands.
+    pub(crate) fn request_carried_measured_layout(
+        &mut self,
+        memo: Rc<dyn Any>,
+        adopt: impl FnOnce(&dyn Any) -> bool,
+        measure: impl Fn(
+            Size<Option<Pixels>>,
+            Size<AvailableSpace>,
+            &mut Window,
+            &mut App,
+        ) -> Size<Pixels>
+        + 'static,
+    ) -> LayoutId {
+        self.invalidator.debug_assert_prepaint();
+        let rem_size = self.rem_size();
+        let scale_factor = self.scale_factor();
+        let key = self.layout_key();
+        self.layout_engine
+            .as_mut()
+            .unwrap()
+            .request_retained_carried_measured_layout(
+                key,
+                Style::default(),
+                rem_size,
+                scale_factor,
+                memo,
+                adopt,
+                measure,
+            )
+    }
+}
 
 impl LineLayoutIndex {
     /// This index, taken from a range that started at `from`, as it falls in

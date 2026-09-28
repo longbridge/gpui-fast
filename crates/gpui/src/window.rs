@@ -964,17 +964,17 @@ pub(crate) struct TooltipRequest {
 }
 
 pub(crate) struct DeferredDraw {
-    current_view: EntityId,
-    priority: usize,
-    parent_node: DispatchNodeId,
-    element_id_stack: SmallVec<[ElementId; 32]>,
-    text_style_stack: Vec<TextStyleRefinement>,
-    content_mask: Option<ContentMask<Pixels>>,
-    rem_size: Pixels,
-    element: Option<AnyElement>,
-    absolute_offset: Point<Pixels>,
-    prepaint_range: Range<PrepaintStateIndex>,
-    paint_range: Range<PaintIndex>,
+    pub(crate) current_view: EntityId,
+    pub(crate) priority: usize,
+    pub(crate) parent_node: DispatchNodeId,
+    pub(crate) element_id_stack: SmallVec<[ElementId; 32]>,
+    pub(crate) text_style_stack: Vec<TextStyleRefinement>,
+    pub(crate) content_mask: Option<ContentMask<Pixels>>,
+    pub(crate) rem_size: Pixels,
+    pub(crate) element: Option<AnyElement>,
+    pub(crate) absolute_offset: Point<Pixels>,
+    pub(crate) prepaint_range: Range<PrepaintStateIndex>,
+    pub(crate) paint_range: Range<PaintIndex>,
     pub(crate) enclosing_retained: EnclosingRetained,
 }
 
@@ -1164,7 +1164,7 @@ pub struct Window {
     ///
     /// This is used by `with_rem_size` to allow rendering an element tree with
     /// a given rem size.
-    rem_size_override_stack: SmallVec<[Pixels; 8]>,
+    pub(crate) rem_size_override_stack: SmallVec<[Pixels; 8]>,
     pub(crate) viewport_size: Size<Pixels>,
     pub(crate) layout_engine: Option<TaffyLayoutEngine>,
     pub(crate) fast_layout: crate::fast::layout_key::WindowLayout,

@@ -93,7 +93,7 @@ impl<V: 'static + Render> IntoElement for Entity<V> {
     type Element = ViewElement<Entity<V>>;
 
     fn into_element(self) -> Self::Element {
-        ViewElement::new(self)
+        ViewElement::new(self.clone()).rebuildable(self.into())
     }
 }
 
@@ -101,7 +101,7 @@ impl IntoElement for AnyView {
     type Element = ViewElement<AnyView>;
 
     fn into_element(self) -> Self::Element {
-        ViewElement::new(self)
+        ViewElement::new(self.clone()).rebuildable(self)
     }
 }
 
@@ -238,6 +238,7 @@ pub struct ViewElement<V: View> {
     pub(crate) view: Option<V>,
     pub(crate) entity_id: Option<EntityId>,
     pub(crate) cached_style: Option<StyleRefinement>,
+    pub(crate) rebuild: crate::fast::splice::RebuildHandle,
     #[cfg(debug_assertions)]
     source: &'static core::panic::Location<'static>,
 }
@@ -250,6 +251,7 @@ impl<V: View> ViewElement<V> {
         ViewElement {
             entity_id,
             cached_style: None,
+            rebuild: Default::default(),
             view: Some(view),
             #[cfg(debug_assertions)]
             source: core::panic::Location::caller(),

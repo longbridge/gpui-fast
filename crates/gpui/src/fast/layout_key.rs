@@ -90,6 +90,31 @@ impl Window {
         self.fast_layout.key_stack.last().map(|frame| frame.key)
     }
 
+    /// The key of the element enclosing the one currently requesting layout,
+    /// which the latter's key is derived from; `None` at the root of a tree.
+    pub(crate) fn parent_layout_key(&self) -> Option<u64> {
+        let stack = &self.fast_layout.key_stack;
+        stack.len().checked_sub(2).map(|parent| stack[parent].key)
+    }
+
+    /// Runs `f` as though the element whose key is `parent` were requesting
+    /// its layout, so that an element with an id requested in `f` is keyed as
+    /// it was when it was requested inside that element.
+    pub(crate) fn with_parent_layout_key<R>(
+        &mut self,
+        parent: u64,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let saved = mem::take(&mut self.fast_layout.key_stack);
+        self.fast_layout.key_stack.push(LayoutKeyFrame {
+            key: parent,
+            next_unidentified_child: 0,
+        });
+        let result = f(self);
+        self.fast_layout.key_stack = saved;
+        result
+    }
+
     /// Begins an element, deriving the key its layout node is matched by across
     /// frames.
     ///
