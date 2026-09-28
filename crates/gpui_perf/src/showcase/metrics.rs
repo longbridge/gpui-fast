@@ -17,6 +17,8 @@ pub struct Sample {
     at: Instant,
     process_cpu: Duration,
     main_cpu: Duration,
+    /// The process's resident memory, in bytes, where the platform says.
+    memory: Option<u64>,
     frames: u64,
     times: Option<FrameTimes>,
 }
@@ -27,6 +29,7 @@ impl Sample {
             at: Instant::now(),
             process_cpu: process_cpu_time(),
             main_cpu: main_thread_cpu_time(),
+            memory: resident_memory(),
             frames: backend::frames(window),
             times: backend::frame_times(window),
         }
@@ -40,6 +43,8 @@ pub struct Cost {
     pub process_cpu_percent: f64,
     pub main_cpu_percent: f64,
     pub main_cpu_per_frame_ms: f64,
+    /// The process's resident memory at the later sample, in MiB.
+    pub memory_mib: Option<f64>,
     /// What GPUI's own counters say, where it has them: gpui-fast does,
     /// upstream does not.
     pub phases: Option<PhaseCost>,
@@ -73,6 +78,7 @@ impl Cost {
             process_cpu_percent: (to.process_cpu - from.process_cpu).as_secs_f64() * 100. / seconds,
             main_cpu_percent: (to.main_cpu - from.main_cpu).as_secs_f64() * 100. / seconds,
             main_cpu_per_frame_ms: per_frame(to.main_cpu - from.main_cpu),
+            memory_mib: to.memory.map(|bytes| bytes as f64 / (1024. * 1024.)),
             phases: from.times.zip(to.times).map(|(from, to)| PhaseCost {
                 build_ms: per_frame(to.build - from.build),
                 prepaint_ms: per_frame(to.prepaint - from.prepaint),
@@ -180,6 +186,15 @@ impl Render for StatusBar {
                     value(format!("{:.0}%", cost.main_cpu_percent), |d| d.w_8()).into_any_element(),
                 ],
             ))
+            .when_some(cost.memory_mib, |bar, memory| {
+                bar.child(field(
+                    "Memory",
+                    vec![
+                        value(format!("{memory:.0}"), |d| d.w_10()).into_any_element(),
+                        div().child("MB").into_any_element(),
+                    ],
+                ))
+            })
             .child(separator())
             .child(field(
                 "Frame",
@@ -255,4 +270,21 @@ pub fn main_thread_cpu_time() -> Duration {
 #[cfg(not(unix))]
 fn process_cpu_time() -> Duration {
     Duration::ZERO
+}
+
+/// The process's resident memory, in bytes: what it holds in RAM, as a system
+/// monitor shows it.
+#[cfg(target_os = "linux")]
+fn resident_memory() -> Option<u64> {
+    // The second field of statm is the resident set, in pages.
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+    // SAFETY: `sysconf` only reads a system constant.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    Some(pages * u64::try_from(page_size).ok()?)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn resident_memory() -> Option<u64> {
+    None
 }

@@ -191,13 +191,14 @@ impl AutoRun {
 
     fn report(&self) {
         println!(
-            "\n{:<16} {:>9} {:>6} {:>9} {:>9} {:>7} {:>8} {:>9} {:>8} {:>8} {:>6} {:>6}",
+            "\n{:<16} {:>9} {:>6} {:>9} {:>9} {:>7} {:>8} {:>8} {:>9} {:>8} {:>8} {:>6} {:>6}",
             "scenario",
             "retention",
             "fps",
             "cpu p50",
             "cpu p95",
             "proc",
+            "memory",
             "build",
             "prepaint",
             "layout",
@@ -211,7 +212,7 @@ impl AutoRun {
             let cost = &result.cost;
             let phases = cost.phases;
             println!(
-                "{:<16} {:>9} {:>6.0} {:>7.2}ms {:>7.2}ms {:>6.0}% {:>8} {:>9} {:>8} {:>8} {:>6} {:>6}",
+                "{:<16} {:>9} {:>6.0} {:>7.2}ms {:>7.2}ms {:>6.0}% {:>8} {:>8} {:>9} {:>8} {:>8} {:>6} {:>6}",
                 format!("{:?}", result.scenario),
                 match result.retention {
                     Some(true) => "on",
@@ -222,6 +223,8 @@ impl AutoRun {
                 result.p50,
                 result.p95,
                 cost.process_cpu_percent,
+                cost.memory_mib
+                    .map_or("-".to_string(), |mib| format!("{mib:.0}MB")),
                 ms(phases.map(|p| p.build_ms)),
                 ms(phases.map(|p| p.prepaint_ms)),
                 ms(phases.map(|p| p.layout_ms)),
@@ -232,7 +235,7 @@ impl AutoRun {
         }
         println!(
             "\ncpu p50/p95: main thread CPU per frame. proc: the whole process, render threads \
-             included. build, prepaint, paint: per frame; layout is Taffy's share of prepaint. \
+             included. memory: the process's resident memory at the end. build, prepaint, paint: per frame; layout is Taffy's share of prepaint. \
              built, reused: views per frame. \"-\": not counted by upstream GPUI."
         );
     }

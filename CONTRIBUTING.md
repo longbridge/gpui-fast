@@ -61,7 +61,8 @@ setting one up.
   rows every 33 ms, and `Retained views` (`V`). The arrow keys move through
   the sidebar.
 - The status bar shows, every half second: frames per second, the CPU of the
-  whole process and of the main thread, what the main thread spent per frame
+  whole process and of the main thread, the process's resident memory (on
+  Linux), what the main thread spent per frame
   and on build, prepaint, layout (Taffy's share of prepaint) and paint, and how
   many views were built and reused per frame.
 

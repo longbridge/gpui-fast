@@ -14,7 +14,8 @@
 //! retained views. Every command has a key: `1`–`4` for what scrolls, `R` for
 //! the refresh, `V` for retained views, and the arrow keys to move through
 //! the sidebar. The status bar shows, every half second, the frame rate, the
-//! process's CPU and the main thread's, what build, prepaint, layout and paint
+//! process's CPU and the main thread's, its resident memory, what build,
+//! prepaint, layout and paint
 //! took per frame, and how many views were built and reused per frame.
 //!
 //! With `--auto`, it runs every scenario with retained views on and then off,
