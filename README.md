@@ -6,17 +6,17 @@ GPUI.**
 - **Retained Mode**: redraw only what changed since the last frame.
 - **Window composition** (coming next): native views such as a WebView drawn
   inside a GPUI window, with GPUI's popovers, menus and dialogs still above
-  them. This will merge [zed#62379](https://github.com/zed-industries/zed/pull/62379),
-  proposed to GPUI upstream and still under review there.
+  them. We plan to bring the work proposed in
+  [zed#62379](https://github.com/zed-industries/zed/pull/62379), still under
+  review upstream, into this experimental branch.
 
 Both take deep changes to GPUI, so they are tried out here first. Once they
 work, we plan to propose them to [Zed's GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
 
 Every change here keeps to two rules:
 
-- **GPUI's existing API stays unchanged.** Code written for upstream GPUI
-  compiles and runs here as is. New capabilities are added beside the
-  existing API, and applications opt into them.
+- **GPUI's existing API stays unchanged.** New capabilities are added beside
+  it, and applications can opt into them without rewriting their UI code.
 - **GPUI's own code is changed as little as possible.** gpui-fast's code lives
   in `fast/` directories beside upstream's, upstream files get only small
   hooks into it, and upstream's changes are merged in as Zed makes them. Each
@@ -26,11 +26,13 @@ Every change here keeps to two rules:
 ## Retained Mode
 
 [GPUI](https://gpui.rs), the UI framework of the [Zed](https://github.com/zed-industries/zed)
-editor, draws in immediate mode: every frame renders every view, builds a
-fresh layout tree, lays it out, shapes its text, and paints the whole window
-again, even when almost nothing changed. gpui-fast keeps what the last frame
-worked out and redoes only what changed since. Applications are written
-exactly as for upstream GPUI; they just draw less.
+editor, draws in immediate mode: when a frame is requested, it renders every
+view, builds a fresh layout tree, lays it out, shapes its text, and paints the
+frame again, even when almost nothing changed. gpui-fast keeps what the last
+frame worked out and redoes only what changed since. The existing GPUI API is
+unchanged, so applications draw less without rewriting their UI code; state
+read from outside entities, globals and list or scroll state needs a
+`cx.notify()`, as described below.
 
 A frame walks the element tree three times: **build** renders views and asks
 for layout, **prepaint** computes layout and places elements, **paint** turns
