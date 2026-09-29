@@ -31,6 +31,65 @@ pub(crate) struct AppDependencies {
     /// recordings nested in it, or dependencies replayed into it, took up:
     /// what it read through a nested subtree rather than itself.
     nested: Vec<Vec<LogRanges>>,
+    /// Room to sort what a recording read in before it is interned, kept from
+    /// one recording to the next.
+    scratch_entities: Vec<EntityId>,
+    scratch_globals: Vec<TypeId>,
+    /// The lists of entities and globals retained subtrees read. See
+    /// [`Interned`].
+    interned_entities: Interned<EntityId>,
+    interned_globals: Interned<TypeId>,
+    /// The list of no versioned state, which most subtrees read.
+    no_states: Option<Rc<[(StateVersion, u64)]>>,
+}
+
+/// Lists of what retained subtrees read, each kept once and shared by every
+/// subtree that read the same: a view built again reads what it read last
+/// frame, a recording's own reads are often all of its reads, and many rows
+/// read the same few entities. A recording finished with a list already held
+/// takes it without allocating.
+///
+/// Lists nothing else holds any more are dropped once the set has doubled
+/// since it was last swept, so it stays about as large as what is in use.
+struct Interned<T> {
+    lists: FxHashSet<Rc<[T]>>,
+    sweep_at: usize,
+    empty: Rc<[T]>,
+}
+
+impl<T> Default for Interned<T> {
+    fn default() -> Self {
+        Self {
+            lists: FxHashSet::default(),
+            sweep_at: 1024,
+            empty: Rc::from(Vec::new()),
+        }
+    }
+}
+
+impl<T: Eq + std::hash::Hash + Copy> Interned<T> {
+    /// The shared list holding `items`, which are sorted without repeats.
+    fn get(&mut self, items: &[T]) -> Rc<[T]> {
+        if items.is_empty() {
+            return self.empty.clone();
+        }
+        if let Some(list) = self.lists.get(items) {
+            return list.clone();
+        }
+        if self.lists.len() >= self.sweep_at {
+            self.lists.retain(|list| Rc::strong_count(list) > 1);
+            self.sweep_at = (self.lists.len() * 2).max(1024);
+        }
+        let list: Rc<[T]> = Rc::from(items);
+        self.lists.insert(list.clone());
+        list
+    }
+}
+
+/// Sorts `items` and removes repeats.
+fn sort_unique<T: Ord>(items: &mut Vec<T>) {
+    items.sort_unstable();
+    items.dedup();
 }
 
 /// Records, for any recording that is open, that whether a global of type `G`
@@ -205,29 +264,62 @@ impl App {
         let nested = log.nested.pop().unwrap_or_default();
         let ranges = LogRanges {
             entities: recording.entities..self.entities.access_log.len(),
-            globals: recording.globals..log.global_read_log.borrow_mut().len(),
+            globals: recording.globals..log.global_read_log.borrow().len(),
             states: recording.states..log.state_read_log.get_mut().len(),
         };
-        let (own_globals, mut globals) = {
-            let globals_log = log.global_read_log.borrow();
-            (
-                outside(
-                    &globals_log,
-                    &ranges.globals,
-                    nested.iter().map(|n| &n.globals),
-                ),
-                globals_log[recording.globals..].to_vec(),
-            )
+        let (entities, own_entities) = {
+            let access_log = self.entities.access_log.access_log.borrow();
+            let scratch = &mut log.scratch_entities;
+            scratch.clear();
+            scratch.extend_from_slice(&access_log[ranges.entities.clone()]);
+            sort_unique(scratch);
+            let entities = log.interned_entities.get(scratch);
+            scratch.clear();
+            outside(
+                &access_log,
+                &ranges.entities,
+                nested.iter().map(|n| &n.entities),
+                scratch,
+            );
+            sort_unique(scratch);
+            (entities, log.interned_entities.get(scratch))
         };
+        let (globals, own_globals) = {
+            let globals_log = log.global_read_log.borrow();
+            let scratch = &mut log.scratch_globals;
+            scratch.clear();
+            scratch.extend_from_slice(&globals_log[ranges.globals.clone()]);
+            sort_unique(scratch);
+            let globals = log.interned_globals.get(scratch);
+            scratch.clear();
+            outside(
+                &globals_log,
+                &ranges.globals,
+                nested.iter().map(|n| &n.globals),
+                scratch,
+            );
+            sort_unique(scratch);
+            (globals, log.interned_globals.get(scratch))
+        };
+        let no_states = log
+            .no_states
+            .get_or_insert_with(|| Rc::from(Vec::new()))
+            .clone();
         let states_log = log.state_read_log.get_mut();
-        let own_states = outside(states_log, &ranges.states, nested.iter().map(|n| &n.states));
-        let states = dedup_states(&states_log[recording.states..]);
-        let own_entities = outside(
-            &self.entities.access_log.access_log.borrow(),
-            &ranges.entities,
-            nested.iter().map(|n| &n.entities),
-        );
-        let entities = self.entities.finish_recording(recording.entities);
+        let states = dedup_states(&states_log[ranges.states.clone()], &no_states);
+        let own_states = if ranges.states.is_empty() {
+            no_states
+        } else {
+            let mut own = Vec::new();
+            outside(
+                states_log,
+                &ranges.states,
+                nested.iter().map(|n| &n.states),
+                &mut own,
+            );
+            dedup_states(&own, &no_states)
+        };
+        self.entities.close_recording(recording.entities);
         if let Some(parent) = self.dependencies.nested.last_mut() {
             parent.push(ranges);
         }
@@ -235,26 +327,26 @@ impl App {
             self.dependencies.global_read_log.borrow_mut().clear();
             self.dependencies.state_read_log.get_mut().clear();
         }
-        globals.sort_unstable();
-        globals.dedup();
+        let writes = writes_while_open(&recording, &self.entities.access_log);
         RecordedDependencies {
             all: RenderDependencies {
-                entities: entities.into(),
-                globals: globals.into(),
+                entities,
+                globals,
                 states,
                 // As of when the recording began, so that a global written
                 // while it was open, after being read, counts as changed.
                 generation: recording.generation,
                 updates: recording.updates,
-                writes: writes_while_open(&recording, &self.entities.access_log),
+                writes: writes.clone(),
             },
-            own: RenderDependencies::from_reads(
-                own_entities,
-                own_globals,
-                &own_states,
-                &recording,
-                &self.entities.access_log,
-            ),
+            own: RenderDependencies {
+                entities: own_entities,
+                globals: own_globals,
+                states: own_states,
+                generation: recording.generation,
+                updates: recording.updates,
+                writes,
+            },
         }
     }
 
@@ -474,25 +566,20 @@ impl EntityMap {
         log.access_log.get_mut().len()
     }
 
-    /// Closes the recording that started at `start`, returning the entities it
-    /// saw, sorted and without repeats.
-    pub(crate) fn finish_recording(&mut self, start: usize) -> Vec<EntityId> {
+    /// Closes the recording that started at `_start`, whose accesses have
+    /// been read out of the log.
+    pub(crate) fn close_recording(&mut self, _start: usize) {
         let EntityAccessLog {
             access_log,
             recordings,
             ..
         } = &mut self.access_log;
-        let log = access_log.get_mut();
-        let mut entities = log[start..].to_vec();
         let open = recordings.get() - 1;
         recordings.set(open);
         if open == 0 {
-            log.clear();
+            access_log.get_mut().clear();
         }
         self.mark_access_boundary();
-        entities.sort_unstable();
-        entities.dedup();
-        entities
     }
 }
 
@@ -662,8 +749,8 @@ fn outside<'a, T: Clone>(
     log: &[T],
     range: &Range<usize>,
     nested: impl Iterator<Item = &'a Range<usize>>,
-) -> Vec<T> {
-    let mut own = Vec::new();
+    own: &mut Vec<T>,
+) {
     let mut cursor = range.start;
     for nested in nested {
         if nested.start > cursor {
@@ -674,7 +761,6 @@ fn outside<'a, T: Clone>(
     if range.end > cursor {
         own.extend_from_slice(&log[cursor..range.end]);
     }
-    own
 }
 
 /// What a retained subtree read while it was built: the entities it accessed
@@ -846,41 +932,34 @@ pub(crate) fn merge_sorted<T: Ord + Copy>(a: &Rc<[T]>, b: &Rc<[T]>) -> Rc<[T]> {
 
 /// `states` once each, at the earliest version read, so that a change in
 /// between still counts.
-fn dedup_states(states: &[(StateVersion, u64)]) -> Rc<[(StateVersion, u64)]> {
+///
+/// A subtree reads a handful at most, so repeats are found by looking back
+/// rather than hashing; one that reads none shares `none`.
+fn dedup_states(
+    states: &[(StateVersion, u64)],
+    none: &Rc<[(StateVersion, u64)]>,
+) -> Rc<[(StateVersion, u64)]> {
     if states.is_empty() {
-        return Rc::new([]);
+        return none.clone();
     }
-    let mut seen = FxHashSet::default();
-    states
-        .iter()
-        .filter(|(version, _)| seen.insert(version.ptr()))
-        .cloned()
-        .collect()
+    unique_states(states)
+}
+
+/// `states` once each, at the earliest version read.
+fn unique_states(states: &[(StateVersion, u64)]) -> Rc<[(StateVersion, u64)]> {
+    let mut unique: Vec<(StateVersion, u64)> = Vec::with_capacity(states.len());
+    for state in states {
+        if !unique
+            .iter()
+            .any(|(version, _)| version.ptr() == state.0.ptr())
+        {
+            unique.push(state.clone());
+        }
+    }
+    unique.into()
 }
 
 impl RenderDependencies {
-    /// Dependencies on what was read, as of when `recording` began.
-    fn from_reads(
-        mut entities: Vec<EntityId>,
-        mut globals: Vec<TypeId>,
-        states: &[(StateVersion, u64)],
-        recording: &DependencyRecording,
-        log: &EntityAccessLog,
-    ) -> Self {
-        entities.sort_unstable();
-        entities.dedup();
-        globals.sort_unstable();
-        globals.dedup();
-        Self {
-            entities: entities.into(),
-            globals: globals.into(),
-            states: dedup_states(states),
-            generation: recording.generation,
-            updates: recording.updates,
-            writes: writes_while_open(recording, log),
-        }
-    }
-
     /// The same dependencies, known to be up to date with every write up to
     /// `writes`: a reused subtree's, checked when it was reused.
     pub(crate) fn written_up_to(&self, writes: u64) -> Self {
@@ -905,7 +984,7 @@ impl RenderDependencies {
         } else {
             let mut states = self.states.to_vec();
             states.extend_from_slice(&other.states);
-            dedup_states(&states)
+            unique_states(&states)
         };
         Self {
             entities: merge_sorted(&self.entities, &other.entities),
