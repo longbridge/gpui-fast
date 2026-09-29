@@ -4,14 +4,15 @@ How gpui-fast draws a frame from the last one, what an application needs to
 know about it, and how it is checked and measured. The code is in
 `crates/gpui/src/fast/`: `retained.rs` (retained subtrees), `dependencies.rs`
 (what a subtree read), `layout.rs` and `layout_key.rs` (retained layout nodes)
-and `stats.rs` (counters for tests and benchmarks).
+and `stats.rs` (counters for tests and benchmarks). The reasoning behind the
+design is in [`architecture.md`](architecture.md).
 
 ## How it works
 
-A frame walks the element tree three times: **build** renders views and asks
-for layout, **prepaint** computes layout and places elements, **paint** turns
-them into the scene handed to the GPU. Upstream GPUI does all three from
-scratch every frame.
+A frame walks the element tree three times: **request_layout** renders views
+and asks for layout, **prepaint** computes layout and places elements,
+**paint** turns them into the scene handed to the GPU. Upstream GPUI does all
+three from scratch every frame.
 
 ### Views
 

@@ -34,9 +34,10 @@ unchanged, so applications draw less without rewriting their UI code; state
 read from outside entities, globals and list or scroll state needs a
 `cx.notify()`, as described below.
 
-A frame walks the element tree three times: **build** renders views and asks
-for layout, **prepaint** computes layout and places elements, **paint** turns
-them into the scene handed to the GPU. Upstream does all three from scratch.
+A frame walks the element tree three times: **request_layout** renders views
+and asks for layout, **prepaint** computes layout and places elements,
+**paint** turns them into the scene handed to the GPU. Upstream does all
+three from scratch.
 gpui-fast retains two things:
 
 | What is retained | Drawn again from the last frame while                                                                                                                                                                                                                                           |
@@ -47,7 +48,8 @@ gpui-fast retains two things:
 Hover, scrolling, bounds, content masks and window refreshes invalidate
 exactly what they affect, without the application doing anything. Retention
 can be turned off, for comparison or debugging, with `GPUI_VIEW_RETENTION=0`.
-[`docs/retained-mode.md`](docs/retained-mode.md) describes how it works.
+[`docs/retained-mode.md`](docs/retained-mode.md) describes how it works, and
+[`docs/architecture.md`](docs/architecture.md) why it is built this way.
 
 What it is worth, in headless CPU time per frame for a window of 60 panel
 views with 64 labels each, in release builds on Linux:
