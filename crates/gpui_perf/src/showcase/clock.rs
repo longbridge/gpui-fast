@@ -49,19 +49,17 @@ impl ClockHold {
 
 /// The helper process: spins at the main thread's quality of service, which
 /// macOS runs on performance cores, until its parent exits.
+#[cfg(target_os = "macos")]
 pub fn hold() -> ! {
-    #[cfg(target_os = "macos")]
-    {
-        const QOS_CLASS_USER_INTERACTIVE: libc::c_uint = 0x21;
-        unsafe extern "C" {
-            fn pthread_set_qos_class_self_np(
-                qos_class: libc::c_uint,
-                relative_priority: libc::c_int,
-            ) -> libc::c_int;
-        }
-        // SAFETY: sets the calling thread's own quality of service.
-        unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) };
+    const QOS_CLASS_USER_INTERACTIVE: libc::c_uint = 0x21;
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(
+            qos_class: libc::c_uint,
+            relative_priority: libc::c_int,
+        ) -> libc::c_int;
     }
+    // SAFETY: sets the calling thread's own quality of service.
+    unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) };
     // SAFETY: `getppid` only reads the parent's id.
     let parent = unsafe { libc::getppid() };
     let mut value = 0u64;
@@ -76,4 +74,10 @@ pub fn hold() -> ! {
             std::process::exit(0);
         }
     }
+}
+
+/// Only macOS starts the helper.
+#[cfg(not(target_os = "macos"))]
+pub fn hold() -> ! {
+    std::process::exit(0)
 }
