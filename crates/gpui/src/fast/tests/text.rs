@@ -387,3 +387,84 @@ fn a_text_layout_held_from_an_earlier_frame_keeps_its_lines() {
         .unwrap_or(0);
     assert_eq!(lines, 1, "the held layout should still have its line");
 }
+
+/// Text in a box that is either as wide as its text, or of a fixed width.
+struct Fitted {
+    text: &'static str,
+    width: Option<crate::Pixels>,
+    layout: std::rc::Rc<std::cell::RefCell<Option<crate::TextLayout>>>,
+}
+
+impl Render for Fitted {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        use crate::prelude::FluentBuilder as _;
+        let text = crate::StyledText::new(self.text);
+        *self.layout.borrow_mut() = Some(text.layout().clone());
+        div().flex().items_start().child(
+            div()
+                .when_some(self.width, |this, width| this.w(width))
+                .child(text),
+        )
+    }
+}
+
+fn fitted(
+    cx: &mut TestAppContext,
+    text: &'static str,
+    width: Option<crate::Pixels>,
+) -> crate::WindowHandle<Fitted> {
+    let window = cx.add_window(move |_, _| Fitted {
+        text,
+        width,
+        layout: Default::default(),
+    });
+    draw(cx, window.into());
+    window
+}
+
+fn fitted_lines(cx: &mut TestAppContext, window: crate::WindowHandle<Fitted>) -> Vec<String> {
+    window
+        .update(cx, |view, _, _| {
+            let layout = view.layout.borrow().clone().unwrap();
+            let inner = layout.0.borrow();
+            let lines = &inner.as_ref().unwrap().lines;
+            lines
+                .iter()
+                .map(|line| format!("{} ({} wraps)", line.text, line.wrap_boundaries().len()))
+                .collect()
+        })
+        .unwrap()
+}
+
+/// New text on a node is measured under the constraints the node's last text
+/// was, to find whether it takes the same room. When it does not, it has to
+/// be laid out as though it had never been measured. The last text wrapped
+/// in a narrow box: had the new text kept its measurement in that box, it
+/// would have answered Taffy's probe for its unwrapped width with the box's
+/// width, and wrapped there once the box let it be as wide as it likes.
+#[test]
+fn new_text_measured_under_the_last_texts_constraints_is_laid_out_afresh() {
+    // As long as each other unwrapped, in a font whose characters are all
+    // one width, and breaking into lines of other lengths in a narrow box.
+    const WRAPPED: &str = "aaaa bbbb cccc dddd";
+    const NEW: &str = "aaaaaaa bbbbbbbbbbb";
+    let mut cx = TestAppContext::single();
+    let window = fitted(&mut cx, WRAPPED, Some(px(100.)));
+    assert_ne!(
+        fitted_lines(&mut cx, window),
+        [format!("{WRAPPED} (0 wraps)")],
+        "the box should wrap the first text"
+    );
+    window
+        .update(&mut cx, |view, _, cx| {
+            view.text = NEW;
+            view.width = None;
+            cx.notify();
+        })
+        .unwrap();
+    draw(&mut cx, window.into());
+
+    let fresh = fitted(&mut cx, NEW, None);
+    assert_eq!(fitted_lines(&mut cx, fresh), [format!("{NEW} (0 wraps)")]);
+    assert_eq!(fitted_lines(&mut cx, window), fitted_lines(&mut cx, fresh));
+}

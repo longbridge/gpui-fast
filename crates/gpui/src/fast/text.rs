@@ -213,7 +213,13 @@ pub(crate) fn layout_text(
         line_height,
         layout: RefCell::new(layout.clone()),
     };
-    window.request_carried_measured_layout(inputs, adopt_measurement, measure_text, cx)
+    window.request_carried_measured_layout(
+        inputs,
+        adopt_measurement,
+        forget_measurement,
+        measure_text,
+        cx,
+    )
 }
 
 /// Takes over the measurement `previous` left, if it stands for `inputs`. See
@@ -244,6 +250,13 @@ fn adopt_measurement(inputs: &TextMeasureInputs, previous: &dyn Any) -> Adopted 
         *previous.layout.borrow_mut() = layout.clone();
         Adopted::Node
     }
+}
+
+/// Drops the measurement `inputs` were left with, for text laid out afresh:
+/// [`measure_text`] answers from a measurement it holds, and one taken under
+/// another text's constraints would answer for those.
+fn forget_measurement(inputs: &TextMeasureInputs) {
+    inputs.layout.borrow().0.borrow_mut().take();
 }
 
 /// Measures text under the constraints Taffy offers, keeping the result in
@@ -491,6 +504,7 @@ impl Window {
         &mut self,
         state: S,
         adopt: impl FnOnce(&S, &dyn Any) -> Adopted,
+        forget: impl FnOnce(&S),
         measure: impl Fn(
             &S,
             Size<Option<Pixels>>,
@@ -512,6 +526,7 @@ impl Window {
             scale_factor,
             state,
             adopt,
+            forget,
             measure,
             self,
             cx,

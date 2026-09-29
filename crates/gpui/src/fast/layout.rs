@@ -542,6 +542,11 @@ impl TaffyLayoutEngine {
     /// above it, is then what measuring it afresh would produce. A price that
     /// ticks in a cell keeps its width, and the row, the list and the window
     /// around it are not laid out again. See [`MeasureLog`].
+    ///
+    /// Otherwise the node is measured afresh, and `forget` is first given
+    /// `state` to drop what those measurements left in it: a measurement
+    /// taken under the last element's constraints is not one Taffy asked this
+    /// element for, and `measure` may answer later questions from it.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn request_retained_carried_measured_layout<S: 'static>(
         &mut self,
@@ -550,6 +555,7 @@ impl TaffyLayoutEngine {
         scale_factor: f32,
         state: S,
         adopt: impl FnOnce(&S, &dyn Any) -> Adopted,
+        forget: impl FnOnce(&S),
         measure: impl Fn(
             &S,
             Size<Option<Pixels>>,
@@ -627,6 +633,7 @@ impl TaffyLayoutEngine {
                 node.measure_log = Some(log);
                 return id;
             }
+            forget(&state);
         }
 
         let state = Rc::new(state);
