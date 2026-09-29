@@ -105,3 +105,200 @@ fn text_nothing_holds_any_more_leaves_the_line_layout_cache() {
         "text removed frames ago should have left the cache: {shown_again:?}"
     );
 }
+
+const PROBED_TEXT: &str = "the quick brown fox jumps over the lazy dog";
+
+/// A line of text in one color, in a box of a given width, which keeps the
+/// layout its text is measured into for the test to look at.
+struct Probed {
+    color: crate::Hsla,
+    width: crate::Pixels,
+    ellipsis: bool,
+    layout: std::rc::Rc<std::cell::RefCell<Option<crate::TextLayout>>>,
+}
+
+impl Render for Probed {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        use crate::prelude::FluentBuilder as _;
+        let run = crate::TextRun {
+            color: self.color,
+            ..window.text_style().to_run(PROBED_TEXT.len())
+        };
+        let text = crate::StyledText::new(PROBED_TEXT).with_runs(vec![run]);
+        *self.layout.borrow_mut() = Some(text.layout().clone());
+        div()
+            .w(self.width)
+            .when(self.ellipsis, |this| this.text_ellipsis())
+            .child(text)
+    }
+}
+
+fn probed(cx: &mut TestAppContext, width: f32, ellipsis: bool) -> crate::WindowHandle<Probed> {
+    cx.add_window(move |_, _| Probed {
+        color: crate::black(),
+        width: px(width),
+        ellipsis,
+        layout: Default::default(),
+    })
+}
+
+/// The lines the probed text ended up as, with the colors they are painted in.
+fn probed_lines(
+    cx: &mut TestAppContext,
+    window: crate::WindowHandle<Probed>,
+) -> (Vec<String>, Vec<crate::Hsla>) {
+    window
+        .update(cx, |view, _, _| {
+            let layout = view.layout.borrow().clone().unwrap();
+            let inner = layout.0.borrow();
+            let lines = &inner.as_ref().unwrap().lines;
+            (
+                lines.iter().map(|line| line.text.to_string()).collect(),
+                lines
+                    .iter()
+                    .flat_map(|line| line.decoration_runs.iter().map(|run| run.color))
+                    .collect(),
+            )
+        })
+        .unwrap()
+}
+
+fn change_probed(
+    cx: &mut TestAppContext,
+    window: crate::WindowHandle<Probed>,
+    change: impl FnOnce(&mut Probed),
+) -> LayoutStats {
+    cx.update_window(window.into(), |_, window, _| window.reset_layout_stats())
+        .unwrap();
+    window
+        .update(cx, |view, _, cx| {
+            change(view);
+            cx.notify();
+        })
+        .unwrap();
+    draw(cx, window.into())
+}
+
+/// A color changes nothing about how much room text takes: recolored text
+/// keeps its measurement, is not shaped again, and is painted in the new
+/// color.
+#[test]
+fn recolored_text_keeps_its_measurement_and_shows_the_new_color() {
+    let mut cx = TestAppContext::single();
+    let window = probed(&mut cx, 1000., false);
+    draw(&mut cx, window.into());
+    draw(&mut cx, window.into());
+
+    let blue = crate::blue();
+    let stats = change_probed(&mut cx, window, |view| view.color = blue);
+    assert!(
+        stats.measurements_kept > 0 && stats.measure_calls == 0,
+        "a recolor should keep the measurement: {stats:?}"
+    );
+    assert_eq!(stats.lines_shaped, 0, "nor shape anything: {stats:?}");
+    let (_, colors) = probed_lines(&mut cx, window);
+    assert!(
+        !colors.is_empty() && colors.iter().all(|color| *color == blue),
+        "the text should be painted in the new color: {colors:?}"
+    );
+}
+
+/// Text recolored and then measured again, because it was offered another
+/// width, is shaped in the new color, not the one it was first shaped in.
+#[test]
+fn text_measured_again_after_a_recolor_is_shaped_in_the_new_color() {
+    let mut cx = TestAppContext::single();
+    let window = probed(&mut cx, 1000., false);
+    draw(&mut cx, window.into());
+    let blue = crate::blue();
+    change_probed(&mut cx, window, |view| view.color = blue);
+    change_probed(&mut cx, window, |view| view.width = px(60.));
+
+    let (lines, colors) = probed_lines(&mut cx, window);
+    let wraps: usize = window
+        .update(&mut cx, |view, _, _| {
+            let layout = view.layout.borrow().clone().unwrap();
+            let inner = layout.0.borrow();
+            inner
+                .as_ref()
+                .unwrap()
+                .lines
+                .iter()
+                .map(|line| line.wrap_boundaries.len())
+                .sum()
+        })
+        .unwrap();
+    assert!(wraps > 0, "the narrow box should wrap the text: {lines:?}");
+    assert!(
+        colors.iter().all(|color| *color == blue),
+        "text measured again should keep the new color: {colors:?}"
+    );
+}
+
+/// Only truncating text takes a line wrapper, so the one path that does has
+/// to go on truncating: cut short with an ellipsis in a box too narrow for
+/// it, and whole again once the box is wide enough.
+#[test]
+fn text_that_truncates_is_truncated_and_widening_it_shows_it_whole() {
+    let mut cx = TestAppContext::single();
+    let window = probed(&mut cx, 30., true);
+    draw(&mut cx, window.into());
+    let (narrow, _) = probed_lines(&mut cx, window);
+    assert_eq!(
+        narrow.len(),
+        1,
+        "truncated text stays on one line: {narrow:?}"
+    );
+    assert!(
+        narrow[0].ends_with('…') && narrow[0].len() < PROBED_TEXT.len(),
+        "text in a narrow box should be cut short with an ellipsis: {narrow:?}"
+    );
+
+    change_probed(&mut cx, window, |view| view.width = px(1000.));
+    let (wide, _) = probed_lines(&mut cx, window);
+    assert_eq!(
+        wide,
+        vec![PROBED_TEXT.to_string()],
+        "text in a box wide enough for it should be shown whole"
+    );
+}
+
+/// Replacing decorations in place has to land exactly where shaping the same
+/// text with the new runs would have; otherwise recolored text paints the
+/// wrong colors on the wrong characters, and nothing in the layout shows it.
+#[test]
+fn replacing_decorations_in_place_lands_where_reshaping_would() {
+    let mut cx = TestAppContext::single();
+    let window = cx.add_window(|_, _| crate::Empty);
+    cx.update_window(window.into(), |_, window, _| {
+        let text = SharedString::from("hello\nworld wide");
+        let font = window.text_style().font();
+        let run = |len, color| crate::TextRun {
+            len,
+            font: font.clone(),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let (red, blue, green) = (crate::red(), crate::blue(), crate::green());
+        // Same lengths and boundaries, other colors.
+        let before = [run(6, red), run(10, blue)];
+        let after = [run(6, green), run(10, red)];
+        let system = window.text_system();
+        let mut recolored = system
+            .shape_text(text.clone(), px(14.), &before, None, None)
+            .unwrap();
+        let reshaped = system
+            .shape_text(text.clone(), px(14.), &after, None, None)
+            .unwrap();
+        crate::fast::text::update_decoration_runs(&mut recolored, &after);
+
+        assert_eq!(recolored.len(), reshaped.len());
+        for (recolored, reshaped) in recolored.iter().zip(reshaped.iter()) {
+            assert_eq!(recolored.text, reshaped.text);
+            assert_eq!(recolored.decoration_runs, reshaped.decoration_runs);
+        }
+    })
+    .unwrap();
+}

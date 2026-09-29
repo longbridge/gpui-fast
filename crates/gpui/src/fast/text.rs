@@ -2,14 +2,19 @@
 //! carried from one frame to the next, and shaping statistics.
 
 use crate::{
-    App, AvailableSpace, FontRun, FrameCache, LayoutId, LineLayout, LineLayoutIndex, Pixels,
-    PlatformTextSystem, SharedString, Size, Style, TextLayout, TextLayoutInner, TextRun, TextStyle,
-    Window, WindowTextSystem, WrappedLine,
+    App, AvailableSpace, DecorationRun, FontRun, FrameCache, Hsla, LayoutId, LineLayout,
+    LineLayoutIndex, Pixels, PlatformTextSystem, SharedString, Size, StrikethroughStyle, Style,
+    TextLayout, TextLayoutInner, TextOverflow, TextRun, TextStyle, TruncateFrom, UnderlineStyle,
+    WhiteSpace, Window, WindowTextSystem, WrappedLine,
 };
 use collections::FxHashMap;
+use gpui_util::ResultExt as _;
 use scheduler::Instant;
+use smallvec::SmallVec;
 use std::{
     any::Any,
+    borrow::Cow,
+    cmp,
     hash::Hash,
     mem,
     rc::Rc,
@@ -18,109 +23,351 @@ use std::{
 };
 
 /// Everything a text element's measurement is taken from, and the layout it
-/// keeps the measurement in. Two measurements taken from equal inputs come out
-/// the same, whatever space they are given.
+/// keeps the measurement in.
 ///
 /// The element hands its text, runs and style over rather than copying them:
 /// its measurement closure reads them from here, and the next frame's element
 /// at the same place compares its own against them.
 pub(crate) struct TextMeasureInputs {
     text: SharedString,
-    runs: Vec<TextRun>,
+    /// Plain text is one run, kept inline.
+    runs: SmallVec<[TextRun; 1]>,
     text_style: TextStyle,
     font_size: Pixels,
     line_height: Pixels,
     layout: TextLayout,
 }
 
+/// The decorations of a run: what it is painted with, and what shaping splits
+/// font runs on.
+fn decoration_of(
+    run: &TextRun,
+) -> (
+    Hsla,
+    Option<Hsla>,
+    Option<UnderlineStyle>,
+    Option<StrikethroughStyle>,
+) {
+    (
+        run.color,
+        run.background_color,
+        run.underline,
+        run.strikethrough,
+    )
+}
+
 impl TextMeasureInputs {
-    /// Takes over what `layout`'s element measures its text from. The sizes
-    /// the element works out of `text_style` are worked out again here, so
-    /// that the element hands over only what it would otherwise copy.
-    pub(crate) fn new(
-        text: SharedString,
-        runs: Vec<TextRun>,
-        text_style: TextStyle,
-        layout: &TextLayout,
-        window: &Window,
-    ) -> Rc<Self> {
-        let font_size = text_style.font_size.to_pixels(window.rem_size());
-        let line_height = window.pixel_snap(
-            text_style
-                .line_height
-                .to_pixels(font_size.into(), window.rem_size()),
-        );
-        Rc::new(Self {
-            text,
-            runs,
-            text_style,
-            font_size,
-            line_height,
-            layout: layout.clone(),
-        })
+    /// Whether text truncates, in which case it is shaped from a rewritten
+    /// string whose runs no longer line up with these.
+    fn truncates(&self) -> bool {
+        self.text_style.text_overflow.is_some()
     }
 
-    /// What the measurement closure reads.
-    pub(crate) fn parts(&self) -> (&SharedString, Runs<'_>, &TextStyle, &TextLayout) {
-        (&self.text, Runs(&self.runs), &self.text_style, &self.layout)
-    }
-
-    /// Whether a measurement of `self` would come out as one of `other`.
-    fn measures_as(&self, other: &Self) -> bool {
-        self.font_size == other.font_size
+    /// Whether `self` is shaped as `other` is: the same text, sizes, fonts and
+    /// wrapping, and decoration changing in the same places, since shaping
+    /// splits font runs wherever it changes. What it is painted with may
+    /// differ; see [`Self::decorated_as`].
+    fn shapes_as(&self, other: &Self) -> bool {
+        fn runs(inputs: &TextMeasureInputs) -> impl Iterator<Item = &TextRun> {
+            inputs.runs.iter().filter(|run| run.len > 0)
+        }
+        fn joins_previous<'a>(
+            runs: impl Iterator<Item = &'a TextRun>,
+        ) -> impl Iterator<Item = bool> {
+            let mut previous = None;
+            runs.map(move |run| {
+                previous
+                    .replace(decoration_of(run))
+                    .is_some_and(|previous| previous == decoration_of(run))
+            })
+        }
+        let (style, other_style) = (&self.text_style, &other.text_style);
+        self.text == other.text
+            && self.font_size == other.font_size
             && self.line_height == other.line_height
-            && self.text == other.text
-            && self.runs == other.runs
-            && self.text_style == other.text_style
+            && style.white_space == other_style.white_space
+            && style.line_clamp == other_style.line_clamp
+            && style.text_overflow == other_style.text_overflow
+            // Only truncation reads the style's own font.
+            && (!self.truncates() || style.font() == other_style.font())
+            && runs(self).count() == runs(other).count()
+            && runs(self)
+                .zip(runs(other))
+                .all(|(run, other)| run.len == other.len && run.font == other.font)
+            && joins_previous(runs(self)).eq(joins_previous(runs(other)))
+    }
+
+    /// Whether `self` is painted with what `other` is.
+    fn decorated_as(&self, other: &Self) -> bool {
+        self.runs
+            .iter()
+            .filter(|run| run.len > 0)
+            .map(decoration_of)
+            .eq(other
+                .runs
+                .iter()
+                .filter(|run| run.len > 0)
+                .map(decoration_of))
     }
 }
 
-/// The runs a measurement closure reads, which it borrows as the slice they
-/// dereference to, as it did when it owned them.
-#[derive(Clone, Copy)]
-pub(crate) struct Runs<'a>(&'a [TextRun]);
-
-impl std::ops::Deref for Runs<'_> {
-    type Target = [TextRun];
-
-    fn deref(&self) -> &[TextRun] {
-        self.0
-    }
-}
-
-/// Requests the layout of a text element whose measurement `measure` takes
-/// from `inputs` and keeps in their layout.
+/// Requests the layout of a text element, whose measurement it keeps in
+/// `layout`: what [`TextLayout`]'s layout does upstream.
 ///
 /// A measured node is given a new closure every frame, and would be dirtied
 /// for it, with every node above it: a view built again would have all of its
 /// text measured and laid out again, though none of it changed. When last
-/// frame's element at this place measured the same inputs, its measurement is
-/// copied into this one's layout instead, and the node is left clean, keeping
-/// what Taffy cached for it. The new closure is still installed, for when
-/// Taffy measures it again under other constraints.
-pub(crate) fn request_text_layout(
-    inputs: Rc<TextMeasureInputs>,
+/// frame's element at this place measured text shaped the same way, its
+/// measurement is copied into this one's layout instead, repainted with this
+/// one's decorations if only they changed, and the node is left clean,
+/// keeping what Taffy cached for it. The new closure is still installed, for
+/// when Taffy measures it again under other constraints.
+pub(crate) fn layout_text(
+    layout: &TextLayout,
+    text: SharedString,
+    runs: Option<Vec<TextRun>>,
     window: &mut Window,
-    measure: impl Fn(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
-    + 'static,
 ) -> LayoutId {
+    let text_style = window.text_style();
+    let font_size = text_style.font_size.to_pixels(window.rem_size());
+    let line_height = window.pixel_snap(
+        text_style
+            .line_height
+            .to_pixels(font_size.into(), window.rem_size()),
+    );
+    let runs = match runs {
+        Some(runs) => SmallVec::from_vec(runs),
+        None => SmallVec::from_buf([text_style.to_run(text.len())]),
+    };
+    let inputs = Rc::new(TextMeasureInputs {
+        text,
+        runs,
+        text_style,
+        font_size,
+        line_height,
+        layout: layout.clone(),
+    });
     let adopt = {
         let inputs = inputs.clone();
         move |previous: &dyn Any| {
             let Some(previous) = previous.downcast_ref::<TextMeasureInputs>() else {
                 return false;
             };
-            if !previous.measures_as(&inputs) {
+            if !previous.shapes_as(&inputs) {
                 return false;
             }
-            let Some(inner) = previous.layout.0.borrow().as_ref().map(copy_measurement) else {
+            let recolored = !previous.decorated_as(&inputs);
+            if recolored && inputs.truncates() {
+                return false;
+            }
+            let Some(mut inner) = previous.layout.0.borrow().as_ref().map(copy_measurement) else {
                 return false;
             };
+            if recolored {
+                update_decoration_runs(&mut inner.lines, &inputs.runs);
+            }
             *inputs.layout.0.borrow_mut() = Some(inner);
             true
         }
     };
+    let measure = {
+        let inputs = inputs.clone();
+        move |known_dimensions, available_space, window: &mut Window, cx: &mut App| {
+            measure_text(&inputs, known_dimensions, available_space, window, cx)
+        }
+    };
     window.request_carried_measured_layout(inputs, adopt, measure)
+}
+
+/// Measures text under the constraints Taffy offers, keeping the result in
+/// its layout: upstream's measurement, doing less of its work.
+///
+/// - Taffy asks a node for its intrinsic size before it lays the node out, so
+///   a wrapping leaf is measured unconstrained and then again at the width it
+///   ends up with. Text that came out narrower than the width now on offer
+///   wraps nowhere, and the lines shaped without a wrap width are the same
+///   lines, so that is answered from what is already there.
+/// - Which affix to truncate with, and the line wrapper truncation needs, are
+///   worked out only when the text truncates and has to be shaped: resolving
+///   the font and borrowing a wrapper from the pool on every measurement was
+///   for nothing on text that does not truncate.
+fn measure_text(
+    inputs: &TextMeasureInputs,
+    known_dimensions: Size<Option<Pixels>>,
+    available_space: Size<AvailableSpace>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Size<Pixels> {
+    let TextMeasureInputs {
+        text,
+        runs,
+        text_style,
+        font_size,
+        line_height,
+        layout,
+    } = inputs;
+    let (font_size, line_height) = (*font_size, *line_height);
+    let wrap_width = if text_style.white_space == WhiteSpace::Normal {
+        known_dimensions.width.or(match available_space.width {
+            AvailableSpace::Definite(x) => Some(x),
+            _ => None,
+        })
+    } else {
+        None
+    };
+    let truncate_width = text_style.text_overflow.as_ref().and_then(|_| {
+        known_dimensions.width.or(match available_space.width {
+            AvailableSpace::Definite(x) => match text_style.line_clamp {
+                Some(max_lines) => Some(x * max_lines),
+                None => Some(x),
+            },
+            _ => None,
+        })
+    });
+
+    // A kept measurement answers when the wrap width is one it was taken at,
+    // or one it fits within unwrapped, unless truncation is involved either
+    // way: a truncated layout would answer an unconstrained probe with the
+    // truncated size.
+    if let Some(text_layout) = layout.0.borrow().as_ref()
+        && let Some(size) = text_layout.size
+        && (wrap_width.is_none()
+            || wrap_width == text_layout.wrap_width
+            || (text_layout.wrap_width.is_none()
+                && wrap_width.is_some_and(|wrap_width| size.width <= wrap_width)))
+        && truncate_width.is_none()
+        && text_layout.truncate_width.is_none()
+    {
+        return size;
+    }
+
+    let (text, runs) = if let Some(truncate_width) = truncate_width {
+        let (truncation_affix, truncate_from) = match text_style.text_overflow.clone() {
+            Some(TextOverflow::Truncate(affix)) => (affix, TruncateFrom::End),
+            Some(TextOverflow::TruncateStart(affix)) => (affix, TruncateFrom::Start),
+            Some(TextOverflow::TruncateMiddle(affix)) => (affix, TruncateFrom::Middle),
+            None => (SharedString::default(), TruncateFrom::End),
+        };
+        let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+        if let Some(max_lines) = text_style.line_clamp
+            && let Some(wrap_width) = wrap_width
+        {
+            line_wrapper.truncate_wrapped_line(
+                text.clone(),
+                wrap_width,
+                max_lines,
+                &truncation_affix,
+                runs,
+                truncate_from,
+            )
+        } else if let Some(unclipped) = window
+            .text_system()
+            .shape_text(text.clone(), font_size, runs, None, None)
+            .log_err()
+            && unclipped
+                .iter()
+                .all(|line| line.size(line_height).width <= truncate_width)
+        {
+            // Truncation sums per-character advances, which overestimates the
+            // shaped width, so text that fits once shaped is not truncated.
+            (text.clone(), Cow::Borrowed(&runs[..]))
+        } else {
+            line_wrapper.truncate_line(
+                text.clone(),
+                truncate_width,
+                &truncation_affix,
+                runs,
+                truncate_from,
+            )
+        }
+    } else {
+        (text.clone(), Cow::Borrowed(&runs[..]))
+    };
+    let len = text.len();
+
+    let Some(lines) = window
+        .text_system()
+        .shape_text(text, font_size, &runs, wrap_width, text_style.line_clamp)
+        .log_err()
+    else {
+        layout.0.borrow_mut().replace(TextLayoutInner {
+            lines: Default::default(),
+            len: 0,
+            line_height,
+            wrap_width,
+            truncate_width,
+            size: Some(Size::default()),
+            bounds: None,
+        });
+        return Size::default();
+    };
+
+    let mut size: Size<Pixels> = Size::default();
+    for line in &lines {
+        let line_size = line.size(line_height);
+        size.height += line_size.height;
+        size.width = size.width.max(line_size.width).ceil();
+    }
+    layout.0.borrow_mut().replace(TextLayoutInner {
+        lines,
+        len,
+        line_height,
+        wrap_width,
+        truncate_width,
+        size: Some(size),
+        bounds: None,
+    });
+    size
+}
+
+/// Rewrites the decorations of lines already shaped, leaving the shaping
+/// alone: recoloring text is a matter of replacing what is painted over it.
+///
+/// `runs` must split the lines as the runs they were shaped with did: the same
+/// lengths, the same fonts, and decoration changing in the same places; see
+/// [`TextMeasureInputs::shapes_as`].
+pub(crate) fn update_decoration_runs(lines: &mut [WrappedLine], runs: &[TextRun]) {
+    let mut runs = runs.iter().filter(|run| run.len > 0).cloned().peekable();
+    for line in lines.iter_mut() {
+        let line_len = line.text.len();
+        line.decoration_runs.clear();
+        let mut offset = 0;
+        while offset < line_len {
+            let Some(run) = runs.peek_mut() else {
+                log::warn!("`TextRun`s do not cover the entire shaped text");
+                break;
+            };
+            let len_within_line = cmp::min(line_len - offset, run.len);
+            if let Some(last_run) = line.decoration_runs.last_mut()
+                && last_run.color == run.color
+                && last_run.underline == run.underline
+                && last_run.strikethrough == run.strikethrough
+                && last_run.background_color == run.background_color
+            {
+                last_run.len += len_within_line as u32;
+            } else {
+                line.decoration_runs.push(DecorationRun {
+                    len: len_within_line as u32,
+                    color: run.color,
+                    background_color: run.background_color,
+                    underline: run.underline,
+                    strikethrough: run.strikethrough,
+                });
+            }
+            run.len -= len_within_line;
+            if run.len == 0 {
+                runs.next();
+            }
+            offset += len_within_line;
+        }
+        // Skip the `\n` that separated this line from the next.
+        if let Some(run) = runs.peek_mut() {
+            run.len -= 1;
+            if run.len == 0 {
+                runs.next();
+            }
+        }
+    }
 }
 
 /// A copy of what a measurement left, without where it was last painted.

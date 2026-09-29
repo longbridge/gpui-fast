@@ -9,5 +9,6 @@
 
 crates/gpui/src/window.rs added=50 # the frame's hub: one- and two-line hooks for layout keys, retained drawing, phase timing, global ids and the inspector
 crates/gpui/src/elements/div.rs hunk=20 added=60 removed=30 # Interactivity's listener lists become fast::interactivity::LazyVec, a one-word change per field; the rest are one-line state-version hooks
+crates/gpui/src/elements/text.rs removed=160 # TextLayout::layout's body is replaced by fast::text's measurement, which carries measurements across frames and recolors them in place; the method forwards to it
 crates/gpui/src/view.rs removed=210 # ViewElement's cache-by-bounds is replaced by fast::retained's retained views; its Element methods forward to it
 crates/gpui/src/taffy.rs removed=50 # request_layout, request_measured_layout and stretch_auto_size_to_fill bodies are replaced by fast::layout's retained nodes; they forward to it
