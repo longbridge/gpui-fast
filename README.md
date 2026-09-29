@@ -52,12 +52,12 @@ can be turned off, for comparison or debugging, with `GPUI_VIEW_RETENTION=0`.
 What it is worth, in headless CPU time per frame for a window of 60 panel
 views with 64 labels each, in release builds on Linux:
 
-| Panels notified per frame | Upstream | gpui-fast       |
-| ------------------------- | -------- | --------------- |
-| None, still               | 10.43 ms | 0.25 ms (−98%)  |
-| One                       | 11.58 ms | 1.35 ms (−88%)  |
-| Six                       | 13.06 ms | 3.86 ms (−70%)  |
-| All sixty                 | 18.25 ms | 14.57 ms (−20%) |
+| Panels notified per frame | Upstream | gpui-fast      |
+| ------------------------- | -------- | -------------- |
+| None, still               | 3.31 ms  | 0.19 ms (−94%) |
+| One                       | 6.72 ms  | 0.71 ms (−89%) |
+| Six                       | 7.27 ms  | 1.46 ms (−80%) |
+| All sixty                 | 10.33 ms | 7.38 ms (−29%) |
 
 "Upstream" is the same build drawing every view from scratch, as with
 `GPUI_VIEW_RETENTION=0`; the figures come from the `retained_bench` test. The
@@ -67,25 +67,31 @@ Against upstream GPUI itself, in a real window: the `gpui_perf` showcase, a
 component gallery written the way GPUI Kit's is (a sidebar of 243 pages whose
 names the root view reads from each page's entity, a page of component
 sections holding their state in keyed entities, a 5,000-row data table, a
-`gpui::list` of 5,000 messages, and application state in a global entity that
-most views read and that changes every two seconds), built once on gpui-fast
+`gpui::list` of 5,000 messages, application state in a global entity that
+most views read and that changes every two seconds, and a trading workspace of
+docked market panels that a stream of quotes updates), built once on gpui-fast
 and once on the `gpui-pre` 0.3.7 snapshot of upstream GPUI, scrolling at
 32 px a frame as a fast scrollbar drag does. Main-thread CPU per frame
 (median), and the CPU of the whole process, at up to 144 frames per second on
 Linux:
 
-| Scenario                         | Upstream gpui-pre | gpui-fast                |
-| -------------------------------- | ----------------- | ------------------------ |
-| A spinner animating              | 6.07 ms, 65% CPU  | 1.02 ms, 10% CPU (−83%)  |
-| Scrolling the sidebar            | 6.05 ms, 88% CPU  | 1.05 ms, 16% CPU (−83%)  |
-| Scrolling a page of components   | 6.08 ms, 83% CPU  | 1.10 ms, 17% CPU (−82%)  |
-| Scrolling the data table         | 3.21 ms, 47% CPU  | 0.83 ms, 13% CPU (−74%)  |
-| Refreshing the table every 33 ms | 12% CPU           | 5% CPU                   |
-| Scrolling the list               | 2.86 ms, 41% CPU  | 0.63 ms, 10% CPU (−78%)  |
+| Scenario                               | Upstream gpui-pre | gpui-fast                |
+| -------------------------------------- | ----------------- | ------------------------ |
+| A spinner animating                    | 5.91 ms, 85% CPU  | 0.73 ms, 11% CPU (−88%)  |
+| Scrolling the sidebar                  | 5.95 ms, 86% CPU  | 0.79 ms, 12% CPU (−87%)  |
+| Scrolling a page of components         | 5.96 ms, 82% CPU  | 0.79 ms, 12% CPU (−87%)  |
+| Scrolling the data table               | 3.07 ms, 44% CPU  | 0.54 ms, 8% CPU (−82%)   |
+| Refreshing the table every 33 ms       | 11% CPU           | 2% CPU                   |
+| Scrolling the list                     | 2.66 ms, 39% CPU  | 0.39 ms, 6% CPU (−85%)   |
+| Streaming quotes into the workspace    | 5.06 ms, 43% CPU  | 1.35 ms, 15% CPU (−73%)  |
+| Scrolling the workspace's watchlist    | 5.23 ms, 77% CPU  | 1.33 ms, 24% CPU (−75%)  |
+| Hovering the workspace's watchlist     | 5.16 ms, 42% CPU  | 1.32 ms, 14% CPU (−74%)  |
 
-The spinner drew 102 frames a second upstream and 88 on gpui-fast, so its
-process CPU does not compare directly; the refreshed table draws about 30
-frames a second, which only its process CPU describes.
+The refreshed table draws about 30 frames a second, which only its process
+CPU describes; the workspace draws a frame per batch of quotes, about 60 a
+second, and while its watchlist scrolls, 124 a second upstream and 144 on
+gpui-fast, so that row's process CPU does not compare directly. Each figure
+is the mean of two runs alternating between the two builds.
 
 ```sh
 cargo run -p gpui_perf --release -- --auto
