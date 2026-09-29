@@ -7,3 +7,4 @@ mod oracle;
 mod retained;
 mod retained_bench;
 mod support;
+mod text;

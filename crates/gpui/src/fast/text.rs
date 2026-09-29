@@ -2,14 +2,18 @@
 //! carried from one frame to the next, and shaping statistics.
 
 use crate::{
-    App, AvailableSpace, FontRun, LayoutId, LineLayout, LineLayoutIndex, Pixels,
+    App, AvailableSpace, FontRun, FrameCache, LayoutId, LineLayout, LineLayoutIndex, Pixels,
     PlatformTextSystem, SharedString, Size, Style, TextLayout, TextLayoutInner, TextRun, TextStyle,
     Window, WindowTextSystem, WrappedLine,
 };
+use collections::FxHashMap;
 use scheduler::Instant;
 use std::{
     any::Any,
+    hash::Hash,
+    mem,
     rc::Rc,
+    sync::Arc,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
@@ -174,6 +178,64 @@ impl Window {
                 measure,
             )
     }
+}
+
+/// Leaves in `previous` everything the next frame may ask for: what this
+/// frame asked for, which is in `current`, and what it did not but something
+/// still holds. `current` is left empty.
+///
+/// Whichever of the two is larger is kept and the other moved into it, so a
+/// frame that asked for little costs little, and so does one that asked for
+/// everything.
+fn carry_over<K: Eq + Hash, V>(
+    previous: &mut FxHashMap<Arc<K>, Arc<V>>,
+    current: &mut FxHashMap<Arc<K>, Arc<V>>,
+) {
+    previous.retain(|_, layout| Arc::strong_count(layout) > 1);
+    if previous.len() < current.len() {
+        mem::swap(previous, current);
+    }
+    previous.extend(current.drain());
+}
+
+/// Ends a frame of the line layout cache: what it laid out, in `current`,
+/// becomes what the next frame can reuse, in `previous`.
+///
+/// Upstream drops every line the frame did not ask for. A text node that
+/// takes over last frame's measurement answers from the lines it holds
+/// without asking the cache for them, so its lines would be dropped, and its
+/// text, sliding onto another node with the rows around it, shaped again
+/// there. A line something still holds is kept.
+pub(crate) fn carry_over_line_layouts(previous: &mut FrameCache, current: &mut FrameCache) {
+    // Wrapped lines hold the lines they were wrapped from, so they are swept
+    // first, letting a line they were the last to hold go with them.
+    carry_over(&mut previous.wrapped_lines, &mut current.wrapped_lines);
+    carry_over(
+        &mut previous.wrapped_lines_by_hash,
+        &mut current.wrapped_lines_by_hash,
+    );
+    carry_over(&mut previous.lines, &mut current.lines);
+    carry_over(&mut previous.lines_by_hash, &mut current.lines_by_hash);
+
+    // The used lists index what this frame laid out, which is what a view
+    // reused next frame looks its lines up by.
+    mem::swap(&mut previous.used_lines, &mut current.used_lines);
+    mem::swap(
+        &mut previous.used_wrapped_lines,
+        &mut current.used_wrapped_lines,
+    );
+    mem::swap(
+        &mut previous.used_lines_by_hash,
+        &mut current.used_lines_by_hash,
+    );
+    mem::swap(
+        &mut previous.used_wrapped_lines_by_hash,
+        &mut current.used_wrapped_lines_by_hash,
+    );
+    current.used_lines.clear();
+    current.used_wrapped_lines.clear();
+    current.used_lines_by_hash.clear();
+    current.used_wrapped_lines_by_hash.clear();
 }
 
 impl LineLayoutIndex {
