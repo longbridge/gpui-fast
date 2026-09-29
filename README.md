@@ -109,10 +109,9 @@ drawing incrementally and one from scratch, and requires every frame to match.
 gpui-fast is for trying Retained Mode out, and for measuring it on real
 applications; expect its internals to change as the experiment goes on, but
 not its API: the public API is upstream's, and code written for upstream GPUI
-compiles here untouched. One thing to know: state a view's render reads
-outside entities and globals — an `Rc<RefCell<..>>`, the time,
-`window.modifiers()` — needs a `cx.notify()` when it changes, as it already
-does for a cached view.
+compiles here untouched. One thing to know: state a view's render reads that
+gpui-fast cannot observe — an `Rc<RefCell<..>>` outside an entity, the time —
+needs a `cx.notify()` when it changes, as it already does for a cached view.
 
 Point a project at it in place of upstream GPUI:
 

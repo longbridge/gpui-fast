@@ -8,14 +8,31 @@ mergeable. This document covers the reasoning behind both.
 
 ## The problem
 
-GPUI draws in immediate mode. For every frame it renders every view, builds a
-new element tree, lays out a new Taffy tree, shapes the text, and paints the
-scene again, even when one number in one table cell changed. The cost of a
-frame is the cost of the whole window, not the cost of what changed.
+GPUI draws in immediate mode. Outside subtrees an application explicitly
+caches (`AnyView::cached`), GPUI reconstructs a frame's element, layout,
+prepaint and paint work every time it draws one: it renders the views, builds
+a new element tree, lays out a new Taffy tree, shapes the text and paints the
+scene, even when one number in one table cell changed. The cost of a frame
+is close to the cost of the whole window, not the cost of what changed.
 
 gpui-fast makes a frame cost what changed. When nothing a view depends on has
 changed, the view is not rendered, not laid out, not prepainted and not
 painted; its output is taken from the last frame.
+
+It does this without turning GPUI into a conventional retained-mode
+framework. GPUI still constructs every frame through its normal element
+pipeline. gpui-fast associates the elements of the new frame with work the
+previous frame produced, records what that work depended on, and for each
+view chooses to:
+
+1. reuse the previous frame's output,
+2. splice a changed nested view into the previous output around it, or
+3. rebuild, when reuse would not be safe.
+
+Layout and text measurement also keep enough state across frames to avoid
+invalidating expensive caches. **gpui-fast retains frame work, not a parallel
+UI tree**: it is incremental reconstruction of GPUI's frames over its
+immediate element tree.
 
 ## Constraints
 
@@ -71,8 +88,46 @@ generalizes that existing mechanism:
 ## Identity: how an element is found again
 
 Anything kept across frames has to be matched with the element that asks for
-it on the next frame. gpui-fast uses two kinds of identity, and they have
-different roles.
+it on the next frame. The element and view hierarchy is still created anew
+each frame; what persists is keyed to it:
+
+```text
+the frame being drawn constructs its elements and views
+        │
+        ▼
+GlobalElementId of each view
+        │
+        ▼
+the RetainedSubtree the previous frame recorded for it
+        │
+        ▼
+check what it depended on, and where it is drawn
+        │
+        ▼
+reuse, splice, or rebuild
+```
+
+The state that makes this possible is spread over systems GPUI already has,
+not kept in a second tree:
+
+```text
+Frame (the previous one, and the one being drawn)
+ ├─ output ranges: hitboxes, dispatch nodes, listeners, primitives
+ ├─ a RetainedSubtree record per view
+ └─ the records of views nested in reused views, copied and shifted
+
+Taffy
+ └─ layout nodes kept across frames, with their layout caches
+
+App (the dependency system)
+ └─ generations and change stamps for entities, globals and ambient
+    window input
+
+ScrollHandle, ListState
+ └─ a version each carries, bumped when its state changes
+```
+
+gpui-fast uses two kinds of identity, and they have different roles.
 
 ### Views: `GlobalElementId`, the same identity element state uses
 
@@ -125,14 +180,14 @@ slot map), each owning its layout subtree and its rendered output.
 GPUI's element tree is rebuilt every frame by design, and its existing state
 already has an identity: `GlobalElementId` for element state, and the
 frame's index ranges for reused output. gpui-fast keeps those, and stores
-what persists where it already lives:
+what persists where it already lives, as the diagram above shows:
 
 - layout nodes persist in Taffy, which is already a persistent node store
   with its own per-node layout cache;
-- a subtree's output persists as ranges in the last frame, as it does for
+- a view's output persists as ranges in the last frame, as it does for
   upstream's cached views;
-- a subtree's record (what it read, what it holds) lives in the frame next
-  to the output it points to, because those ranges belong to one frame.
+- a view's record (what it read, what it holds) lives in the frame next to
+  the output it points to, because those ranges belong to one frame.
 
 Adding a second, parallel tree of view nodes would duplicate that identity
 and require restructuring the window's drawing code, which would break
@@ -156,11 +211,34 @@ records what it reads (`fast/dependencies.rs`):
   a global exists (`cx.has_global`) depends on its presence, not its value;
 - **versioned state**: `ScrollHandle` and `ListState` carry a version that is
   bumped whenever their state changes, so a view that reads a scroll position
-  is drawn again when it moves, whether anything was notified or not.
+  is drawn again when it moves, whether anything was notified or not;
+- **ambient window input**: reading the pointer position
+  (`Window::mouse_position`) or the modifier keys and caps lock
+  (`Window::modifiers`, `Window::capslock`) is recorded like reading a
+  global. After the window handles an input event, it compares these values
+  with what they were before the event and marks the ones that changed, so
+  the views that read them are drawn again without notifying anything.
 
-Reads are recorded per subtree, in two sets: everything the subtree read
-including nested subtrees, and what it read itself outside them. The second
-set is what allows drawing a view around a rebuilt nested view (below).
+Reads are recorded per retained subtree, in two sets, and the distinction is
+what the rest of the design turns on:
+
+- **subtree dependencies** (`dependencies`): everything the view read,
+  including what the views nested in it read;
+- **own dependencies** (`own_dependencies`): what the view read itself,
+  outside the retained views nested in it.
+
+Hovers are recorded the same two ways. The subtree set answers "can this view
+be reused as it was?" The own set answers a different question: "is the view
+itself unchanged, even though something nested in it changed?" That is what
+lets gpui-fast tell
+
+```text
+the view itself changed                    → rebuild it
+the view is unchanged, a nested view changed → splice the nested view in
+```
+
+apart, and splice instead of rebuilding the whole view (see
+[Drawing around a rebuilt nested view](#drawing-around-a-rebuilt-nested-view)).
 
 ### When an entity counts as changed
 
@@ -207,16 +285,22 @@ while the inspector is picking, and while accessibility is active. Setting
 
 ## Drawing a view from the last frame
 
-For each view, the frame takes one of five paths
-(`ViewElement` in `fast/retained.rs`):
+For each view placed as an `Entity` or `AnyView`, the frame takes one of five
+paths (`ViewElement` in `fast/retained.rs`):
 
 | Path | When | What happens |
 | --- | --- | --- |
 | **Reused** | Nothing it depends on changed, and it is drawn where it was | Its layout comes from its kept nodes; its prepaint and paint ranges, and the records of the subtrees nested in it, are copied from the last frame |
 | **Spliced** | It is dirty only because a nested view changed | It is copied from the last frame in stretches, with the nested views that changed rebuilt in the gaps |
-| **Built at its retained layout** | Nothing it read changed, but it moved or what it inherits changed | It is rendered again at the layout nodes it kept, laid out within the bounds it was given |
+| **Built at its retained layout** | Nothing it read changed, but it moved or what it inherits changed | It is rendered again at the layout nodes it kept. If it asks for a different layout, it is laid out within the bounds it was given, and from scratch on the next frame |
 | **Prebuilt** | A nested view was already built for a splice that turned out not to be possible | The view around it takes over the nested view already built, instead of building it twice |
 | **Built** | Anything else | Rendered, laid out, prepainted and painted as upstream does, recording what it reads |
+
+A view placed with `cached(style)` keeps upstream's cached-view shape: it is
+laid out at the style it was given, and is either reused, when nothing it
+depends on changed and it is drawn where it was, or rendered again and laid
+out as a root within its bounds. Unlike upstream, what it depends on includes
+everything it read, not only whether it was notified.
 
 ### Records
 
@@ -239,7 +323,23 @@ would rebuild the whole window.
 
 gpui-fast rebuilds only the nested view that changed (`fast/splice.rs`). A
 view that is dirty only because something nested in it is dirty (it was not
-notified, and nothing it read itself changed) is drawn as follows:
+notified, its own dependencies and own hovers are unchanged, and every dirty
+view nested in it can be rebuilt on its own) is drawn as follows:
+
+```text
+the view's own dependencies unchanged, a nested view changed
+        │
+        ▼
+copy the view's output from last frame, up to the nested view
+        │
+        ▼
+rebuild only the nested view, where it was
+        │
+        ▼
+copy the view's output from last frame, after the nested view
+```
+
+In more detail:
 
 - its layout is last frame's; each nested view that changed is laid out
   again at its own nodes;
@@ -274,10 +374,17 @@ which is how views are almost always placed.
 ## Layout
 
 Upstream clears the whole Taffy tree at the end of every frame. gpui-fast
-keeps nodes across frames (`fast/layout.rs`) and writes a node's style,
-children and measurement only when they differ from last frame's. Taffy
-invalidates its per-node cache only when a node is written, so unchanged
-parts of the tree keep their cached layout and are not laid out again.
+keeps nodes across frames (`fast/layout.rs`), but keeping them is not the
+optimization by itself. Taffy discards a node's cached layout, and that of
+every ancestor, whenever the node is written: `set_style`, `set_children`
+and `set_node_context` all dirty it unconditionally, whether the value
+changed or not. The value comes from **not writing** to a kept node when the
+element asks for what it asked for last frame. For that, each kept node
+remembers the request that produced it: a fingerprint of its style, its
+list of children, and, for a text leaf, the inputs of its measurement.
+Those are compared first, and the node is written only if they differ, so
+unchanged parts of the tree keep their cached layout and are not laid out
+again.
 
 A node unclaimed for a whole frame is released. Nodes requested without a
 key (for example a list item laid out during prepaint with
@@ -285,6 +392,12 @@ key (for example a list item laid out during prepaint with
 tree does not grow with every frame.
 
 ### Text measurement
+
+A leaf that measures itself holds a closure in its node context. For most
+measured leaves (a `uniform_list` or `list` measuring its own size, for
+example), nothing says what the measurement depends on, so a kept node is
+given the new closure and dirtied every frame. Text is the exception, because
+its inputs are known and comparable.
 
 A text element measures itself through a closure. Giving a node a new closure
 would dirty it, and every node above it, every frame. gpui-fast avoids that
@@ -336,11 +449,31 @@ primitive into a copy.
 
 ## What an application must do
 
-Nothing, as long as what a view renders comes from entities, globals, and
-list or scroll state. Anything else a view reads (an `Rc<RefCell<..>>` shared
-outside entities, the time, `window.modifiers()`) must be followed by
-`cx.notify()` when it changes. Upstream already requires the same thing of
-cached views.
+Reusing a view is safe only if gpui-fast learns about every change to state
+that affects what the view draws:
+
+```text
+safe reuse  requires  every change that affects rendering to be observable
+```
+
+This is the boundary of any reactive or incremental system, not something
+particular to gpui-fast.
+
+No application changes are required for state that goes through the
+mechanisms gpui-fast tracks: entities (read, updated and notified), globals,
+`ScrollHandle` and `ListState`, hovers and interactions, and the window's
+pointer position, modifier keys and caps lock. A change to any of them
+invalidates exactly the views that read it.
+
+State that gpui-fast cannot observe remains the application's
+responsibility. Examples are values held in `Rc<RefCell<T>>` or `Cell<T>`
+outside an entity, atomics, thread-local or static mutable state, wall-clock
+time (`Instant::now()`), files or network state, and any other interior
+mutability. These are not unsupported; a view may read them. But their
+changes are invisible to dependency tracking, so whatever changes them must
+also cause a GPUI notification (`cx.notify()` on a view that reads them, or
+an `entity.update` that notifies), or the view keeps showing what it showed
+when it was last built. Upstream already requires the same of cached views.
 
 What still costs a rebuild on every frame is a change on every frame: an
 entity notified, or a global written, during prepaint or paint counts as
@@ -371,6 +504,13 @@ compares the two directly.
 - **`GPUI_VIEW_RETENTION=0`** draws every frame from scratch at runtime, to
   rule retention in or out when something looks wrong in an application.
 
+What these checks establish is that, for the sequences of state changes they
+run, the retained output equals the output drawn from scratch. They exercise
+the dependency tracking thoroughly, but they cannot prove anything about
+state an application reads outside it: a view that reads hidden state which
+changes without a notification is outside what any such test can see (see
+[What an application must do](#what-an-application-must-do)).
+
 ## Costs and limits
 
 - **Memory.** Each frame keeps a record per retained subtree, and Taffy keeps
@@ -380,8 +520,8 @@ compares the two directly.
   is linear in the size of what is reused. It is much cheaper than building
   it again, but not free, so a window that changes everywhere every frame
   gains little (see the "all sixty" row below).
-- **State outside entities.** A view that reads state GPUI cannot see must
-  notify, as described above.
+- **Untracked state.** A view that reads state gpui-fast cannot observe needs
+  a notification when it changes, as described above.
 - **Fingerprints.** Whether a retained node's style changed is decided by a
   64-bit fingerprint of the style. Release builds trust it; debug builds
   compare every match in full to catch a field the fingerprint misses.
