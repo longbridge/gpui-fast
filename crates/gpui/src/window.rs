@@ -65,8 +65,6 @@ use uuid::Uuid;
 pub(crate) mod a11y;
 mod prompts;
 
-use crate::fast::retained::{EnclosingRetained, RetainedState, RetainedSubtrees};
-
 pub use a11y::A11ySubtreeBuilder;
 
 use self::a11y::A11y;
@@ -978,7 +976,7 @@ pub(crate) struct DeferredDraw {
     pub(crate) absolute_offset: Point<Pixels>,
     pub(crate) prepaint_range: Range<PrepaintStateIndex>,
     pub(crate) paint_range: Range<PaintIndex>,
-    pub(crate) enclosing_retained: EnclosingRetained,
+    pub(crate) enclosing_retained: crate::fast::retained::EnclosingRetained,
 }
 
 pub(crate) struct Frame {
@@ -1002,7 +1000,7 @@ pub(crate) struct Frame {
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) inspector_hitboxes: FxHashMap<HitboxId, crate::InspectorElementId>,
     pub(crate) tab_stops: TabStopMap,
-    pub(crate) retained: RetainedSubtrees,
+    pub(crate) retained: crate::fast::retained::RetainedSubtrees,
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -1053,7 +1051,7 @@ impl Frame {
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector_hitboxes: FxHashMap::default(),
             tab_stops: TabStopMap::default(),
-            retained: RetainedSubtrees::default(),
+            retained: crate::fast::retained::RetainedSubtrees::default(),
         }
     }
 
@@ -1174,7 +1172,7 @@ pub struct Window {
     pub(crate) root: Option<AnyView>,
     pub(crate) element_id_stack: SmallVec<[ElementId; 32]>,
     pub(crate) global_ids: crate::fast::global_id::GlobalIdCache,
-    pub(crate) retained_state: RetainedState,
+    pub(crate) retained_state: crate::fast::retained::RetainedState,
     pub(crate) text_style_stack: Vec<TextStyleRefinement>,
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
@@ -2042,7 +2040,7 @@ impl Window {
             root: None,
             element_id_stack: SmallVec::default(),
             global_ids: Default::default(),
-            retained_state: RetainedState::new(cx),
+            retained_state: crate::fast::retained::RetainedState::new(cx),
             text_style_stack: Vec::new(),
             rendered_entity_stack: Vec::new(),
             element_offset_stack: Vec::new(),
@@ -3776,7 +3774,7 @@ impl Window {
                     absolute_offset: deferred_draw.absolute_offset,
                     prepaint_range: deferred_draw.prepaint_range.clone(),
                     paint_range: deferred_draw.paint_range.clone(),
-                    enclosing_retained: EnclosingRetained::default(),
+                    enclosing_retained: crate::fast::retained::EnclosingRetained::default(),
                 }),
         );
     }

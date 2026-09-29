@@ -51,7 +51,7 @@ impl List {
 
 /// The list state that views must hold on behalf of the list element.
 #[derive(Clone)]
-pub struct ListState(Rc<RefCell<StateInner>>);
+pub struct ListState(pub(crate) Rc<RefCell<StateInner>>);
 
 impl std::fmt::Debug for ListState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -59,11 +59,11 @@ impl std::fmt::Debug for ListState {
     }
 }
 
-struct StateInner {
+pub(crate) struct StateInner {
     last_layout_bounds: Option<Bounds<Pixels>>,
     last_padding: Option<Edges<Pixels>>,
     items: SumTree<ListItem>,
-    logical_scroll_top: Option<ListOffset>,
+    pub(crate) logical_scroll_top: Option<ListOffset>,
     alignment: ListAlignment,
     overdraw: Pixels,
     reset: bool,
@@ -72,8 +72,8 @@ struct StateInner {
     scrollbar_drag_start_height: Option<Pixels>,
     measuring_behavior: ListMeasuringBehavior,
     pending_scroll: Option<PendingScroll>,
-    follow_state: FollowState,
-    version: crate::fast::dependencies::StateVersion,
+    pub(crate) follow_state: FollowState,
+    pub(crate) version: crate::fast::dependencies::StateVersion,
 }
 
 /// Deferred scroll adjustment applied after the scroll-top item has been remeasured.
@@ -120,7 +120,7 @@ pub enum FollowMode {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum FollowState {
+pub(crate) enum FollowState {
     #[default]
     Normal,
     Tail {
@@ -653,8 +653,7 @@ impl ListState {
     /// diagram) and the current position should stay put rather than snapping
     /// to the end.
     pub fn pause_following_tail(&self) {
-        let following = self.0.borrow().follow_state != FollowState::Normal;
-        self.0.borrow().version.bump_if(following);
+        self.0.borrow().note_following_paused();
         self.0.borrow_mut().follow_state.stop_following();
     }
 
@@ -681,9 +680,7 @@ impl ListState {
             state.follow_state.stop_following();
         }
 
-        let moved = scroll_top.moves_from(state.logical_scroll_top, &state.pending_scroll);
-        let changed = moved || state.follow_state != follow_state;
-        state.version.bump_if(changed);
+        state.note_scrolled_to(&scroll_top, follow_state, state.pending_scroll.is_some());
         state.rebase_pending_scroll(scroll_top);
         state.logical_scroll_top = Some(scroll_top);
     }

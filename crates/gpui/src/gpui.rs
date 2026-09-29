@@ -12,8 +12,6 @@ mod app;
 mod arena;
 mod asset_cache;
 mod assets;
-// gpui-fast replaces the bounds tree with one that replays last frame's
-// orderings, which is what drawing a retained view again costs most.
 #[path = "fast/bounds_tree.rs"]
 mod bounds_tree;
 mod color;

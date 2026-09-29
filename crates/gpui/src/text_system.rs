@@ -536,9 +536,6 @@ impl WindowTextSystem {
         let mut process_line = |line_text: SharedString, line_start, line_end| {
             font_runs.clear();
 
-            // Most lines carry one decoration run, and highlighted ones a
-            // handful; reserving for the worst case allocated two kilobytes on
-            // every measurement, which is much of what a short line costs.
             let mut decoration_runs = <Vec<DecorationRun>>::with_capacity(4);
             let mut run_start = line_start;
             while run_start < line_end {

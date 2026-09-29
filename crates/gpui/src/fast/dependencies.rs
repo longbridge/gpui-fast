@@ -634,26 +634,44 @@ impl StateVersion {
     }
 }
 
+impl crate::StateInner {
+    /// Marks the list's state changed if pausing it stops it following its
+    /// tail. See [`crate::ListState::pause_following_tail`].
+    pub(crate) fn note_following_paused(&self) {
+        self.version
+            .bump_if(self.follow_state != crate::FollowState::Normal);
+    }
+
+    /// Marks the list's state changed if scrolling it to `scroll_top` moved it
+    /// or stopped it following, `follow_state` being how it followed before
+    /// and `pending` whether a scroll was waiting to be applied.
+    /// See [`crate::ListState::scroll_to`].
+    pub(crate) fn note_scrolled_to(
+        &self,
+        scroll_top: &ListOffset,
+        follow_state: crate::FollowState,
+        pending: bool,
+    ) {
+        let moved = scroll_top.moves_from(self.logical_scroll_top, pending);
+        self.version
+            .bump_if(moved || self.follow_state != follow_state);
+    }
+}
+
 impl ListOffset {
-    /// Whether scrolling a list scrolled to `current`, with `pending_scroll`,
-    /// to this offset changes where it is scrolled to.
+    /// Whether scrolling a list scrolled to `current`, with a scroll `pending`
+    /// or not, to this offset changes where it is scrolled to.
     ///
     /// Scrolling to where it already is, as a view that scrolls its list
     /// while rendering does every frame, changes nothing.
-    pub(crate) fn moves_from<P>(
-        &self,
-        current: Option<ListOffset>,
-        pending_scroll: &Option<P>,
-    ) -> bool {
+    pub(crate) fn moves_from(&self, current: Option<ListOffset>, pending: bool) -> bool {
         let unchanged = current.is_some_and(|current| {
             current.item_ix == self.item_ix && current.offset_in_item == self.offset_in_item
-        }) && pending_scroll.is_none();
+        }) && !pending;
         !unchanged
     }
 }
 
-/// `states` once each, at the earliest version read, so that a change in
-/// between still counts.
 /// The union of two sorted lists without repeats, itself sorted and without
 /// repeats. When one holds all of the other, which is the usual case — a
 /// view's paint reads what its prepaint read — it is shared, not copied.
@@ -698,6 +716,8 @@ pub(crate) fn merge_sorted<T: Ord + Copy>(a: &Rc<[T]>, b: &Rc<[T]>) -> Rc<[T]> {
     merged.into()
 }
 
+/// `states` once each, at the earliest version read, so that a change in
+/// between still counts.
 fn dedup_states(states: &[(StateVersion, u64)]) -> Rc<[(StateVersion, u64)]> {
     if states.is_empty() {
         return Rc::new([]);

@@ -1,3 +1,7 @@
+//! gpui-fast's bounds tree, which `gpui.rs` puts in place of upstream's
+//! `bounds_tree.rs`: it stays balanced, and replays last frame's orderings,
+//! which is what drawing a retained view again costs most.
+
 use crate::{Bounds, Half};
 use std::{
     cmp,

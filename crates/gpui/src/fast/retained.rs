@@ -1487,3 +1487,14 @@ impl HitboxId {
             || (!window.last_input_was_keyboard() && self.hit_test(window))
     }
 }
+
+impl Window {
+    /// Prepares an element drawn outside of the window's frames, as
+    /// [`crate::VisualTestContext::draw`] draws one. What tells retained
+    /// subtrees what changed since they were drawn is the window's frames, so
+    /// nothing is drawn again from an earlier frame.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn draw_outside_frames(&mut self) {
+        self.refreshing = true;
+    }
+}

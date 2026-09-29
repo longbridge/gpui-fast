@@ -369,8 +369,6 @@ fn paint_line(
         let mut current_underline: Option<(Point<Pixels>, UnderlineStyle)> = None;
         let mut current_strikethrough: Option<(Point<Pixels>, StrikethroughStyle)> = None;
         let text_system = cx.text_system().clone();
-        // Nothing painted below changes the content mask, and a run's glyphs
-        // share their rendering, so neither is worked out again per glyph.
         let content_mask = window.content_mask();
         let mut glyph_painter = crate::fast::glyphs::LineGlyphPainter::new(window);
         let mut glyph_origin = point(
