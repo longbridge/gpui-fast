@@ -11,8 +11,9 @@ design is in [`architecture.md`](architecture.md).
 
 A frame walks the element tree three times: **request_layout** renders views
 and asks for layout, **prepaint** computes layout and places elements,
-**paint** turns them into the scene handed to the GPU. Upstream GPUI does all
-three from scratch every frame.
+**paint** turns them into the scene handed to the GPU. Upstream GPUI normally
+does all three from scratch every frame, except where an explicitly cached
+view is reused.
 
 ### Views
 

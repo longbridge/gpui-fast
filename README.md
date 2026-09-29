@@ -27,9 +27,9 @@ Every change here keeps to two rules:
 ## Retained Mode
 
 [GPUI](https://gpui.rs), the UI framework of the [Zed](https://github.com/zed-industries/zed)
-editor, draws in immediate mode: when a frame is requested, it renders every
-view, builds a fresh layout tree, lays it out, shapes its text, and paints the
-frame again, even when almost nothing changed. gpui-fast keeps what the last
+editor, draws in immediate mode: outside subtrees an application explicitly
+caches, a frame renders every view, builds a fresh layout tree, lays it out,
+shapes its text, and paints the frame again, even when almost nothing changed. gpui-fast keeps what the last
 frame worked out and redoes only what changed since. The existing GPUI API is
 unchanged, so applications draw less without rewriting their UI code; state
 read from outside entities, globals and list or scroll state needs a
@@ -37,8 +37,9 @@ read from outside entities, globals and list or scroll state needs a
 
 A frame walks the element tree three times: **request_layout** renders views
 and asks for layout, **prepaint** computes layout and places elements,
-**paint** turns them into the scene handed to the GPU. Upstream does all
-three from scratch.
+**paint** turns them into the scene handed to the GPU. Upstream normally
+does all three from scratch, except where an explicitly cached view is
+reused.
 gpui-fast retains two things:
 
 | What is retained | Drawn again from the last frame while                                                                                                                                                                                                                                           |

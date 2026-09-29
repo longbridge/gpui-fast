@@ -15,12 +15,13 @@ a new element tree, lays out a new Taffy tree, shapes the text and paints the
 scene, even when one number in one table cell changed. The cost of a frame
 is close to the cost of the whole window, not the cost of what changed.
 
-gpui-fast makes a frame cost what changed. When nothing a view depends on has
-changed, the view is not rendered, not laid out, not prepainted and not
-painted; its output is taken from the last frame.
+gpui-fast moves the cost of a frame from the cost of the whole window toward
+the cost of what changed. When nothing a view depends on has changed, the
+view is not rendered, not laid out, not prepainted and not painted; its
+output is taken from the last frame.
 
 It does this without turning GPUI into a conventional retained-mode
-framework. GPUI still constructs every frame through its normal element
+framework. What is rebuilt is still constructed through GPUI's normal element
 pipeline. gpui-fast associates the elements of the new frame with work the
 previous frame produced, records what that work depended on, and for each
 view chooses to:
@@ -88,14 +89,18 @@ generalizes that existing mechanism:
 ## Identity: how an element is found again
 
 Anything kept across frames has to be matched with the element that asks for
-it on the next frame. The element and view hierarchy is still created anew
-each frame; what persists is keyed to it:
+it on the next frame. gpui-fast does not keep a parallel persistent element or
+view hierarchy. When a view is rebuilt, its elements are constructed again
+through GPUI's normal pipeline; when it is reused, its interior is not
+constructed at all, and its output and the records of the views nested in it
+are copied from the last frame. What persists is keyed by each view's
+`GlobalElementId`:
 
 ```text
-the frame being drawn constructs its elements and views
+a view is reached while the frame is drawn
         │
         ▼
-GlobalElementId of each view
+its GlobalElementId
         │
         ▼
 the RetainedSubtree the previous frame recorded for it
