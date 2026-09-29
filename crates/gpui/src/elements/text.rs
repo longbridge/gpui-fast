@@ -644,17 +644,11 @@ impl TextLayout {
         } else {
             vec![text_style.to_run(text.len())]
         };
-        let inputs = crate::fast::text::TextMeasureInputs::new(
-            &text,
-            &runs,
-            &text_style,
-            font_size,
-            line_height,
-        );
-        crate::fast::text::request_text_layout(self, inputs, window, {
-            let element_state = self.clone();
-
+        let inputs =
+            crate::fast::text::TextMeasureInputs::new(text, runs, text_style, self, window);
+        crate::fast::text::request_text_layout(inputs.clone(), window, {
             move |known_dimensions, available_space, window, cx| {
+                let (text, runs, text_style, element_state) = inputs.parts();
                 let wrap_width = if text_style.white_space == WhiteSpace::Normal {
                     known_dimensions.width.or(match available_space.width {
                         crate::AvailableSpace::Definite(x) => Some(x),

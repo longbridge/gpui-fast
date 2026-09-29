@@ -13,80 +13,110 @@ use std::{
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
-/// Everything a text element's measurement is taken from. Two measurements
-/// taken from equal inputs come out the same, whatever space they are given.
-#[derive(PartialEq)]
+/// Everything a text element's measurement is taken from, and the layout it
+/// keeps the measurement in. Two measurements taken from equal inputs come out
+/// the same, whatever space they are given.
+///
+/// The element hands its text, runs and style over rather than copying them:
+/// its measurement closure reads them from here, and the next frame's element
+/// at the same place compares its own against them.
 pub(crate) struct TextMeasureInputs {
     text: SharedString,
     runs: Vec<TextRun>,
     text_style: TextStyle,
     font_size: Pixels,
     line_height: Pixels,
-}
-
-impl TextMeasureInputs {
-    pub(crate) fn new(
-        text: &SharedString,
-        runs: &[TextRun],
-        text_style: &TextStyle,
-        font_size: Pixels,
-        line_height: Pixels,
-    ) -> Self {
-        Self {
-            text: text.clone(),
-            runs: runs.to_vec(),
-            text_style: text_style.clone(),
-            font_size,
-            line_height,
-        }
-    }
-}
-
-/// A text element's measurement, carried to the next frame's element at the
-/// same place for it to take over.
-struct TextMeasurement {
-    inputs: TextMeasureInputs,
     layout: TextLayout,
 }
 
+impl TextMeasureInputs {
+    /// Takes over what `layout`'s element measures its text from. The sizes
+    /// the element works out of `text_style` are worked out again here, so
+    /// that the element hands over only what it would otherwise copy.
+    pub(crate) fn new(
+        text: SharedString,
+        runs: Vec<TextRun>,
+        text_style: TextStyle,
+        layout: &TextLayout,
+        window: &Window,
+    ) -> Rc<Self> {
+        let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let line_height = window.pixel_snap(
+            text_style
+                .line_height
+                .to_pixels(font_size.into(), window.rem_size()),
+        );
+        Rc::new(Self {
+            text,
+            runs,
+            text_style,
+            font_size,
+            line_height,
+            layout: layout.clone(),
+        })
+    }
+
+    /// What the measurement closure reads.
+    pub(crate) fn parts(&self) -> (&SharedString, Runs<'_>, &TextStyle, &TextLayout) {
+        (&self.text, Runs(&self.runs), &self.text_style, &self.layout)
+    }
+
+    /// Whether a measurement of `self` would come out as one of `other`.
+    fn measures_as(&self, other: &Self) -> bool {
+        self.font_size == other.font_size
+            && self.line_height == other.line_height
+            && self.text == other.text
+            && self.runs == other.runs
+            && self.text_style == other.text_style
+    }
+}
+
+/// The runs a measurement closure reads, which it borrows as the slice they
+/// dereference to, as it did when it owned them.
+#[derive(Clone, Copy)]
+pub(crate) struct Runs<'a>(&'a [TextRun]);
+
+impl std::ops::Deref for Runs<'_> {
+    type Target = [TextRun];
+
+    fn deref(&self) -> &[TextRun] {
+        self.0
+    }
+}
+
 /// Requests the layout of a text element whose measurement `measure` takes
-/// from `inputs` and keeps in `layout`.
+/// from `inputs` and keeps in their layout.
 ///
 /// A measured node is given a new closure every frame, and would be dirtied
 /// for it, with every node above it: a view built again would have all of its
 /// text measured and laid out again, though none of it changed. When last
 /// frame's element at this place measured the same inputs, its measurement is
-/// copied into `layout` instead, and the node is left clean, keeping what
-/// Taffy cached for it. The new closure is still installed, for when Taffy
-/// measures it again under other constraints.
+/// copied into this one's layout instead, and the node is left clean, keeping
+/// what Taffy cached for it. The new closure is still installed, for when
+/// Taffy measures it again under other constraints.
 pub(crate) fn request_text_layout(
-    layout: &TextLayout,
-    inputs: TextMeasureInputs,
+    inputs: Rc<TextMeasureInputs>,
     window: &mut Window,
     measure: impl Fn(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
     + 'static,
 ) -> LayoutId {
-    let measurement = Rc::new(TextMeasurement {
-        inputs,
-        layout: layout.clone(),
-    });
     let adopt = {
-        let measurement = measurement.clone();
+        let inputs = inputs.clone();
         move |previous: &dyn Any| {
-            let Some(previous) = previous.downcast_ref::<TextMeasurement>() else {
+            let Some(previous) = previous.downcast_ref::<TextMeasureInputs>() else {
                 return false;
             };
-            if previous.inputs != measurement.inputs {
+            if !previous.measures_as(&inputs) {
                 return false;
             }
             let Some(inner) = previous.layout.0.borrow().as_ref().map(copy_measurement) else {
                 return false;
             };
-            *measurement.layout.0.borrow_mut() = Some(inner);
+            *inputs.layout.0.borrow_mut() = Some(inner);
             true
         }
     };
-    window.request_carried_measured_layout(measurement, adopt, measure)
+    window.request_carried_measured_layout(inputs, adopt, measure)
 }
 
 /// A copy of what a measurement left, without where it was last painted.
