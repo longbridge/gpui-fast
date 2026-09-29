@@ -218,6 +218,24 @@ def fast_globs(paths):
     return found
 
 
+# A `use` of `fast` outside a `fast/` directory, restricted or not; only a
+# public `pub use` export is allowed there.
+USE_OF_FAST = re.compile(rb"^\s*(pub\s*\([^)]*\)\s*)?use\s+[^;]*\bfast::")
+
+
+def fast_imports(paths):
+    """Finds `use ...fast::...` lines outside `src/fast/`, where fast code is named by its full path."""
+    found = []
+    for path in paths:
+        if not path.endswith(".rs") or "/src/fast/" in path:
+            continue
+        with open(os.path.join(ROOT, path), "rb") as file:
+            for number, line in enumerate(file, 1):
+                if USE_OF_FAST.search(line):
+                    found.append(f"{path}:{number}")
+    return found
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--zed", metavar="PATH", help="compare against a zed checkout at the recorded zed_commit")
@@ -319,7 +337,11 @@ def main():
     for location in globs:
         print(f"FAIL: {location}: glob import from `fast`; name `crate::fast::<topic>::Name` instead")
     violations += len(globs)
-    if globs:
+    imports = fast_imports(path for path in ours if os.path.isfile(os.path.join(ROOT, path)))
+    for location in imports:
+        print(f"FAIL: {location}: `use` of `fast` outside `fast/`; write `crate::fast::<topic>::Name` where it is used")
+    violations += len(imports)
+    if globs or imports:
         print()
     source = f"{args.zed} at {commit[:10]}" if args.zed else f"import commit {commit[:10]}"
     print(

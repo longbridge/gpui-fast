@@ -25,17 +25,20 @@ only hold the hooks that call into it.
    - a visibility bump (`fn` to `pub(crate) fn`) so a `fast/` module can reach
      upstream's items. Methods of upstream types can be defined in an
      `impl Window { ... }` block inside a `fast/` file;
-   - `mod` and `use` lines;
+   - `mod` lines;
    - a `#[path = "fast/<file>.rs"] mod <name>;` redirect when we replaced a
      whole upstream file with our own rewrite. The upstream file then stays
      exactly as upstream has it, unused.
 3. **No new types, algorithms, bookkeeping or tests in upstream files.** No
    reformatting, reordering or renaming of upstream code either: code we don't
    need to change stays byte-for-byte upstream's.
-4. **Name fast code by its full path.** No glob imports or re-exports of
-   `fast` (`pub use fast::*`, `use crate::fast::layout::*`): write
-   `crate::fast::<topic>::Name`, or `use crate::fast::<topic>::{..}` with the
-   names listed, so every use shows where the code lives.
+4. **Name fast code by its full path.** Outside `fast/`, write
+   `crate::fast::<topic>::Name` where it is used, never a
+   `use crate::fast::…` line, so every hook shows where its code lives. The
+   one exception is `gpui.rs` exporting a `test-support` item one at a time
+   (rule 5). Inside `fast/`, listing names in a `use` line is fine. Glob
+   imports or re-exports of `fast` (`pub use fast::*`,
+   `use crate::fast::layout::*`) are never allowed.
 5. **No new public API.** gpui-fast changes how GPUI draws, not what it offers:
    its public API is upstream's. What tests and `gpui_perf` need to measure or
    switch retained mode is compiled only under `test-support`, and exported
@@ -70,7 +73,9 @@ working tree, so run it before committing. It fails when:
   more than 20 (`--max-removed`);
 - a binary file differs;
 - any file, `fast/` included, glob-imports from `fast` (`use ...fast::*`,
-  `use ...fast::<topic>::*`).
+  `use ...fast::<topic>::*`);
+- a file outside `fast/` has a `use` of `fast` at all (`use crate::fast::…`,
+  `pub(crate) use …`): only a public `pub use fast::…` export passes.
 
 Apart from the glob rule, files under any `src/fast/` directory are never
 checked. A line that differs from upstream's only by a visibility bump
