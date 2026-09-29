@@ -302,3 +302,27 @@ fn replacing_decorations_in_place_lands_where_reshaping_would() {
     })
     .unwrap();
 }
+
+/// A layout something still holds from an earlier frame keeps what it was
+/// measured to, though the next frame's element takes the measurement over.
+#[test]
+fn a_text_layout_held_from_an_earlier_frame_keeps_its_lines() {
+    let mut cx = TestAppContext::single();
+    let window = probed(&mut cx, 1000., false);
+    draw(&mut cx, window.into());
+    let held = window
+        .update(&mut cx, |view, _, _| view.layout.borrow().clone().unwrap())
+        .unwrap();
+    let stats = change_probed(&mut cx, window, |_| {});
+    assert!(
+        stats.measurements_kept > 0,
+        "the next frame should take the measurement over: {stats:?}"
+    );
+    let lines = held
+        .0
+        .borrow()
+        .as_ref()
+        .map(|inner| inner.lines.len())
+        .unwrap_or(0);
+    assert_eq!(lines, 1, "the held layout should still have its line");
+}

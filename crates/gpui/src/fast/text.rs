@@ -160,7 +160,7 @@ pub(crate) fn layout_text(
             if recolored && inputs.truncates() {
                 return false;
             }
-            let Some(mut inner) = previous.layout.0.borrow().as_ref().map(copy_measurement) else {
+            let Some(mut inner) = take_measurement(&previous.layout) else {
                 return false;
             };
             if recolored {
@@ -368,6 +368,20 @@ pub(crate) fn update_decoration_runs(lines: &mut [WrappedLine], runs: &[TextRun]
             }
         }
     }
+}
+
+/// What `layout`'s measurement left, without where it was last painted, for
+/// this frame's element to take over. Last frame's element is gone, so when
+/// nothing but its measurement holds its layout any more, the measurement is
+/// moved out rather than copied, line by line; otherwise it is copied, and
+/// whatever holds the layout still finds it.
+fn take_measurement(layout: &TextLayout) -> Option<TextLayoutInner> {
+    if Rc::strong_count(&layout.0) == 1 {
+        let mut inner = layout.0.borrow_mut().take()?;
+        inner.bounds = None;
+        return Some(inner);
+    }
+    layout.0.borrow().as_ref().map(copy_measurement)
 }
 
 /// A copy of what a measurement left, without where it was last painted.
