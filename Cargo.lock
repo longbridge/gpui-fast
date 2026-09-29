@@ -3202,6 +3202,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "smol",
 ]
 
 [[package]]

@@ -20,7 +20,8 @@
 //!
 //! With `--auto`, it runs every scenario with retained views on and then off,
 //! prints what each cost per frame, and quits. `--only <scenario>`,
-//! `--retention on|off` and `--frames <n>` narrow it down.
+//! `--retention on|off` and `--frames <n>` narrow it down. On macOS it holds
+//! the CPU's clock up while it measures; see `clock.rs`.
 //!
 //! Built with the `upstream` feature it runs on upstream GPUI, the
 //! `gpui-pre` snapshot GPUI Kit pins, for comparison; see `backend.rs`.
@@ -28,6 +29,7 @@
 mod app_state;
 mod auto;
 mod backend;
+pub mod clock;
 mod controls;
 mod metrics;
 mod pages;

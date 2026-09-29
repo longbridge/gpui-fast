@@ -30,6 +30,8 @@
 //!   cost, and quit.
 //! - `--only <scenario>`, `--retention on|off`, `--frames N`: narrow `--auto`
 //!   down.
+//! - `--no-hold-clock`: on macOS, measure `--auto` without holding the CPU's
+//!   clock up; see `showcase/clock.rs`.
 //!
 //! Headless flags:
 //!
@@ -68,7 +70,7 @@ use gpui_perf::runner::{self, Options, RetentionModes};
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const USAGE: &str = "usage: gpui_perf [--demo | --auto [--only SCENARIO] [--retention on|off] [--frames N]]\n       \
+const USAGE: &str = "usage: gpui_perf [--demo | --auto [--only SCENARIO] [--retention on|off] [--frames N] [--no-hold-clock]]\n       \
 gpui_perf --headless [--scenario SUBSTRING]... [--frames N] [--warmup N] \
 [--retention on|off|both] [--json PATH] [--verify] [--list]";
 
@@ -77,6 +79,12 @@ fn main() -> ExitCode {
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
         println!("{USAGE}");
         return ExitCode::SUCCESS;
+    }
+    if args
+        .iter()
+        .any(|arg| arg == showcase::clock::HOLD_CLOCK_FLAG)
+    {
+        showcase::clock::hold();
     }
     if !args.iter().any(|arg| arg == "--headless") {
         showcase::run(

@@ -9,8 +9,10 @@ use std::cell::RefCell;
 use gpui::{App, Window};
 
 use super::{
-    BUTTON_PAGE, Driver, Handles, Scroll, backend, list_page,
-    metrics::{Cost, Sample, main_thread_cpu_time},
+    BUTTON_PAGE, Driver, Handles, Scroll, backend,
+    clock::ClockHold,
+    list_page,
+    metrics::{Cost, Sample, main_thread_cpu_time, main_thread_instructions},
     table_page,
 };
 
@@ -51,6 +53,9 @@ struct Result {
     cost: Cost,
     p50: f64,
     p95: f64,
+    /// Main-thread instructions per frame, the median, where the platform
+    /// counts them.
+    instructions_p50: Option<f64>,
 }
 
 pub struct AutoRun {
@@ -63,7 +68,11 @@ pub struct AutoRun {
     started: Option<Sample>,
     frame_cpu: Vec<f64>,
     last_cpu: Option<Duration>,
+    frame_instructions: Vec<u64>,
+    last_instructions: Option<u64>,
     results: Vec<Result>,
+    /// Holds the CPU's clock up while the scenarios run.
+    clock: ClockHold,
 }
 
 impl AutoRun {
@@ -104,7 +113,10 @@ impl AutoRun {
             started: None,
             frame_cpu: Vec::new(),
             last_cpu: None,
+            frame_instructions: Vec::new(),
+            last_instructions: None,
             results: Vec::new(),
+            clock: ClockHold::start(),
         }
     }
 
@@ -117,7 +129,9 @@ impl AutoRun {
         cx: &mut App,
     ) -> bool {
         let Some(&(scenario, retention)) = self.runs.get(self.index) else {
-            self.report();
+            let clock_held = self.clock.is_holding();
+            self.clock.stop();
+            self.report(clock_held);
             cx.quit();
             return false;
         };
@@ -150,15 +164,21 @@ impl AutoRun {
         }
 
         let cpu = main_thread_cpu_time();
+        let instructions = main_thread_instructions();
         if self.frame == WARMUP_FRAMES {
             self.started = Some(Sample::take(window));
             self.frame_cpu.clear();
-        } else if self.frame > WARMUP_FRAMES
-            && let Some(last) = self.last_cpu
-        {
-            self.frame_cpu.push((cpu - last).as_secs_f64() * 1e3);
+            self.frame_instructions.clear();
+        } else if self.frame > WARMUP_FRAMES {
+            if let Some(last) = self.last_cpu {
+                self.frame_cpu.push((cpu - last).as_secs_f64() * 1e3);
+            }
+            if let Some((last, now)) = self.last_instructions.zip(instructions) {
+                self.frame_instructions.push(now - last);
+            }
         }
         self.last_cpu = Some(cpu);
+        self.last_instructions = instructions;
 
         self.frame += 1;
         if self.frame > WARMUP_FRAMES + self.measured_frames {
@@ -171,29 +191,37 @@ impl AutoRun {
                     .copied()
                     .unwrap_or(0.)
             };
+            let mut frame_instructions = std::mem::take(&mut self.frame_instructions);
+            frame_instructions.sort_unstable();
             self.results.push(Result {
                 scenario,
                 retention,
                 cost,
                 p50: percentile(0.5),
                 p95: percentile(0.95),
+                instructions_p50: frame_instructions
+                    .get(frame_instructions.len() / 2)
+                    .map(|&n| n as f64),
             });
             self.index += 1;
             self.frame = 0;
             self.last_cpu = None;
+            self.last_instructions = None;
         }
         true
     }
 
-    fn report(&self) {
+    fn report(&self, clock_held: bool) {
         println!(
-            "\n{:<16} {:>9} {:>6} {:>9} {:>9} {:>7} {:>8} {:>8} {:>9} {:>8} {:>8} {:>6} {:>6}",
+            "\n{:<16} {:>9} {:>6} {:>9} {:>9} {:>9} {:>7} {:>7} {:>8} {:>8} {:>9} {:>8} {:>8} {:>6} {:>6}",
             "scenario",
             "retention",
             "fps",
             "cpu p50",
             "cpu p95",
+            "instr p50",
             "proc",
+            "p-cores",
             "memory",
             "build",
             "prepaint",
@@ -208,7 +236,7 @@ impl AutoRun {
             let cost = &result.cost;
             let phases = cost.phases;
             println!(
-                "{:<16} {:>9} {:>6.0} {:>7.2}ms {:>7.2}ms {:>6.0}% {:>8} {:>8} {:>9} {:>8} {:>8} {:>6} {:>6}",
+                "{:<16} {:>9} {:>6.0} {:>7.2}ms {:>7.2}ms {:>9} {:>6.0}% {:>7} {:>8} {:>8} {:>9} {:>8} {:>8} {:>6} {:>6}",
                 format!("{:?}", result.scenario),
                 match result.retention {
                     Some(true) => "on",
@@ -218,7 +246,12 @@ impl AutoRun {
                 cost.fps,
                 result.p50,
                 result.p95,
+                result
+                    .instructions_p50
+                    .map_or("-".to_string(), |n| format!("{:.1}M", n / 1e6)),
                 cost.process_cpu_percent,
+                cost.performance_core_percent
+                    .map_or("-".to_string(), |percent| format!("{percent:.0}%")),
                 cost.memory_mib
                     .map_or("-".to_string(), |mib| format!("{mib:.0}MB")),
                 ms(phases.map(|p| p.build_ms)),
@@ -230,9 +263,17 @@ impl AutoRun {
             );
         }
         println!(
-            "\ncpu p50/p95: main thread CPU per frame. proc: the whole process, render threads \
-             included. memory: the process's resident memory at the end. build, prepaint, paint: per frame; layout is Taffy's share of prepaint. \
+            "\ncpu p50/p95: main thread CPU per frame. instr p50: main thread instructions per \
+             frame, which unlike CPU time do not depend on the core or the clock the thread got. \
+             proc: the whole process, render threads included. p-cores: the share of the \
+             process's CPU time on performance cores. memory: the process's memory at the end, resident on Linux, its footprint on macOS. build, prepaint, paint: per frame; layout is Taffy's share of prepaint. \
              built, reused: views per frame. \"-\": not counted by upstream GPUI."
         );
+        if clock_held {
+            println!(
+                "Measured with a helper process holding the CPU's clock up; \
+                 --no-hold-clock measures without it."
+            );
+        }
     }
 }

@@ -43,3 +43,4 @@ gpui_pre_platform = { package = "gpui-pre-platform", version = "=0.3.7", feature
 serde.workspace = true
 serde_json.workspace = true
 libc.workspace = true
+smol.workspace = true

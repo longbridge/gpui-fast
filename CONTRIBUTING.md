@@ -61,8 +61,9 @@ setting one up.
   rows every 33 ms, and `Retained views` (`V`). The arrow keys move through
   the sidebar.
 - The status bar shows, every half second: frames per second, the CPU of the
-  whole process and of the main thread, the process's resident memory (on
-  Linux), what the main thread spent per frame
+  whole process and of the main thread, on macOS the share of that CPU time
+  spent on performance cores, the process's memory (resident on Linux, its
+  footprint on macOS), what the main thread spent per frame
   and on build, prepaint, layout (Taffy's share of prepaint) and paint, and how
   many views were built and reused per frame.
 
@@ -74,6 +75,19 @@ what each cost per frame, and quits:
 cargo run -p gpui_perf --release -- --auto
 cargo run -p gpui_perf --release -- --auto --only ScrollPage --retention on --frames 1000
 ```
+
+On macOS, `--auto` holds the CPU's clock up while it measures, with a helper
+process spinning on a performance core, as the performance governor does on
+Linux. Without it macOS runs a lightly loaded process on efficiency cores and
+at low clocks, so the less work a frame does, the longer each instruction of
+it takes: CPU time per frame differs twofold from one run of the same build
+to the next, and retained views can report as much CPU time as drawing from
+scratch while retiring 40% fewer instructions. `--no-hold-clock` measures
+without the helper, as an application runs. The report also gives the main
+thread's instructions per frame (`instr p50`), which do not depend on the
+clock, and the share of the process's CPU time spent on performance cores
+(`p-cores`). The window has to be on screen: with the display asleep or the
+screen locked, no frames are drawn and `--auto` waits.
 
 To profile one scenario, run it for longer under a profiler, for instance
 `samply record ./target/release/gpui_perf --auto --only ScrollPage --frames 5000`.

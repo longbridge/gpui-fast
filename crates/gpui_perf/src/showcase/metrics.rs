@@ -19,6 +19,9 @@ pub struct Sample {
     main_cpu: Duration,
     /// The process's resident memory, in bytes, where the platform says.
     memory: Option<u64>,
+    /// CPU time the process has used so far, in all and on performance
+    /// cores, where the platform says.
+    core_cpu: Option<CoreCpu>,
     frames: u64,
     times: Option<FrameTimes>,
 }
@@ -30,6 +33,7 @@ impl Sample {
             process_cpu: process_cpu_time(),
             main_cpu: main_thread_cpu_time(),
             memory: resident_memory(),
+            core_cpu: core_cpu_time(),
             frames: backend::frames(window),
             times: backend::frame_times(window),
         }
@@ -43,6 +47,10 @@ pub struct Cost {
     pub process_cpu_percent: f64,
     pub main_cpu_percent: f64,
     pub main_cpu_per_frame_ms: f64,
+    /// The share of the process's CPU time spent on performance cores, where
+    /// the platform says. A CPU with efficiency cores takes longer over the
+    /// same work on them, which the CPU times above count in.
+    pub performance_core_percent: Option<f64>,
     /// The process's resident memory at the later sample, in MiB.
     pub memory_mib: Option<f64>,
     /// What GPUI's own counters say, where it has them: gpui-fast does,
@@ -78,6 +86,11 @@ impl Cost {
             process_cpu_percent: (to.process_cpu - from.process_cpu).as_secs_f64() * 100. / seconds,
             main_cpu_percent: (to.main_cpu - from.main_cpu).as_secs_f64() * 100. / seconds,
             main_cpu_per_frame_ms: per_frame(to.main_cpu - from.main_cpu),
+            performance_core_percent: from.core_cpu.zip(to.core_cpu).and_then(|(from, to)| {
+                let all = to.all.checked_sub(from.all)?;
+                let performance = to.performance.checked_sub(from.performance)?;
+                (all > 0).then(|| performance as f64 * 100. / all as f64)
+            }),
             memory_mib: to.memory.map(|bytes| bytes as f64 / (1024. * 1024.)),
             phases: from.times.zip(to.times).map(|(from, to)| PhaseCost {
                 build_ms: per_frame(to.build - from.build),
@@ -190,6 +203,12 @@ pub fn status_bar(stats: &Stats, cx: &App) -> impl IntoElement {
                     value(format!("{:.0}%", cost.main_cpu_percent), |d| d.w_8()).into_any_element(),
                 ],
             ))
+            .when_some(cost.performance_core_percent, |bar, percent| {
+                bar.child(field(
+                    "P-cores",
+                    vec![value(format!("{percent:.0}%"), |d| d.w_8()).into_any_element()],
+                ))
+            })
             .when_some(cost.memory_mib, |bar, memory| {
                 bar.child(field(
                     "Memory",
@@ -266,6 +285,28 @@ fn clock_time(clock: libc::clockid_t) -> Duration {
     }
 }
 
+/// Instructions the calling thread has retired so far, where the CPU counts
+/// them for it. Unlike CPU time, this does not depend on the core the thread
+/// ran on or the clock it ran at.
+#[cfg(target_os = "macos")]
+pub fn main_thread_instructions() -> Option<u64> {
+    // Exported by libsystem_kernel, though not in the SDK's headers: the
+    // kernel's per-thread count of the CPU's performance counters.
+    unsafe extern "C" {
+        fn thread_selfcounts(kind: libc::c_int, buffer: *mut u64, size: usize) -> libc::c_int;
+    }
+    // Kind 1 is instructions and cycles.
+    let mut counts = [0u64; 2];
+    // SAFETY: the buffer holds the two counters kind 1 writes.
+    let status = unsafe { thread_selfcounts(1, counts.as_mut_ptr(), size_of_val(&counts)) };
+    (status == 0).then_some(counts[0])
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn main_thread_instructions() -> Option<u64> {
+    None
+}
+
 #[cfg(not(unix))]
 pub fn main_thread_cpu_time() -> Duration {
     Duration::ZERO
@@ -274,6 +315,70 @@ pub fn main_thread_cpu_time() -> Duration {
 #[cfg(not(unix))]
 fn process_cpu_time() -> Duration {
     Duration::ZERO
+}
+
+/// CPU time the process has used, in the platform's units. Only macOS says
+/// which cores it was spent on.
+#[derive(Clone, Copy)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct CoreCpu {
+    all: u64,
+    /// The part of `all` spent on performance cores.
+    performance: u64,
+}
+
+/// The start of `rusage_info_v6` from `<sys/resource.h>`, up to the fields
+/// read here.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct RusageInfo {
+    uuid: [u8; 16],
+    user_time: u64,
+    system_time: u64,
+    pkg_idle_wkups: u64,
+    interrupt_wkups: u64,
+    pageins: u64,
+    wired_size: u64,
+    resident_size: u64,
+    phys_footprint: u64,
+    /// v0's last two fields, v1 to v5.
+    unread: [u64; 28],
+    user_ptime: u64,
+    system_ptime: u64,
+    /// The rest of v6.
+    rest: [u64; 18],
+}
+
+#[cfg(target_os = "macos")]
+fn rusage_info() -> Option<RusageInfo> {
+    const RUSAGE_INFO_V6: libc::c_int = 6;
+    let mut info = std::mem::MaybeUninit::<RusageInfo>::zeroed();
+    // SAFETY: `info` is as large as the `rusage_info_v6` the call fills in.
+    unsafe {
+        (libc::proc_pid_rusage(libc::getpid(), RUSAGE_INFO_V6, info.as_mut_ptr().cast()) == 0)
+            .then(|| info.assume_init())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn core_cpu_time() -> Option<CoreCpu> {
+    let info = rusage_info()?;
+    Some(CoreCpu {
+        all: info.user_time + info.system_time,
+        performance: info.user_ptime + info.system_ptime,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn core_cpu_time() -> Option<CoreCpu> {
+    None
+}
+
+/// The process's memory footprint, in bytes: what Activity Monitor shows as
+/// its memory.
+#[cfg(target_os = "macos")]
+fn resident_memory() -> Option<u64> {
+    Some(rusage_info()?.phys_footprint)
 }
 
 /// The process's resident memory, in bytes: what it holds in RAM, as a system
@@ -288,7 +393,7 @@ fn resident_memory() -> Option<u64> {
     Some(pages * u64::try_from(page_size).ok()?)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn resident_memory() -> Option<u64> {
     None
 }
