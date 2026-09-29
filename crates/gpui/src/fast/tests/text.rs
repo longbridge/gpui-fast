@@ -290,7 +290,7 @@ fn replacing_decorations_in_place_lands_where_reshaping_would() {
             .shape_text(text.clone(), px(14.), &before, None, None)
             .unwrap();
         let reshaped = system
-            .shape_text(text.clone(), px(14.), &after, None, None)
+            .shape_text(text, px(14.), &after, None, None)
             .unwrap();
         crate::fast::text::update_decoration_runs(&mut recolored, &after);
 
