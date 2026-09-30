@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
+    "compat/gpui-pre",
+    "compat/gpui-pre-macros",
+    "compat/gpui-pre-platform",
+    "compat/gpui-pre-reqwest-client",
+    "compat/gpui-pre-sum-tree",
+    "compat/gpui-pre-web",
     "crates/collections",
     "crates/gpui",
     "crates/gpui_apple",

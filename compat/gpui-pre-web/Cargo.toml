@@ -1,0 +1,19 @@
+[package]
+name = "gpui-pre-web"
+version = "0.3.7"
+description = "gpui-fast's `gpui_web`, under the name and version of the gpui-pre snapshot GPUI Kit pins."
+license = "Apache-2.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "gpui_web"
+path = "lib.rs"
+doctest = false
+
+[features]
+default = ["gpui_fast/default"]
+multithreaded = ["gpui_fast/multithreaded"]
+
+[dependencies]
+gpui_fast = { package = "gpui_web", path = "../../crates/gpui_web", default-features = false }

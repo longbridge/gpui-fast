@@ -1,0 +1,18 @@
+[package]
+name = "gpui-pre-reqwest-client"
+version = "0.3.7"
+description = "gpui-fast's `reqwest_client`, under the name and version of the gpui-pre snapshot GPUI Kit pins."
+license = "Apache-2.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "reqwest_client"
+path = "lib.rs"
+doctest = false
+
+[features]
+test-support = ["gpui_fast/test-support"]
+
+[dependencies]
+gpui_fast = { package = "reqwest_client", path = "../../crates/reqwest_client", default-features = false }
