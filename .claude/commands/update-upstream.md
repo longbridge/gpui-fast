@@ -33,6 +33,8 @@ single squashed import.
 
 - If zed added crates we now need, add them to `tracked` in `UPSTREAM` first
   (uncommitted is fine; the script reads the working tree's `UPSTREAM`).
+  Leave crates zed deleted in `tracked` for the import, so their deletion is
+  replayed; drop them from `tracked` in step 4.
 - Run `script/import-upstream --zed ~/github/zed NEW`. Starting at
   `OLD_VENDOR`, it creates branch `upstream/zed-<short NEW>` in a worktree
   (`../gpui-fast-upstream-<short NEW>`) and replays every zed commit in

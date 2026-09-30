@@ -11,7 +11,9 @@ per zed commit, and the merge into our branch brings their history along.
 
 A directory listed under `tracked` that the import commit doesn't have yet (a
 crate newly taken from zed) is first imported whole, as zed had it at
-`zed_commit`, in a commit of its own.
+`zed_commit`, in a commit of its own; one zed created later comes in with the
+commit that created it. A crate zed deleted stays listed for the import, so its
+deletion is replayed, and is dropped from `tracked` afterwards.
 
 At the end each tracked directory must be identical to zed's at the new
 commit; the script fails otherwise.
@@ -132,7 +134,12 @@ def main():
     git(["worktree", "add", "-b", branch, worktree, base])
     print(f"{branch} at {worktree}, from {base[:7]}; {len(commits)} zed commits to replay")
 
-    new_paths = [path for path in tracked if tree_of(base, path, worktree) is None]
+    # A crate zed created after `zed_commit` comes in with the commit that created it.
+    new_paths = [
+        path
+        for path in tracked
+        if tree_of(base, path, worktree) is None and tree_of(old, path, zed) is not None
+    ]
     if new_paths:
         for path in new_paths:
             import_whole(zed, worktree, old, path)
