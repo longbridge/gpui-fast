@@ -54,6 +54,10 @@ pub unsafe fn new_renderer(
     MetalRenderer::new(context, transparent)
 }
 
+pub fn new_overlay_renderer(context: self::Context, base: &Renderer) -> Renderer {
+    crate::fast::composition::new_overlay_renderer(context, base)
+}
+
 pub struct InstanceBufferPool {
     buffer_size: usize,
     buffers: Vec<metal::Buffer>,
@@ -129,7 +133,7 @@ pub struct MetalRenderer {
     pub(crate) unit_vertices: metal::Buffer,
     #[allow(clippy::arc_with_non_send_sync)]
     pub(crate) instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
-    sprite_atlas: Arc<MetalAtlas>,
+    pub(crate) sprite_atlas: Arc<MetalAtlas>,
     core_video_texture_cache: core_video::metal_texture_cache::CVMetalTextureCache,
     pub(crate) path_intermediate_texture: Option<metal::Texture>,
     pub(crate) path_intermediate_msaa_texture: Option<metal::Texture>,
@@ -209,7 +213,7 @@ impl MetalRenderer {
         }
     }
 
-    fn new_internal(
+    pub(crate) fn new_internal(
         device: metal::Device,
         layer: Option<metal::MetalLayer>,
         opaque: bool,
