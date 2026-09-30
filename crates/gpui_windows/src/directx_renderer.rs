@@ -43,18 +43,19 @@ pub(crate) struct DirectXRenderer {
     pub(crate) resources: Option<DirectXResources>,
     pub(crate) globals: DirectXGlobalElements,
     pub(crate) pipelines: DirectXRenderPipelines,
-    direct_composition: Option<DirectComposition>,
+    pub(crate) direct_composition: Option<DirectComposition>,
     font_info: &'static FontInfo,
 
-    width: u32,
-    height: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 
     /// Whether we want to skip drwaing due to device lost events.
     ///
     /// In that case we want to discard the first frame that we draw as we got reset in the middle of a frame
     /// meaning we lost all the allocated gpu textures and scene resources.
-    skip_draws: bool,
+    pub(crate) skip_draws: bool,
     pub(crate) fast_frame: crate::fast::frame::FrameState,
+    pub(crate) fast_composition: crate::fast::composition::DirectXComposition,
 }
 
 /// Direct3D objects
@@ -116,10 +117,10 @@ impl Drop for Annotation<'_> {
     }
 }
 
-struct DirectComposition {
-    comp_device: IDCompositionDevice,
-    comp_target: IDCompositionTarget,
-    comp_visual: IDCompositionVisual,
+pub(crate) struct DirectComposition {
+    pub(crate) comp_device: IDCompositionDevice,
+    pub(crate) comp_target: IDCompositionTarget,
+    pub(crate) comp_visual: IDCompositionVisual,
 }
 
 impl DirectXRendererDevices {
@@ -196,6 +197,7 @@ impl DirectXRenderer {
             height: 1,
             skip_draws: false,
             fast_frame: crate::fast::frame::FrameState::default(),
+            fast_composition: crate::fast::composition::DirectXComposition::default(),
         })
     }
 
@@ -245,7 +247,7 @@ impl DirectXRenderer {
     }
 
     #[inline]
-    fn present(&mut self) -> Result<()> {
+    pub(crate) fn present(&mut self) -> Result<()> {
         let result = unsafe {
             self.resources
                 .as_ref()
@@ -265,6 +267,7 @@ impl DirectXRenderer {
 
     fn handle_device_lost_impl(&mut self, directx_devices: &DirectXDevices) -> Result<()> {
         crate::fast::layers::release_tiles(self);
+        crate::fast::composition::release(self);
         let disable_direct_composition = self.direct_composition.is_none();
 
         unsafe {
@@ -327,6 +330,7 @@ impl DirectXRenderer {
         self.globals = globals;
         self.pipelines = pipelines;
         self.direct_composition = direct_composition;
+        crate::fast::composition::recreate(self)?;
         self.skip_draws = true;
         Ok(())
     }
@@ -350,7 +354,7 @@ impl DirectXRenderer {
     /// [`draw`](Self::draw) (which then presents) and
     /// [`render_to_image`](Self::render_to_image) (which reads the target back
     /// instead), so the two cannot drift.
-    fn render(
+    pub(crate) fn render(
         &mut self,
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
@@ -531,6 +535,7 @@ impl DirectXRenderer {
                 .device_context
                 .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
         }
+        crate::fast::composition::resize(self)?;
 
         Ok(())
     }
@@ -1298,7 +1303,7 @@ fn get_comp_device(dxgi_device: &IDXGIDevice) -> Result<IDCompositionDevice> {
     Ok(unsafe { DCompositionCreateDevice(dxgi_device)? })
 }
 
-fn create_swap_chain_for_composition(
+pub(crate) fn create_swap_chain_for_composition(
     dxgi_factory: &IDXGIFactory6,
     device: &ID3D11Device,
     width: u32,
@@ -1396,7 +1401,7 @@ fn create_resources(
 }
 
 #[inline]
-fn create_render_target_and_its_view(
+pub(crate) fn create_render_target_and_its_view(
     swap_chain: &IDXGISwapChain1,
     device: &ID3D11Device,
 ) -> Result<(ID3D11Texture2D, Option<ID3D11RenderTargetView>)> {
@@ -1695,7 +1700,7 @@ fn report_live_objects(device: &ID3D11Device) -> Result<()> {
     Ok(())
 }
 
-const BUFFER_COUNT: usize = 3;
+pub(crate) const BUFFER_COUNT: usize = 3;
 
 pub(crate) mod shader_resources {
     use anyhow::Result;
