@@ -4,6 +4,7 @@ mod dependencies;
 mod dispatch;
 mod global_id;
 mod layout;
+mod number_shaping;
 mod oracle;
 mod path_cache;
 mod retained;
