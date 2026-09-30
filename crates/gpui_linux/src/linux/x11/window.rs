@@ -271,6 +271,7 @@ pub struct X11WindowState {
     bounds: Bounds<Pixels>,
     scale_factor: f32,
     renderer: WgpuRenderer,
+    pub(crate) fast_composition: crate::fast::composition::x11::Composition,
     display: Rc<dyn PlatformDisplay>,
     input_handler: Option<PlatformInputHandler>,
     appearance: WindowAppearance,
@@ -303,7 +304,7 @@ impl X11WindowState {
 pub(crate) struct X11WindowStatePtr {
     pub state: Rc<RefCell<X11WindowState>>,
     pub(crate) callbacks: Rc<RefCell<Callbacks>>,
-    xcb: Rc<XCBConnection>,
+    pub(crate) xcb: Rc<XCBConnection>,
     pub(crate) x_window: xproto::Window,
 }
 
@@ -829,6 +830,12 @@ impl X11WindowState {
                 bounds: bounds.to_pixels(scale_factor),
                 scale_factor,
                 renderer,
+                fast_composition: crate::fast::composition::x11::Composition::new(
+                    xcb,
+                    x_window,
+                    visual.depth,
+                    visual.id,
+                ),
                 atoms: *atoms,
                 input_handler: None,
                 active: false,
@@ -880,6 +887,7 @@ impl Drop for X11Window {
             parent.state.borrow_mut().children.remove(&self.0.x_window);
         }
 
+        crate::fast::composition::x11::Composition::destroy(&state.fast_composition);
         state.renderer.destroy();
 
         let destroy_x_window = maybe!({
@@ -1768,6 +1776,25 @@ impl PlatformWindow for X11Window {
         if inner.renderer.needs_redraw() {
             inner.force_render_after_recovery = true;
         }
+    }
+
+    fn draw_composed(&self, scene: gpui::ComposedScene<'_>) {
+        crate::fast::composition::x11::draw_composed(self, scene)
+    }
+
+    fn enable_window_composition(&self) -> anyhow::Result<()> {
+        crate::fast::composition::x11::enable_window_composition(self)
+    }
+
+    fn create_native_surface(&self) -> anyhow::Result<Rc<dyn gpui::PlatformSurfaceAttachment>> {
+        crate::fast::composition::x11::create_native_surface(self)
+    }
+
+    fn set_composition_order(
+        &self,
+        fast_surfaces: &[gpui::PlatformCompositionSurface],
+    ) -> anyhow::Result<()> {
+        crate::fast::composition::x11::set_composition_order(self, fast_surfaces)
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
