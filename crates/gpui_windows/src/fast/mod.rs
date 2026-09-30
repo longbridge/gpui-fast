@@ -7,6 +7,7 @@
 //! forwarding a call to it. The logic itself is written here, one file per
 //! topic.
 
+pub(crate) mod composition;
 pub(crate) mod draw_state;
 pub(crate) mod frame;
 pub(crate) mod globals;
