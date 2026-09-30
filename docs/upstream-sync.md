@@ -177,13 +177,17 @@ Upstream is [zed-industries/zed](https://github.com/zed-industries/zed). The
 commit our copy was taken from is `zed_commit` in `UPSTREAM`, and
 `import_commit` is our commit holding that copy unchanged. To take a newer zed:
 
-1. In a zed checkout, pick the new commit. Start a branch in this repository at
-   the last vendor commit (`import_commit` the first time), replace each
-   directory listed in `UPSTREAM` with zed's version of it at the new commit,
-   and commit that as the new vendor commit (`zed: import <short hash>`). This
-   commit holds nothing but upstream's code.
+1. In a zed checkout, pick the new commit and run
+   `script/import-upstream --zed <checkout> <commit>`. It starts a vendor
+   branch at `import_commit` and replays each zed commit since `zed_commit`
+   that touches a directory listed in `UPSTREAM`, limited to those
+   directories and keeping its author, dates and message, so zed's history
+   of those crates comes along. The branch holds nothing but upstream's code;
+   its last commit is the new vendor commit.
 2. Merge that branch into ours. Conflicts should only touch hooks; resolve them
-   by keeping upstream's code and putting our hook back.
+   by keeping upstream's code and putting our hook back. The pull request must
+   be merged with a merge commit, not squashed: the next sync's merge needs
+   the vendor commits in `main`'s history.
 3. For every file we redirect with `#[path = "fast/..."]`, look at what
    upstream changed in the original (`git diff <old vendor commit> <new vendor
    commit> -- <file>`) and port it into our copy by hand. The merge won't
