@@ -158,7 +158,8 @@ unchanged, and a new entry needs as good a reason.
   composition working; `Scene` gains `is_empty` and `replay_balanced`, and
   `ComposedScene::layer_scene`, ours, cuts one layer's scene out for a
   renderer; `Window` gains `enable_window_composition` and
-  `with_composition_surface`. It all lives in `fast::composition`, so when
+  `with_composition_surface`; `gpui_apple` exports `new_overlay_renderer`
+for `gpui_macos`. It all lives in `fast::composition`, so when
   upstream merges its version, the sync replaces ours with it. Two things
   behave differently from the pull request: a retained view drawn again from
   last frame keeps the surface switches it made, and `with_composition_surface`
