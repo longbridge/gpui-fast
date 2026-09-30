@@ -60,9 +60,9 @@ pub(crate) struct Callbacks {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct RawWindow {
-    window: *mut c_void,
-    display: *mut c_void,
+pub(crate) struct RawWindow {
+    pub(crate) window: *mut c_void,
+    pub(crate) display: *mut c_void,
 }
 
 // Safety: The raw pointers in RawWindow point to Wayland surface/display
@@ -109,8 +109,9 @@ pub struct WaylandWindowState {
     viewport: Option<wp_viewport::WpViewport>,
     outputs: HashMap<ObjectId, Output>,
     display: Option<(ObjectId, Output)>,
-    globals: Globals,
-    renderer: WgpuRenderer,
+    pub(crate) globals: Globals,
+    pub(crate) renderer: WgpuRenderer,
+    pub(crate) fast_composition: crate::fast::composition::wayland::Composition,
     bounds: Bounds<Pixels>,
     scale: f32,
     input_handler: Option<PlatformInputHandler>,
@@ -122,7 +123,7 @@ pub struct WaylandWindowState {
     visibility: WindowVisibility,
     tiling: Tiling,
     window_bounds: Bounds<Pixels>,
-    client: WaylandClientStatePtr,
+    pub(crate) client: WaylandClientStatePtr,
     handle: AnyWindowHandle,
     active: bool,
     hovered: bool,
@@ -599,6 +600,12 @@ impl WaylandWindowState {
         }
 
         Ok(Self {
+            fast_composition: crate::fast::composition::wayland::Composition::new(
+                &globals,
+                &client,
+                &surface,
+                options.bounds.size,
+            ),
             surface_state,
             parent,
             children: FxHashMap::default(),
@@ -767,6 +774,7 @@ impl Drop for WaylandWindow {
 
         let client = state.client.clone();
 
+        crate::fast::composition::wayland::Composition::destroy(&state.fast_composition);
         state.renderer.destroy();
 
         // Destroy blur first, this has no dependencies.
@@ -807,7 +815,7 @@ impl Drop for WaylandWindow {
 }
 
 impl WaylandWindow {
-    fn borrow(&self) -> Ref<'_, WaylandWindowState> {
+    pub(crate) fn borrow(&self) -> Ref<'_, WaylandWindowState> {
         self.0.state.borrow()
     }
 
@@ -1484,6 +1492,11 @@ impl WaylandWindowStatePtr {
             }
             let device_bounds = state.bounds.to_device_pixels(state.scale);
             state.renderer.update_drawable_size(device_bounds.size);
+            crate::fast::composition::wayland::Composition::resize(
+                &state.fast_composition,
+                device_bounds.size,
+                state.scale,
+            );
             (state.bounds.size, state.scale)
         };
 
@@ -1949,7 +1962,11 @@ impl PlatformWindow for WaylandWindow {
                     .cast::<std::ffi::c_void>(),
             };
             match state.renderer.recover(&raw_window) {
-                Ok(()) => {}
+                Ok(()) => {
+                    crate::fast::composition::wayland::Composition::renderers_lost(
+                        &state.fast_composition,
+                    );
+                }
                 Err(err) => {
                     log::warn!("GPU recovery failed, will retry on next frame: {err}");
                 }
@@ -1976,6 +1993,25 @@ impl PlatformWindow for WaylandWindow {
         if state.renderer.needs_redraw() {
             state.redraw_requested = true;
         }
+    }
+
+    fn draw_composed(&self, scene: gpui::ComposedScene<'_>) {
+        crate::fast::composition::wayland::draw_composed(self, scene)
+    }
+
+    fn enable_window_composition(&self) -> anyhow::Result<()> {
+        crate::fast::composition::wayland::enable_window_composition(self)
+    }
+
+    fn create_native_surface(&self) -> anyhow::Result<Rc<dyn gpui::PlatformSurfaceAttachment>> {
+        crate::fast::composition::wayland::create_native_surface(self)
+    }
+
+    fn set_composition_order(
+        &self,
+        fast_surfaces: &[gpui::PlatformCompositionSurface],
+    ) -> anyhow::Result<()> {
+        crate::fast::composition::wayland::set_composition_order(self, fast_surfaces)
     }
 
     fn schedule_frame(&self) {

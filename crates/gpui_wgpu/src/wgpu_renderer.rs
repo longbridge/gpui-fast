@@ -206,10 +206,10 @@ impl WgpuResources {
 pub struct WgpuRenderer {
     /// Shared GPU context for device recovery coordination (unused on WASM).
     #[allow(dead_code)]
-    context: Option<GpuContext>,
+    pub(crate) context: Option<GpuContext>,
     /// Compositor GPU hint for adapter selection (unused on WASM).
     #[allow(dead_code)]
-    compositor_gpu: Option<CompositorGpuHint>,
+    pub(crate) compositor_gpu: Option<CompositorGpuHint>,
     resources: Option<WgpuResources>,
     pub(crate) surface_config: wgpu::SurfaceConfiguration,
     pub(crate) atlas: Arc<WgpuAtlas>,
@@ -220,7 +220,7 @@ pub struct WgpuRenderer {
     pub(crate) instance_data_alignment: u64,
     pub(crate) uses_webgl_instance_data: bool,
     pub(crate) rendering_params: RenderingParameters,
-    is_bgr: bool,
+    pub(crate) is_bgr: bool,
     dual_source_blending: bool,
     adapter_info: wgpu::AdapterInfo,
     transparent_alpha_mode: wgpu::CompositeAlphaMode,
@@ -339,7 +339,7 @@ impl WgpuRenderer {
         Self::new_internal(None, context, surface, config, None, atlas)
     }
 
-    fn new_internal(
+    pub(crate) fn new_internal(
         gpu_context: Option<GpuContext>,
         context: &WgpuContext,
         surface: wgpu::Surface<'static>,
@@ -2129,7 +2129,7 @@ fn instance_range(range: Range<usize>) -> Range<u32> {
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn create_surface(
+pub(crate) fn create_surface(
     instance: &wgpu::Instance,
     raw_window_handle: raw_window_handle::RawWindowHandle,
 ) -> anyhow::Result<wgpu::Surface<'static>> {
