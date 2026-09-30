@@ -110,10 +110,10 @@ impl InstanceBufferPool {
 }
 
 pub struct MetalRenderer {
-    device: metal::Device,
+    pub(crate) device: metal::Device,
     layer: Option<metal::MetalLayer>,
     is_apple_gpu: bool,
-    is_unified_memory: bool,
+    pub(crate) is_unified_memory: bool,
     presents_with_transaction: bool,
     /// For headless rendering, tracks whether output should be opaque
     pub(crate) opaque: bool,
@@ -124,11 +124,11 @@ pub struct MetalRenderer {
     quads_pipeline_state: metal::RenderPipelineState,
     underlines_pipeline_state: metal::RenderPipelineState,
     monochrome_sprites_pipeline_state: metal::RenderPipelineState,
-    polychrome_sprites_pipeline_state: metal::RenderPipelineState,
+    pub(crate) polychrome_sprites_pipeline_state: metal::RenderPipelineState,
     surfaces_pipeline_state: metal::RenderPipelineState,
-    unit_vertices: metal::Buffer,
+    pub(crate) unit_vertices: metal::Buffer,
     #[allow(clippy::arc_with_non_send_sync)]
-    instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
+    pub(crate) instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
     sprite_atlas: Arc<MetalAtlas>,
     core_video_texture_cache: core_video::metal_texture_cache::CVMetalTextureCache,
     pub(crate) path_intermediate_texture: Option<metal::Texture>,
@@ -138,6 +138,7 @@ pub struct MetalRenderer {
     /// rendering headlessly without reading pixels back.
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     headless_render_target: Option<metal::Texture>,
+    pub(crate) fast_layers: crate::fast::layers::TileCache,
 }
 
 #[repr(C)]
@@ -354,6 +355,7 @@ impl MetalRenderer {
             path_sample_count: PATH_SAMPLE_COUNT,
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
+            fast_layers: crate::fast::layers::TileCache::default(),
         }
     }
 
@@ -393,6 +395,7 @@ impl MetalRenderer {
             }
         }
         self.update_path_intermediate_textures(size);
+        crate::fast::layers::TileCache::clear(&mut self.fast_layers);
     }
 
     fn update_path_intermediate_textures(&mut self, size: Size<DevicePixels>) {
@@ -493,6 +496,7 @@ impl MetalRenderer {
         texture: &metal::TextureRef,
         viewport_size: Size<DevicePixels>,
     ) -> Result<metal::CommandBuffer> {
+        crate::fast::layers::raster::rasterize_tiles(self, scene);
         let mut writer = InstanceBufferWriter::new(
             &self.device,
             &self.instance_buffer_pool,
@@ -1089,6 +1093,16 @@ impl MetalRenderer {
         if sprites.is_empty() {
             return;
         }
+        if crate::fast::layers::composite::draw_tiles(
+            self,
+            texture_id,
+            &sprites,
+            instance_bindings,
+            viewport_size,
+            command_encoder,
+        ) {
+            return;
+        }
 
         let texture = self.sprite_atlas.metal_texture(texture_id);
         let texture_size = size(
@@ -1397,12 +1411,12 @@ pub(crate) struct InstanceBinding {
 }
 
 pub(crate) struct InstanceBindings {
-    quads: InstanceBinding,
-    shadows: InstanceBinding,
-    underlines: InstanceBinding,
-    monochrome_sprites: InstanceBinding,
-    polychrome_sprites: InstanceBinding,
-    surfaces: InstanceBinding,
+    pub(crate) quads: InstanceBinding,
+    pub(crate) shadows: InstanceBinding,
+    pub(crate) underlines: InstanceBinding,
+    pub(crate) monochrome_sprites: InstanceBinding,
+    pub(crate) polychrome_sprites: InstanceBinding,
+    pub(crate) surfaces: InstanceBinding,
 }
 
 fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<InstanceBindings> {
@@ -1429,7 +1443,7 @@ pub(crate) struct InstanceBufferWriter {
 }
 
 impl InstanceBufferWriter {
-    fn new(
+    pub(crate) fn new(
         device: &metal::Device,
         pool: &Arc<Mutex<InstanceBufferPool>>,
         unified_memory: bool,
@@ -1467,7 +1481,7 @@ impl InstanceBufferWriter {
         Ok((binding, values))
     }
 
-    fn write<T>(&mut self, values: &[T]) -> Result<InstanceBinding> {
+    pub(crate) fn write<T>(&mut self, values: &[T]) -> Result<InstanceBinding> {
         let (binding, destination) = self.allocate::<T>(values.len())?;
         unsafe {
             ptr::copy_nonoverlapping(
@@ -1516,7 +1530,7 @@ impl InstanceBufferWriter {
         Ok(())
     }
 
-    fn finish(self) -> InstanceBuffer {
+    pub(crate) fn finish(self) -> InstanceBuffer {
         let Self {
             unified_memory,
             filled,
@@ -1572,7 +1586,7 @@ enum UnderlineInputIndex {
 }
 
 #[repr(C)]
-enum SpriteInputIndex {
+pub(crate) enum SpriteInputIndex {
     Vertices = 0,
     Sprites = 1,
     ViewportSize = 2,

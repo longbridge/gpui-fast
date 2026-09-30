@@ -7,4 +7,5 @@
 //! call to it. The logic itself — data structures, algorithms, bookkeeping,
 //! tests — is written here, one file per topic.
 
+pub(crate) mod layers;
 pub(crate) mod paths;
