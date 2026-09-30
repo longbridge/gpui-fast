@@ -1989,6 +1989,7 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
             }
         }
         clear_rows(window, id, &frame);
+        policy::defer_unbaked(window, id);
         return;
     };
 

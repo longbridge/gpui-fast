@@ -236,6 +236,7 @@ mod uniform {
         pub(super) count: usize,
         pub(super) row_height: f32,
         tint: bool,
+        background: crate::Hsla,
         pub(super) rendered: Rc<RefCell<Vec<Range<usize>>>>,
     }
 
@@ -244,7 +245,7 @@ mod uniform {
             let rendered = self.rendered.clone();
             let row_height = self.row_height;
             let tint = self.tint;
-            div().size_full().bg(rgb(0xffffff)).child(
+            div().size_full().bg(self.background).child(
                 crate::uniform_list(
                     "list",
                     self.count,
@@ -286,6 +287,7 @@ mod uniform {
             count,
             row_height,
             tint: false,
+            background: rgb(0xffffff).into(),
             rendered: log,
         });
         open_at(cx, window.into(), scale_factor);
@@ -379,6 +381,46 @@ mod uniform {
         assert_eq!(
             with_window(cx, window, |window, _| window.layout_stats().layers_demoted),
             1
+        );
+    }
+
+    #[crate::test]
+    fn an_unbakeable_list_background_stops_rebuilding_overscan(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let (handle, log) = page(cx, 1000);
+        let window = handle.into();
+        handle
+            .update(cx, |page, _, cx| {
+                page.background = crate::rgba(0xffffff80).into();
+                cx.notify();
+            })
+            .unwrap();
+        draw(cx, window);
+        promote(cx, window);
+        rendered_rows(&log);
+        for _ in 0..20 {
+            wheel(cx, window, -ROW_HEIGHT);
+            assert_eq!(decision(cx, window), Some(Decision::Bypass));
+            let rendered: usize = rendered_rows(&log).iter().map(|range| range.len()).sum();
+            assert!(
+                rendered <= (VIEWPORT_HEIGHT / ROW_HEIGHT) as usize + 2,
+                "only visible rows should render while the background cannot be baked: {rendered}"
+            );
+        }
+        handle
+            .update(cx, |page, _, cx| {
+                page.background = rgb(0xffffff).into();
+                cx.notify();
+            })
+            .unwrap();
+        for _ in 0..70 {
+            wheel(cx, window, -ROW_HEIGHT);
+        }
+        assert!(
+            composites(cx, window),
+            "a bakeable background can recover after the retry delay"
         );
     }
 
