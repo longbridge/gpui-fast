@@ -5,11 +5,12 @@ GPUI.**
 
 - **Retained Mode**: redraw only what changed since the last frame. How it
   works, and why it is built this way: [Architecture](docs/architecture.md).
-- **Window composition** (coming next): native views such as a WebView drawn
-  inside a GPUI window, with GPUI's popovers, menus and dialogs still above
-  them. We plan to bring the work proposed in
+- **Window composition**: native views such as a WebView drawn inside a
+  GPUI window, with GPUI's popovers, menus and dialogs still above them. It
+  brings in the work proposed in
   [zed#62379](https://github.com/zed-industries/zed/pull/62379), still under
-  review upstream, into this experimental branch.
+  review upstream; `cargo run -p gpui_perf --example native_webview` shows
+  it.
 
 Both take deep changes to GPUI, so they are tried out here first. Once they
 work, we plan to propose them to [Zed's GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).

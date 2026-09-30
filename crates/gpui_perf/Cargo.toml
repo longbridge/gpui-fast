@@ -21,6 +21,10 @@ path = "src/main.rs"
 name = "views_frames"
 required-features = ["fast"]
 
+[[example]]
+name = "native_webview"
+required-features = ["fast"]
+
 [features]
 default = ["fast"]
 # Build against this repository's GPUI: the showcase, `--headless` and the
@@ -44,3 +48,27 @@ serde.workspace = true
 serde_json.workspace = true
 libc.workspace = true
 smol.workspace = true
+
+# The native_webview example: a WKWebView on macOS, WebView2 on Windows, and
+# its own wgpu device drawing into a native surface on Linux.
+[dev-dependencies]
+anyhow.workspace = true
+log.workspace = true
+raw-window-handle.workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+cocoa.workspace = true
+objc.workspace = true
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+# 0.39 rather than zed-industries/zed#62379's 0.38, which is built on windows
+# 0.61: gpui_windows hands out windows 0.62's `IUnknown`.
+webview2-com = "0.39"
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dev-dependencies]
+wgpu.workspace = true
