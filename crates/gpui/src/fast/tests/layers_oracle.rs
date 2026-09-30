@@ -22,6 +22,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    ops::Range,
     rc::Rc,
     sync::Arc,
 };
@@ -511,8 +512,10 @@ enum Change {
 }
 
 impl Change {
-    fn random(rng: &mut StdRng) -> Self {
-        let container = rng.random_range(0..CONTAINERS);
+    /// A random change, wheels and application scrolls going to one of
+    /// `containers`.
+    fn random(rng: &mut StdRng, containers: &Range<usize>) -> Self {
+        let container = rng.random_range(containers.clone());
         match rng.random_range(0..100) {
             0..30 => Change::Wheel {
                 container,
@@ -749,9 +752,17 @@ fn draw(
                             .iter()
                             .find(|hitbox| hitbox.id == *id)
                             .unwrap();
+                        // To a thousandth of a pixel: a row of a list's layer
+                        // keeps the hitboxes it inserted, moved, and a bound
+                        // laid out and moved can differ in its last bits
+                        // from one laid out where it lies now.
+                        let bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
                         format!(
-                            "{:?} {:?}",
-                            hitbox.bounds.intersect(&hitbox.content_mask.bounds),
+                            "({:.3}, {:.3}) {:.3} × {:.3} {:?}",
+                            bounds.origin.x.as_f32(),
+                            bounds.origin.y.as_f32(),
+                            bounds.size.width.as_f32(),
+                            bounds.size.height.as_f32(),
                             hitbox.behavior
                         )
                     })
@@ -807,11 +818,22 @@ struct Coverage {
     keys: usize,
     /// Frames drawn with some container scrolled.
     scrolled: usize,
+    /// Frames that composited a virtual list's layer keeping the rows it
+    /// held, and rows they rendered again because their hovers changed.
+    list_frames: usize,
+    rows_rendered_for_hover: usize,
 }
 
 /// Drives a window with layers and one without through one random history
-/// at `scale_factor`.
-fn run(seed: u64, scale_factor: f32, steps: usize) -> Coverage {
+/// at `scale_factor`, scrolling `containers`, a wheel turning on for
+/// another frame with probability `keep_turning`.
+fn run(
+    seed: u64,
+    scale_factor: f32,
+    steps: usize,
+    containers: Range<usize>,
+    keep_turning: f64,
+) -> Coverage {
     let mut cx = TestAppContext::with_text_system(Arc::new(GlyphBoxTextSystem(NoopTextSystem)));
     let layered = cx.add_window(|_, cx| LayerOracleView::new(cx));
     let plain = cx.add_window(|_, cx| LayerOracleView::new(cx));
@@ -824,6 +846,8 @@ fn run(seed: u64, scale_factor: f32, steps: usize) -> Coverage {
         })
         .unwrap();
     }
+    let list_frames = crate::fast::layers::lists::extended_frames();
+    let rows_rendered_for_hover = crate::fast::layers::lists::rows_rendered_for_hover();
     let mut rng = StdRng::seed_from_u64(seed);
     let mut history: Vec<Vec<Change>> = Vec::new();
     let mut last_wheel: Option<Change> = None;
@@ -833,9 +857,9 @@ fn run(seed: u64, scale_factor: f32, steps: usize) -> Coverage {
         // A wheel turns for several frames in a row, which is what promotes
         // a container to a layer.
         let changes: Vec<Change> = match &last_wheel {
-            Some(wheel) if rng.random_bool(0.7) => vec![wheel.clone()],
+            Some(wheel) if rng.random_bool(keep_turning) => vec![wheel.clone()],
             _ => (0..rng.random_range(1..=2))
-                .map(|_| Change::random(&mut rng))
+                .map(|_| Change::random(&mut rng, &containers))
                 .collect(),
         };
         last_wheel = changes
@@ -912,22 +936,34 @@ fn run(seed: u64, scale_factor: f32, steps: usize) -> Coverage {
             window.layout_stats().layer_frames_composited
         })
         .unwrap();
+    coverage.list_frames = crate::fast::layers::lists::extended_frames() - list_frames;
+    coverage.rows_rendered_for_hover =
+        crate::fast::layers::lists::rows_rendered_for_hover() - rows_rendered_for_hover;
     coverage
 }
 
-#[test]
-fn frames_drawn_through_scroll_layers_match_frames_drawn_without() {
+/// Runs three random histories at scale factors 1 and 1.25, as [`run`]
+/// does, and adds up what they went through.
+fn run_all(containers: Range<usize>, keep_turning: f64) -> Coverage {
     let mut total = Coverage::default();
     for seed in 0..3 {
         for scale_factor in [1., 1.25] {
-            let coverage = run(seed, scale_factor, 300);
+            let coverage = run(seed, scale_factor, 300, containers.clone(), keep_turning);
             total.composited += coverage.composited;
             total.clicks += coverage.clicks;
             total.downs += coverage.downs;
             total.keys += coverage.keys;
             total.scrolled += coverage.scrolled;
+            total.list_frames += coverage.list_frames;
+            total.rows_rendered_for_hover += coverage.rows_rendered_for_hover;
         }
     }
+    total
+}
+
+#[test]
+fn frames_drawn_through_scroll_layers_match_frames_drawn_without() {
+    let total = run_all(0..CONTAINERS, 0.7);
     assert!(
         total.clicks > 0 && total.downs > 0 && total.keys > 0,
         "no listener saw a click, a mouse down and a key press, so their positions \
@@ -941,6 +977,27 @@ fn frames_drawn_through_scroll_layers_match_frames_drawn_without() {
             total.composited > 0,
             "no frame composited a scroll layer over {} scrolled frames",
             total.scrolled
+        );
+    }
+}
+
+/// The same, scrolling only the uniform list and the list, whose layers keep
+/// their rows from frame to frame, carry their rows' hitboxes and listeners,
+/// and render again the rows whose hover changes.
+#[test]
+fn list_frames_drawn_through_scroll_layers_match_frames_drawn_without() {
+    let total = run_all(2..CONTAINERS, 0.9);
+    assert!(
+        total.clicks > 0 && total.downs > 0,
+        "no listener saw a click and a mouse down, so their positions were not compared"
+    );
+    if crate::fast::layers::COMPILED {
+        assert!(
+            total.list_frames > 50 && total.rows_rendered_for_hover > 0,
+            "no frame kept the rows of a list's layer ({}), or rendered one again \
+             for its hover ({})",
+            total.list_frames,
+            total.rows_rendered_for_hover
         );
     }
 }

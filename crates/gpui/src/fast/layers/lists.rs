@@ -73,7 +73,7 @@ use std::{
 };
 
 /// Whether virtual lists get scroll layers.
-pub(crate) const LIST_LAYERS: bool = false;
+pub(crate) const LIST_LAYERS: bool = true;
 
 /// The rows of a list's layer, and what the frame being drawn does with
 /// them.
