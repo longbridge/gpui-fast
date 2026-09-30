@@ -87,6 +87,9 @@ frame.
   the positions listeners observe.
 - `cargo test -p gpui_wgpu` compares rasterized and composited tiles with
   direct drawing, byte for byte, on a surfaceless device.
+- `cargo test -p gpui_apple fast::layers` does the same on macOS with a
+  headless Metal renderer (`crates/gpui_apple/src/fast/layers/`), which draws
+  tiles as the wgpu renderer does.
 - `cargo run -p gpui_perf --release -- --headless --verify` also runs the
   scroll scenarios with layers on and off.
 
