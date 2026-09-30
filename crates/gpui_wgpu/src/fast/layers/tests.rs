@@ -7,7 +7,6 @@
 
 use std::borrow::Cow;
 use std::num::NonZeroU64;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -294,7 +293,7 @@ fn layer_frame(key: LayerKey, generation: u64, content: Scene, dirty: &[TileCoor
         generation,
         background: background(),
         tile_size: TILE,
-        content: Rc::new(content),
+        content: content.into(),
         dirty_tiles: dirty.to_vec(),
     }
 }

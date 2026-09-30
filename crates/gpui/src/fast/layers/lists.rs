@@ -1398,7 +1398,7 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
         if let Some(record) = layer.record.take()
             && frame.mode == Mode::Extend
         {
-            paint::draw_into_frame(window, &record.content, frame.translation);
+            paint::draw_into_frame(window, record.content.operations(), frame.translation);
         }
         clear_rows(window, id);
         return;
@@ -1551,7 +1551,7 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
     });
     let dirtied = dirty.len();
     layer.record = Some(LayerRecord {
-        content: Rc::new(content),
+        content: content.into(),
         generation,
         painted_region,
         viewport: frame.viewport,

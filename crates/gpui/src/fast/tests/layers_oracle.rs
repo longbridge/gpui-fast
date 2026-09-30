@@ -111,7 +111,7 @@ fn scenes(tiles: &[TileCoord], nudge: f32) -> (Scene, Scene) {
         generation: 1,
         background: rgba(0xffffffff),
         tile_size: 512,
-        content: Rc::new(content),
+        content: content.into(),
         dirty_tiles: Vec::new(),
     };
 

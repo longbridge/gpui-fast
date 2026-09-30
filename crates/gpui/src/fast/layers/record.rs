@@ -3,8 +3,11 @@
 
 use crate::{
     Bounds, EntityId, GlobalElementId, HitboxId, PaintIndex, Path, Pixels, Point,
-    PrepaintStateIndex, Rgba, ScaledPixels, Scene, TileCoord,
-    fast::{dependencies::RenderDependencies, layers::reuse::KeptLayout},
+    PrepaintStateIndex, Rgba, ScaledPixels, TileCoord,
+    fast::{
+        dependencies::RenderDependencies,
+        layers::{reuse::KeptLayout, scene::LayerContent},
+    },
 };
 use collections::FxHashMap;
 use std::{ops::Range, rc::Rc};
@@ -17,8 +20,8 @@ use std::{ops::Range, rc::Rc};
 #[derive(Default)]
 pub(crate) struct LayerRecord {
     /// The painted content in content space (window space less
-    /// `translation`), finished.
-    pub(crate) content: Rc<Scene>,
+    /// `translation`).
+    pub(crate) content: LayerContent,
     /// Bumps each time `content` is replaced.
     pub(crate) generation: u64,
     /// The part of the content painted, in window space at paint: the

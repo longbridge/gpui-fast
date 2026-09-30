@@ -109,7 +109,13 @@ fn expanded_quads(scene: &Scene) -> Vec<String> {
         let tile = frame.tile_bounds(coord);
         let translation = sprite.bounds.origin - tile.origin;
         let viewport = sprite.content_mask.bounds;
-        for quad in &frame.content.quads {
+        let mut content = Scene::default();
+        for operation in frame.content.operations() {
+            if let crate::scene::PaintOperation::Primitive(primitive) = operation {
+                content.insert_primitive(primitive.clone());
+            }
+        }
+        for quad in &content.quads {
             let bounds = Bounds {
                 origin: quad.bounds.origin + translation,
                 size: quad.bounds.size,

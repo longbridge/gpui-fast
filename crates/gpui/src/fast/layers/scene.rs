@@ -85,8 +85,8 @@ pub struct LayerFrame {
     pub background: Rgba,
     /// The side of a tile, in device pixels.
     pub tile_size: u32,
-    /// The painted content in content space, finished (sorted).
-    pub content: Rc<Scene>,
+    /// The painted content in content space.
+    pub content: LayerContent,
     /// The tiles whose content changed in this generation.
     pub dirty_tiles: Vec<TileCoord>,
 }
@@ -114,7 +114,7 @@ impl LayerFrame {
             ScaledPixels(-bounds.origin.y.0),
         );
         let mut scene = Scene::default();
-        for operation in &self.content.paint_operations {
+        for operation in self.content.operations_over(bounds) {
             match operation {
                 PaintOperation::Primitive(primitive) => {
                     if visible_bounds(primitive).intersects(&bounds) {
@@ -129,6 +129,80 @@ impl LayerFrame {
         }
         scene.finish();
         scene
+    }
+}
+
+/// A layer's content, in content space: one or more parts drawn one after
+/// another. A scrolling `div`'s content is one part, a finished scene; a
+/// virtual list's is one part per row, so that a frame adding or changing
+/// rows hands the renderer the rows it kept as they were, without copying
+/// them.
+#[derive(Clone, Default)]
+pub struct LayerContent {
+    parts: Rc<[LayerPart]>,
+}
+
+/// A part of a layer's content.
+#[derive(Clone)]
+pub(crate) struct LayerPart {
+    /// Where the part's primitives can draw, if known: a tile it misses
+    /// draws nothing of it.
+    pub(crate) bounds: Option<Bounds<ScaledPixels>>,
+    /// The part's paint operations, in drawing order. A row's scene holds
+    /// nothing else.
+    pub(crate) scene: Rc<Scene>,
+}
+
+impl From<Scene> for LayerContent {
+    fn from(scene: Scene) -> Self {
+        Self::from(Rc::new(scene))
+    }
+}
+
+impl From<Rc<Scene>> for LayerContent {
+    fn from(scene: Rc<Scene>) -> Self {
+        LayerContent {
+            parts: Rc::new([LayerPart {
+                bounds: None,
+                scene,
+            }]),
+        }
+    }
+}
+
+impl LayerContent {
+    /// The content's scene, when it is one part, as a `div`'s is.
+    pub fn scene(&self) -> Option<&Scene> {
+        match &*self.parts {
+            [part] => Some(&part.scene),
+            _ => None,
+        }
+    }
+
+    /// Whether `self` and `other` are the same content, shared.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.parts, &other.parts)
+    }
+
+    /// Every paint operation of the content, in drawing order.
+    pub(crate) fn operations(&self) -> impl Iterator<Item = &PaintOperation> {
+        self.parts
+            .iter()
+            .flat_map(|part| part.scene.paint_operations.iter())
+    }
+
+    /// The paint operations of the parts that can draw over `bounds`, in
+    /// drawing order. Leaving out a part that draws nothing there changes
+    /// no pixel there: a layer it pushed only raises the draw orders of what
+    /// follows, keeping every overlapping pair in order.
+    pub(crate) fn operations_over(
+        &self,
+        bounds: Bounds<ScaledPixels>,
+    ) -> impl Iterator<Item = &PaintOperation> {
+        self.parts
+            .iter()
+            .filter(move |part| part.bounds.is_none_or(|part| part.intersects(&bounds)))
+            .flat_map(|part| part.scene.paint_operations.iter())
     }
 }
 

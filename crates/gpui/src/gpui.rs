@@ -105,8 +105,8 @@ pub use element::*;
 pub use elements::*;
 pub use executor::*;
 pub use fast::layers::scene::{
-    LAYER_TILE_TEXTURE_BASE, LayerFrame, LayerKey, SceneLayers, TileCoord, decode_layer_tile,
-    layer_tile_id, layer_tile_texture_id,
+    LAYER_TILE_TEXTURE_BASE, LayerContent, LayerFrame, LayerKey, SceneLayers, TileCoord,
+    decode_layer_tile, layer_tile_id, layer_tile_texture_id,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use fast::stats::LayoutStats;

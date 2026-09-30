@@ -8,7 +8,6 @@ use crate::{
     Underline, decode_layer_tile, fast::layers::scene::translate_primitive, layer_tile_id,
     layer_tile_texture_id, point, px, scene::Primitive, size,
 };
-use std::rc::Rc;
 
 #[test]
 fn layer_tile_ids_round_trip_and_never_collide_with_the_atlas() {
@@ -74,7 +73,7 @@ fn layer(content: Scene) -> LayerFrame {
         generation: 1,
         background: crate::rgba(0xffffffff),
         tile_size: 512,
-        content: Rc::new(content),
+        content: content.into(),
         dirty_tiles: Vec::new(),
     }
 }
@@ -780,7 +779,7 @@ mod paint {
             assert_eq!(record.viewport.size.height, crate::px(100.));
             assert_eq!(record.painted_region.origin.y, crate::px(0.));
             assert_eq!(record.painted_region.size.height, crate::px(300.));
-            let rows = row_quads(&record.content, 40);
+            let rows = row_quads(record.content.scene().unwrap(), 40);
             assert_eq!(
                 rows.iter().map(|(row, _)| *row).collect::<Vec<_>>(),
                 (0..15).collect::<Vec<_>>()
@@ -823,7 +822,7 @@ mod paint {
             // Overscan of two viewports above and below the one at 300..400.
             assert_eq!(record.painted_region.origin.y, crate::px(-200.));
             assert_eq!(record.painted_region.size.height, crate::px(500.));
-            let rows = row_quads(&record.content, 40);
+            let rows = row_quads(record.content.scene().unwrap(), 40);
             assert_eq!(
                 rows.iter().map(|(row, _)| *row).collect::<Vec<_>>(),
                 (5..30).collect::<Vec<_>>()
@@ -936,7 +935,7 @@ mod paint {
                 record.painted_region, record.viewport,
                 "no overscan past the content"
             );
-            assert_eq!(row_quads(&record.content, 3).len(), 3);
+            assert_eq!(row_quads(record.content.scene().unwrap(), 3).len(), 3);
             let region = record.painted_region.scale(window.scale_factor());
             for tile in record.tile_hashes.keys() {
                 let top = tile.y as f32 * 512.;
@@ -1271,7 +1270,7 @@ mod paint {
             assert_eq!(scene.layers.frames.len(), 1);
             let frame = &scene.layers.frames[0];
             assert_eq!(frame.key, layer.key);
-            assert!(std::rc::Rc::ptr_eq(&frame.content, &record.content));
+            assert!(frame.content.ptr_eq(&record.content));
             assert_eq!(frame.generation, record.generation);
             assert_eq!(frame.background, record.background);
             assert_eq!(frame.tile_size, 512);
@@ -1514,7 +1513,10 @@ mod paint {
             let layer = window.fast_layers.layers.values().next().expect("a layer");
             let record = layer.record.as_ref().expect("painted");
             assert!(!record.has_paths);
-            assert!(record.content.paths.is_empty(), "the tiles hold no path");
+            assert!(
+                record.content.scene().unwrap().paths.is_empty(),
+                "the tiles hold no path"
+            );
             assert_eq!(record.paths.len(), 1, "the layer keeps the path apart");
             let scene = &window.rendered_frame.scene;
             assert!(!tile_quads(scene).is_empty(), "the tiles are composited");
