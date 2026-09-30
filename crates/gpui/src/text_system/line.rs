@@ -533,7 +533,8 @@ fn paint_line(
                 };
 
                 let content_mask = window.content_mask();
-                if crate::fast::glyphs::may_reach(
+                if crate::fast::glyphs::LineGlyphPainter::may_reach(
+                    &mut glyph_painter,
                     max_glyph_bounds,
                     baseline_offset.y + glyph.position.y,
                     &content_mask.bounds,

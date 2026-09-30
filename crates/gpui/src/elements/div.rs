@@ -4450,7 +4450,7 @@ impl ScrollHandle {
     /// As you scroll further down the offset becomes more negative.
     pub fn set_offset(&self, mut position: Point<Pixels>) {
         let state = self.0.borrow();
-        crate::fast::dependencies::StateVersion::bump_if(
+        crate::fast::layers::invalidate::offset_set(
             &state.version,
             *state.offset.borrow() != position,
         );

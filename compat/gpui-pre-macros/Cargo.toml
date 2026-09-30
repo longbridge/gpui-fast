@@ -1,0 +1,18 @@
+[package]
+name = "gpui-pre-macros"
+version = "0.3.7"
+description = "gpui-fast's `gpui_macros`, under the name and version of the gpui-pre snapshot GPUI Kit pins."
+license = "Apache-2.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "gpui_macros"
+path = "lib.rs"
+doctest = false
+
+[features]
+inspector = ["gpui_fast/inspector"]
+
+[dependencies]
+gpui_fast = { package = "gpui_macros", path = "../../crates/gpui_macros", default-features = false }

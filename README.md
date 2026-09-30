@@ -122,6 +122,10 @@ Point a project at it in place of upstream GPUI:
 gpui = { git = "https://github.com/longbridge/gpui-fast" }
 ```
 
+An application on [GPUI Kit](https://github.com/longbridge/gpui-kit) patches
+the Kit's `gpui-pre-*` snapshots with this repository's instead; see
+[`compat/`](compat/README.md).
+
 ## gpui-fast, gpui-pre and gpui-ce
 
 Several projects build on GPUI outside Zed:

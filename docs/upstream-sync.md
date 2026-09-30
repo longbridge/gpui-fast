@@ -56,7 +56,8 @@ only hold the hooks that call into it.
    from `gpui.rs` one item at a time:
    `#[cfg(any(test, feature = "test-support"))] pub use fast::stats::LayoutStats;`.
 6. **New files only inside `fast/`, or in our own crates** such as
-   `crates/gpui_perf` (benchmarks, examples and the frame-measuring app).
+   `crates/gpui_perf` (benchmarks, examples and the frame-measuring app) and
+   `compat/` (the `gpui-pre-*` stand-ins GPUI Kit applications patch in).
    Documentation goes in `docs/`.
 
 Which directories are upstream's is recorded in [`UPSTREAM`](../UPSTREAM) at
@@ -141,6 +142,9 @@ unchanged, and a new entry needs as good a reason.
   layers from the scene. Polychrome sprites whose texture index is at or
   above `LAYER_TILE_TEXTURE_BASE` are scroll layer tiles, not atlas textures.
 - `crates/gpui/Cargo.toml` names this repository and sets `publish = false`.
+- `App::register_inspector_element` takes a factory, the form newer upstream
+  has and GPUI Kit is written against; `fast::inspector` adapts it onto this
+  snapshot's registry.
 
 When the check fails, move the change into a `fast/` module and leave a hook
 behind that names it; use `git diff <import_commit> -- <file>` to see what

@@ -623,6 +623,9 @@ impl LineLayoutIndex {
 pub(crate) struct LineShaping {
     /// Lines shaped lately, answered without asking the platform again.
     recent: Mutex<RecentShapes>,
+    /// Numbers put together from their glyphs rather than shaped by the
+    /// platform.
+    numbers: Mutex<crate::fast::number_shaping::NumberShaping>,
     /// Lines handed to the platform to be shaped. See [`LineShaping::stats`].
     lines_shaped: AtomicU64,
     /// Time spent in those calls, in nanoseconds.
@@ -680,7 +683,11 @@ impl LineShaping {
         runs: &[FontRun],
     ) -> LineLayout {
         let started_at = self.shape_timed.load(Ordering::Relaxed).then(Instant::now);
-        let layout = platform_text_system.layout_line(text, font_size, runs);
+        let layout = self
+            .numbers
+            .lock()
+            .shape(platform_text_system, text, font_size, runs)
+            .unwrap_or_else(|| platform_text_system.layout_line(text, font_size, runs));
         self.lines_shaped.fetch_add(1, Ordering::Relaxed);
         if let Some(started_at) = started_at {
             self.shape_nanos
@@ -693,6 +700,11 @@ impl LineShaping {
 /// Bumped whenever fonts are added to a text system, which can change how a
 /// line already shaped would shape now (a fallback font it lacked).
 static FONTS_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// How many times fonts have been added to a text system.
+pub(crate) fn fonts_generation() -> u64 {
+    FONTS_GENERATION.load(Ordering::Relaxed)
+}
 
 /// Called when fonts are added to a text system, so no line shaped before is
 /// taken from [`RecentShapes`] again.

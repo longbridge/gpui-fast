@@ -1,0 +1,29 @@
+[package]
+name = "gpui-pre-platform"
+version = "0.3.7"
+description = "gpui-fast's `gpui_platform`, under the name and version of the gpui-pre snapshot GPUI Kit pins."
+license = "Apache-2.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "gpui_platform"
+path = "lib.rs"
+doctest = false
+
+[features]
+default = ["gpui_fast/default"]
+bench-support = ["gpui_fast/bench-support"]
+font-kit = ["gpui_fast/font-kit"]
+inspector = ["gpui/inspector"]
+runtime_shaders = ["gpui_fast/runtime_shaders"]
+screen-capture = ["gpui_fast/screen-capture"]
+test-support = ["gpui_fast/test-support"]
+wayland = ["gpui_fast/wayland"]
+x11 = ["gpui_fast/x11"]
+
+[dependencies]
+gpui_fast = { package = "gpui_platform", path = "../../crates/gpui_platform", default-features = false }
+# gpui-pre-platform's `inspector` turns on GPUI's; this repository's
+# gpui_platform has no such feature, so it is forwarded to gpui directly.
+gpui = { path = "../../crates/gpui", default-features = false }

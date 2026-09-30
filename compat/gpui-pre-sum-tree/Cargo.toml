@@ -1,0 +1,18 @@
+[package]
+name = "gpui-pre-sum-tree"
+version = "0.3.7"
+description = "gpui-fast's `sum_tree`, under the name and version of the gpui-pre snapshot GPUI Kit pins."
+license = "Apache-2.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sum_tree"
+path = "lib.rs"
+doctest = false
+
+[features]
+test-support = ["gpui_fast/test-support"]
+
+[dependencies]
+gpui_fast = { package = "sum_tree", path = "../../crates/sum_tree", default-features = false }

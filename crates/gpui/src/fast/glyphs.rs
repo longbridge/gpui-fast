@@ -3,7 +3,7 @@
 use crate::{
     App, AtlasTile, Bounds, ContentMask, DecorationRun, DevicePixels, FontId, GlyphId, Hsla,
     IsZero, MonochromeSprite, Pixels, Point, RenderGlyphParams, SUBPIXEL_VARIANTS_X,
-    SUBPIXEL_VARIANTS_Y, ScaledPixels, SubpixelSprite, TransformationMatrix, Window, point,
+    SUBPIXEL_VARIANTS_Y, ScaledPixels, Size, SubpixelSprite, TransformationMatrix, Window,
     util::round_half_toward_zero,
 };
 use anyhow::Result;
@@ -47,41 +47,80 @@ pub(crate) fn quantize_emoji_origin(origin: Point<ScaledPixels>) -> Point<Scaled
     })
 }
 
-/// Whether a glyph may draw inside `mask`, for a line to skip the glyphs it
-/// need not paint. `line_glyph` is the line's glyph box as upstream builds it:
-/// the glyph's origin on the top of its line, sized by the font's bounding
-/// box. The glyph itself is drawn `baseline` further down, on the line's
-/// baseline, where a tall line puts it well below the top; upstream's
-/// `line_glyph.intersects(mask)` then skips glyphs that reach into the mask.
-///
-/// This test is only conservative, leaving the exact test to the scene,
-/// which drops a sprite outside its content mask: vertically it takes the
-/// bounding box's height above and below the baseline; horizontally, as
-/// upstream does, the bounding box's width from the glyph's origin on, and
-/// its height before it, for glyphs reaching left of their origin; each plus
-/// a margin for glyph dilation and subpixel positioning. Nothing reaches
-/// into an empty mask. Where a glyph is
-/// drawn therefore depends on its sprite alone, so a line painted in a scroll
-/// layer's overscan and scrolled into view shows the same glyphs as the line
-/// painted in place.
+/// [`LineGlyphPainter::may_reach`] for a glyph on its own.
+#[cfg(test)]
 pub(crate) fn may_reach(
     line_glyph: Bounds<Pixels>,
     baseline: Pixels,
     mask: &Bounds<Pixels>,
 ) -> bool {
-    const MARGIN: Pixels = Pixels(2.);
-    // `intersects` takes an empty mask a box straddles for one it overlaps.
-    if mask.is_empty() {
-        return false;
+    GlyphReach::new(line_glyph.size, mask)
+        .contains(line_glyph.origin.x, line_glyph.origin.y + baseline)
+}
+
+/// [`LineGlyphPainter::may_reach`] for glyphs sized alike in one mask: the
+/// mask's edges pushed out by the glyphs' reach, which a line works out once
+/// a run, so that each glyph only compares its origin and baseline with them.
+#[derive(Clone, Copy)]
+struct GlyphReach {
+    size: Size<Pixels>,
+    left: Pixels,
+    top: Pixels,
+    right: Pixels,
+    bottom: Pixels,
+}
+
+impl GlyphReach {
+    /// A reach [`GlyphReach::is_for`] no size, to be worked out on first use.
+    const UNSET: Self = Self {
+        size: Size {
+            width: Pixels(f32::NAN),
+            height: Pixels(f32::NAN),
+        },
+        left: Pixels(0.),
+        top: Pixels(0.),
+        right: Pixels(0.),
+        bottom: Pixels(0.),
+    };
+
+    /// Whether this is the reach of glyphs of `size`, comparing bits, as a
+    /// size's only use is to work out the same reach again.
+    #[inline]
+    fn is_for(&self, size: Size<Pixels>) -> bool {
+        self.size.width.0.to_bits() == size.width.0.to_bits()
+            && self.size.height.0.to_bits() == size.height.0.to_bits()
     }
-    let reach = line_glyph.size;
-    let x = line_glyph.origin.x;
-    let y = line_glyph.origin.y + baseline;
-    Bounds::from_corners(
-        point(x - reach.height - MARGIN, y - reach.height - MARGIN),
-        point(x + reach.width + MARGIN, y + reach.height + MARGIN),
-    )
-    .intersects(mask)
+
+    fn new(size: Size<Pixels>, mask: &Bounds<Pixels>) -> Self {
+        const MARGIN: Pixels = Pixels(2.);
+        // An empty mask's edges would let in the glyphs straddling it.
+        if mask.is_empty() {
+            return Self {
+                size,
+                left: Pixels(f32::INFINITY),
+                top: Pixels(f32::INFINITY),
+                right: Pixels(f32::NEG_INFINITY),
+                bottom: Pixels(f32::NEG_INFINITY),
+            };
+        }
+        let height = size.height + MARGIN;
+        let width = size.width + MARGIN;
+        let end = mask.bottom_right();
+        Self {
+            size,
+            left: mask.origin.x - width,
+            top: mask.origin.y - height,
+            right: end.x + height,
+            bottom: end.y + height,
+        }
+    }
+
+    /// Whether a glyph whose origin is at `x` and whose baseline is at `y`
+    /// may draw inside the mask.
+    #[inline]
+    fn contains(&self, x: Pixels, y: Pixels) -> bool {
+        y > self.top && y < self.bottom && x > self.left && x < self.right
+    }
 }
 
 /// How the glyphs of a run are rendered: what painting a glyph needs that
@@ -144,17 +183,29 @@ impl Window {
             dilation,
         };
 
-        let (raster_bounds, tile) = match self.fast_glyph_bounds.lookup(&params) {
+        let (raster_bounds, tile, sprite_size) = match self.fast_glyph_bounds.lookup(&params) {
             Some(kept) => kept,
             None => {
                 let raster_bounds = self.text_system().raster_bounds(&params)?;
                 self.fast_glyph_bounds.insert(&params, raster_bounds);
-                (raster_bounds, None)
+                (raster_bounds, None, None)
             }
         };
+        let sprite_origin = integer_origin + raster_bounds.origin.map(Into::into);
         if !raster_bounds.is_zero() {
             let tile = match tile {
                 Some(tile) => tile,
+                // The scene drops a sprite that misses its content mask;
+                // where the sprite's size is known, drop it before looking up
+                // its tile.
+                None if sprite_size.is_some_and(|size| {
+                    Bounds::new(sprite_origin, size.map(Into::into))
+                        .intersect(&content_mask.bounds)
+                        .is_empty()
+                }) =>
+                {
+                    return Ok(());
+                }
                 None => {
                     let tile = self
                         .sprite_atlas
@@ -168,7 +219,7 @@ impl Window {
                 }
             };
             let bounds = Bounds {
-                origin: integer_origin + raster_bounds.origin.map(Into::into),
+                origin: sprite_origin,
                 size: tile.bounds.size.map(Into::into),
             };
 
@@ -199,11 +250,14 @@ impl Window {
 }
 
 /// Paints the glyphs of a line, working out what they share once rather than
-/// once a glyph: the snapped content mask, which nothing painted along a line
-/// changes, and the rendering of each run, which only changes with the run's
-/// font or color.
+/// once a glyph: the content mask, which nothing painted along a line
+/// changes, snapped for its sprites and pushed out by each run's glyph reach
+/// for [`LineGlyphPainter::may_reach`], and the rendering of each run, which
+/// only changes with the run's font or color.
 pub(crate) struct LineGlyphPainter {
     snapped_content_mask: ContentMask<ScaledPixels>,
+    content_mask: Bounds<Pixels>,
+    reach: GlyphReach,
     run_rendering: Option<(FontId, Hsla, GlyphRunRendering)>,
 }
 
@@ -211,8 +265,44 @@ impl LineGlyphPainter {
     pub(crate) fn new(window: &Window) -> Self {
         Self {
             snapped_content_mask: window.snapped_content_mask(),
+            content_mask: window.content_mask().bounds,
+            reach: GlyphReach::UNSET,
             run_rendering: None,
         }
+    }
+
+    /// Whether the line's next glyph may draw inside `mask`, the line's
+    /// content mask, for the line to skip the glyphs it need not paint.
+    /// `line_glyph` is the line's glyph box as upstream builds it: the
+    /// glyph's origin on the top of its line, sized by the font's bounding
+    /// box. The glyph itself is drawn `baseline` further down, on the line's
+    /// baseline, where a tall line puts it well below the top; upstream's
+    /// `line_glyph.intersects(mask)` then skips glyphs that reach into the
+    /// mask.
+    ///
+    /// This test is only conservative, leaving the exact test to the scene,
+    /// which drops a sprite outside its content mask: vertically it takes the
+    /// bounding box's height above and below the baseline; horizontally, as
+    /// upstream does, the bounding box's width from the glyph's origin on,
+    /// and its height before it, for glyphs reaching left of their origin;
+    /// each plus a margin for glyph dilation and subpixel positioning.
+    /// Nothing reaches into an empty mask. Where a glyph is drawn therefore
+    /// depends on its sprite alone, so a line painted in a scroll layer's
+    /// overscan and scrolled into view shows the same glyphs as the line
+    /// painted in place.
+    #[inline]
+    pub(crate) fn may_reach(
+        &mut self,
+        line_glyph: Bounds<Pixels>,
+        baseline: Pixels,
+        mask: &Bounds<Pixels>,
+    ) -> bool {
+        debug_assert_eq!(*mask, self.content_mask);
+        if !self.reach.is_for(line_glyph.size) {
+            self.reach = GlyphReach::new(line_glyph.size, &self.content_mask);
+        }
+        self.reach
+            .contains(line_glyph.origin.x, line_glyph.origin.y + baseline)
     }
 
     /// [`Window::paint_glyph`], for the next glyph of the line.
@@ -283,7 +373,8 @@ pub(crate) struct GlyphBoundsCache {
 struct GlyphSlot {
     params: RenderGlyphParams,
     raster_bounds: Bounds<DevicePixels>,
-    /// The glyph's tile, and the frame it was looked up in.
+    /// The glyph's tile, and the frame it was looked up in; kept past that
+    /// frame for its size.
     tile: Option<(u64, AtlasTile)>,
 }
 
@@ -323,20 +414,27 @@ impl GlyphBoundsCache {
     /// The glyph's raster bounds, if kept.
     #[cfg(test)]
     pub(crate) fn get(&self, params: &RenderGlyphParams) -> Option<Bounds<DevicePixels>> {
-        self.lookup(params).map(|(bounds, _)| bounds)
+        self.lookup(params).map(|(bounds, _, _)| bounds)
     }
 
-    /// The glyph's raster bounds, if kept, and its tile, if it was looked up
-    /// this frame.
+    /// The glyph's raster bounds, if kept, its tile, if it was looked up this
+    /// frame, and the size of its sprite, if its tile was ever looked up: a
+    /// glyph's rasterization, and so its tile's size, only depends on its
+    /// description, whether or not the atlas still holds it.
     pub(crate) fn lookup(
         &self,
         params: &RenderGlyphParams,
-    ) -> Option<(Bounds<DevicePixels>, Option<AtlasTile>)> {
+    ) -> Option<(
+        Bounds<DevicePixels>,
+        Option<AtlasTile>,
+        Option<Size<DevicePixels>>,
+    )> {
         match &self.slots[Self::slot(params)] {
             Some(slot) if slot.params == *params => Some((
                 slot.raster_bounds,
                 slot.tile
                     .and_then(|(frame, tile)| (frame == self.frame).then_some(tile)),
+                slot.tile.map(|(_, tile)| tile.bounds.size),
             )),
             _ => None,
         }

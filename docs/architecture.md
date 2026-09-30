@@ -31,7 +31,10 @@ view chooses to:
 3. rebuild, when reuse would not be safe.
 
 Layout and text measurement also keep enough state across frames to avoid
-invalidating expensive caches. **gpui-fast retains frame work, not a parallel
+invalidating expensive caches. Scrolling, where everything in a scroll
+container moves and so no view is drawn where it was, is handled by a
+separate mechanism: the scrolled content is kept as cached GPU tiles and
+composited at the new offset (see [Scrolled content](#scrolled-content-layers)). **gpui-fast retains frame work, not a parallel
 UI tree**: it is incremental reconstruction of GPUI's frames over its
 immediate element tree.
 
@@ -286,7 +289,8 @@ frame around it.
 Every view is drawn from scratch while the window is refreshed
 (`window.refresh()`, a resize, a focus change), while something is dragged,
 while the inspector is picking, and while accessibility is active. Setting
-`GPUI_VIEW_RETENTION=0` turns retention off entirely.
+`GPUI_VIEW_RETENTION=0` turns retention off entirely, and scroll layers with
+it; `GPUI_SCROLL_LAYERS=0` turns off scroll layers alone.
 
 ## Drawing a view from the last frame
 
@@ -452,6 +456,134 @@ primitive into a copy.
 - **Element ids and absolute bounds** are cached per frame without rehashing
   (`fast/global_id.rs`, `fast/layout_bounds.rs`).
 
+## Scrolled content: layers
+
+### Why retained views do not cover scrolling
+
+A view is drawn from the last frame only where it was drawn
+([Where it is drawn](#where-it-is-drawn)). When a container scrolls, every
+view inside it moves, so every one of them is built at its retained layout:
+rendered, prepainted and painted again. Nothing it read changed; only an
+offset did. In GPUI Kit's component gallery that was about 60 % of a
+scrolled frame.
+
+Copying a view's output to a new position is not a fix. The output holds
+positions in window coordinates everywhere: primitives, hitboxes, listeners
+that captured bounds, element state. And GPUI culls while it paints, so what
+was outside the viewport last frame was never painted and cannot be copied.
+
+### The model
+
+gpui-fast does what UIKit, Flutter and Chrome do (`fast/layers/`): a scroll
+container's content is painted once into a layer, rasterized into tiles, and
+on frames where only the offset changed the tiles are composited at the new
+offset.
+
+```text
+container scrolls
+        │
+        ▼
+only the offset changed?  ── no ──► repaint the content into the layer
+        │ yes                         (viewport + 2 viewports of overscan)
+        ▼
+still inside what was painted?  ── no ──► repaint around the new viewport
+        │ yes
+        ▼
+composite the tiles at the new offset; carry the content's
+hitboxes, listeners and dispatch subtree, translated
+```
+
+For each scroll container, a frame takes one of three paths
+(`fast/layers/policy.rs`):
+
+| Path | When | What happens |
+| --- | --- | --- |
+| **Composite** | Only the offset changed, and the viewport is still inside the painted region | The content is not rendered, prepainted or painted. Its non-scene records are carried from the last frame, hitboxes translated. The tiles covering the viewport go into the scene as sprites |
+| **Repaint** | The content changed, or the scroll reached the edge of the painted region | The content is painted into the layer's own scene over the viewport plus two viewports of overscan on each scrolled side. Each tile is hashed; only tiles whose hash changed are rasterized again |
+| **Bypass** | A layer cannot guarantee the result (below) | The frame is drawn exactly as without layers |
+
+A container gets a layer once it has scrolled on two consecutive frames, and
+loses it when its content changes on most frames (demotion), when it is not
+composited for 120 frames, or when the window is resized.
+
+### Telling a scroll from a change
+
+A scroll notifies the view holding the container, which by the rules above
+would count as a change. A scroll is therefore noted separately
+(`fast/layers/invalidate.rs`). The div's wheel listener, and
+`ScrollHandle::set_offset` for code that scrolls (a dragged scrollbar,
+`scroll_to_*`), note which container moved before the view is notified. A
+frame is scroll-only for a layer when the view holding the container was
+notified no more times than it was scrolled, nothing the content read
+changed, no view inside it was notified, and no hover it was painted with
+changed. A render that reads the offset (`ScrollHandle::offset` and the
+like) makes the view depend on it like any other state.
+
+### The same pixels
+
+A composited frame must be the frame drawn from scratch
+([Constraints](#constraints)), byte for byte:
+
+- **Background.** Subpixel text needs to know what it is drawn over, so a
+  layer is used only when the viewport lies on one opaque, solid-colour
+  quad. Its colour is baked into every tile. A gradient, a translucent window
+  or a rounded corner inside the viewport means Bypass.
+- **Pixel grid.** Scroll offsets are snapped to device pixels wherever
+  layers are compiled, with or without a layer, so both paths place content
+  on the same grid. Glyph origins are quantized so that a whole-pixel shift
+  moves them by exactly that shift (`fast/glyphs.rs`); on screen the result
+  is upstream's.
+- **Culling.** Content in overscan must be painted, so while a layer paints,
+  the scroll container culls against the painted region, not the viewport.
+  Glyphs are culled by where they can reach, not by the top of their line,
+  so a line painted in overscan and scrolled in shows the same glyphs as
+  when painted in place.
+- **Paths.** A path's antialiasing depends on how its pixels pair in 2×2
+  quads, so a path rasterized into a tile and moved by an odd number of
+  pixels differs by one level. Paths are never rasterized into tiles: they
+  are drawn over the tiles in the frame when nothing covers them, and Bypass
+  otherwise.
+
+### Positions that application code sees
+
+Application code only ever sees window coordinates, and they are current
+when it sees them (`fast/layers/input.rs`, `fast/layers/reuse.rs`):
+
+- the content's hitboxes are carried translated, so hit testing, hover and
+  cursor styles are exact on composited frames;
+- a press, a release, a drop, or a pointer move that lands on the content's
+  own elements first repaints a layer that moved since it was painted, so
+  listeners and element state hold current bounds when the event reaches
+  them. A move that lands elsewhere (on a scrollbar being dragged) does not;
+- scroll handle bounds are translated when read;
+- content that cannot be carried makes its container Bypass: deferred and
+  anchored elements, a focused text input, a children-prepainted listener.
+
+### The renderer contract
+
+The core hands renderers two things through `Scene` (`fast/layers/scene.rs`):
+
+- **tile sprites**: each visible tile is an ordinary polychrome sprite whose
+  texture id lies in a range no atlas allocates, so ordering, clipping and
+  batching are the scene's own;
+- **`Scene.layers`**: each composited layer's content scene (shared, handed
+  over without copying), its generation and its dirty tiles.
+
+A renderer keeps tile textures by layer and generation, rasterizes dirty and
+missing tiles before its main pass from `LayerFrame::tile_scene`, and binds a
+tile's texture when it meets a tile sprite. Nothing flows back to the core.
+Layers are compiled in only where a renderer implements this
+(`fast::layers::COMPILED`): Linux (wgpu) today. The Metal and Direct3D
+renderers are being ported, verified by the same pixel tests on each
+platform's CI.
+
+### Lists
+
+`uniform_list` and `list` are covered by the design but their layers are off
+(`fast::layers::lists::LIST_LAYERS`). As built, rows that take input are
+never given a layer, a hover change repaints every held row, and adding rows
+rebuilds the whole content. Lists need per-row records for layers to pay off.
+
 ## What an application must do
 
 Reusing a view is safe only if gpui-fast learns about every change to state
@@ -483,7 +615,14 @@ when it was last built. Upstream already requires the same of cached views.
 What still costs a rebuild on every frame is a change on every frame: an
 entity notified, or a global written, during prepaint or paint counts as
 changed even if the value is the same. Notify or write only when the value
-changes.
+changes. A per-frame registry is the common case: GPUI Kit's text selection
+reset a counter in a global and re-registered every selectable view on every
+frame, which rebuilt every view that read that global on every frame, and
+only worked because it did. Registrations have to persist while a view is
+drawn from the last frame.
+
+Scroll through `ScrollHandle` (or a list's state), not by writing an offset
+held elsewhere, so a scroll is told apart from a change of the content.
 
 ## Verification
 
@@ -506,8 +645,18 @@ compares the two directly.
   retention on and off in lockstep and compares, every frame, the quads, the
   text, icon and image sprites and the underlines, each with its bounds, clip
   and color. It does not compare paths or shadows; the oracle test does.
+- **The layer oracle** (`fast/tests/layers_oracle.rs`) plays random histories
+  of wheel scrolls (fractional deltas at fractional scales included),
+  programmatic scrolls, hovers, clicks, key presses and content changes in a
+  window with layers and one without. Every frame it compares the scenes
+  with each layer's tiles expanded into their primitives, hit tests at random
+  points, and the positions every listener observed.
+- **Renderer pixel tests** (`gpui_wgpu`, and each renderer that implements
+  layers) rasterize and composite tiles and compare them with the same
+  content drawn directly, byte for byte, on a real device.
 - **`GPUI_VIEW_RETENTION=0`** draws every frame from scratch at runtime, to
-  rule retention in or out when something looks wrong in an application.
+  rule retention in or out when something looks wrong in an application;
+  `GPUI_SCROLL_LAYERS=0` does the same for scroll layers.
 
 What these checks establish is that, for the sequences of state changes they
 run, the retained output equals the output drawn from scratch. They exercise
@@ -530,6 +679,14 @@ changes without a notification is outside what any such test can see (see
 - **Fingerprints.** Whether a retained node's style changed is decided by a
   64-bit fingerprint of the style. Release builds trust it; debug builds
   compare every match in full to catch a field the fingerprint misses.
+- **Tiles.** A window's layers hold up to 64 MB of tile textures, least
+  recently composited evicted first.
+- **Repaints.** A frame that repaints a layer paints five viewports of
+  content, and costs several times a frame without layers (up to 5–6.5 ms
+  against 0.6 ms in `gpui_perf`'s scrolled page). It comes once per two
+  viewports scrolled.
+- **Where layers do not apply.** The hooks cost 0.85 % more instructions on
+  average across `gpui_perf`'s headless scenarios, and at most +2.7 %.
 
 ## Results
 
@@ -545,7 +702,19 @@ Headless, 60 panel views of 64 labels each (`retained_bench`):
 | Six | 7.27 ms | 1.46 ms (−80%) |
 | All sixty | 10.33 ms | 7.38 ms (−29%) |
 
-The gain follows how little of the window changes, as it should. The
+The gain follows how little of the window changes, as it should.
+
+Scrolling, with scroll layers (`gpui_perf --headless`, real wheel events,
+retained views on in both columns):
+
+| Scenario | Layers off | Layers on |
+| --- | --- | --- |
+| A page of 24 sections of buttons, in a child view | 0.618 ms | 0.068 ms (−89%) |
+| The same page drawn by the scrolling view itself | 0.599 ms | 0.226 ms (−62%) |
+
+In GPUI Kit's component gallery, scrolling the Button story at 145 Hz costs
+27–28 % of a core with gpui-fast's retained views alone and 18–20 % with
+scroll layers (draw per frame 1.53–1.63 ms and 0.92–1.02 ms). The
 `gpui_perf` showcase against upstream's `gpui-pre` snapshot, in a real window,
 shows −82% to −88% for scrolling and animation in a component gallery, and
 −73% to −75% for a trading workspace with streaming quotes. The README has the
@@ -562,17 +731,18 @@ rewrite (the bounds tree is one).
 it came from and fails a change that is more than a hook: a hunk that adds
 more than 8 lines, a file that adds more than 40, or added lines that do not
 call into `fast/`. The exceptions are listed, each with its reason, in
-`script/upstream-allowlist`. As of this writing, 28 files in the tracked
-upstream directories differ from upstream; the 19 of them in
-`crates/gpui/src` differ by +464 and −737 lines. More lines are
+`script/upstream-allowlist`. As of this writing, 30 files in the tracked
+upstream directories differ from upstream; the 20 of them in
+`crates/gpui/src` differ by +609 and −776 lines. More lines are
 removed than added, because several method bodies are replaced by a call into
 `fast/`.
+
+The public API has one exception, which renderers need: `Scene.layers` and
+the types it holds, listed in [`upstream-sync.md`](upstream-sync.md).
 
 That shape serves two purposes. Upstream changes keep merging in with
 conflicts confined to hook lines. And each mechanism in `fast/` is a
 self-contained piece (retained layout nodes, the bounds grid, text
-measurement carrying, retained views) that can be proposed to GPUI on its own.
-
-Scrolling is the one case retained views cannot cover, because everything in
-a scroll container moves. [`scroll-layers.md`](scroll-layers.md) describes how
-scrolled content is composited from cached tiles instead.
+measurement carrying, retained views, scroll layers) that can be proposed to
+GPUI on its own. [`scroll-layers.md`](scroll-layers.md) is the reference for
+scroll layers: where they apply, how they fall back, and how to measure them.
