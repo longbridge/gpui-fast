@@ -104,6 +104,11 @@ pub use debug_overlay::*;
 pub use element::*;
 pub use elements::*;
 pub use executor::*;
+pub use fast::composition::{
+    ComposedScene, ComposedSceneLayer, CompositionSurfaceId, CompositionSurfaceKind,
+    PlatformCompositionSurface, PlatformCompositionSurfaceContent, PlatformSurfaceAttachment,
+    WindowComposition, WindowCompositionSurface,
+};
 pub use fast::layers::scene::{
     LAYER_TILE_TEXTURE_BASE, LayerContent, LayerFrame, LayerKey, SceneLayers, TileCoord,
     decode_layer_tile, layer_tile_id, layer_tile_texture_id,

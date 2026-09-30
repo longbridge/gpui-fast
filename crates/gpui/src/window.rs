@@ -986,6 +986,7 @@ pub(crate) struct Frame {
     pub(crate) mouse_listeners: Vec<Option<AnyMouseListener>>,
     pub(crate) dispatch_tree: DispatchTree,
     pub(crate) scene: Scene,
+    pub(crate) fast_composition_starts: crate::fast::composition::SurfaceStarts,
     pub(crate) hitboxes: Vec<Hitbox>,
     pub(crate) window_control_hitboxes: Vec<(WindowControlArea, Hitbox)>,
     pub(crate) deferred_draws: Vec<DeferredDraw>,
@@ -1034,6 +1035,7 @@ impl Frame {
             mouse_listeners: Vec::new(),
             dispatch_tree,
             scene: Scene::default(),
+            fast_composition_starts: crate::fast::composition::SurfaceStarts::default(),
             hitboxes: Vec::new(),
             window_control_hitboxes: Vec::new(),
             deferred_draws: Vec::new(),
@@ -1060,6 +1062,7 @@ impl Frame {
         self.mouse_listeners.clear();
         self.dispatch_tree.clear();
         self.scene.clear();
+        crate::fast::composition::SurfaceStarts::clear(&mut self.fast_composition_starts);
         self.input_handlers.clear();
         self.tooltip_requests.clear();
         self.cursor_styles.clear();
@@ -1175,6 +1178,7 @@ pub struct Window {
     pub(crate) text_style_stack: crate::fast::text_style::TextStyleStack,
     pub(crate) fast_glyph_bounds: crate::fast::glyphs::GlyphBoundsCache,
     pub(crate) fast_layers: crate::fast::layers::WindowLayers,
+    pub(crate) fast_composition: crate::fast::composition::WindowCompositionHandle,
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
@@ -2045,6 +2049,7 @@ impl Window {
             text_style_stack: crate::fast::text_style::TextStyleStack::default(),
             fast_glyph_bounds: crate::fast::glyphs::GlyphBoundsCache::default(),
             fast_layers: crate::fast::layers::WindowLayers::default(),
+            fast_composition: crate::fast::composition::WindowCompositionHandle::default(),
             rendered_entity_stack: Vec::new(),
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
@@ -3345,7 +3350,7 @@ impl Window {
         let _foreground_turn = profiler::journal::foreground_turn();
         #[cfg(feature = "profiler")]
         let present_start = Instant::now();
-        self.platform_window.draw(&self.rendered_frame.scene);
+        crate::fast::composition::present(self);
         #[cfg(feature = "profiler")]
         self.window_profiler.record_present(
             present_start,
@@ -3479,11 +3484,13 @@ impl Window {
 
         // Now actually paint the elements.
         self.invalidator.set_phase(DrawPhase::Paint);
+        crate::fast::composition::begin_base(self);
         root_element.paint(self, cx);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         self.paint_inspector(inspector_element, cx);
 
+        crate::fast::composition::begin_overlay(self);
         self.paint_deferred_draws(cx);
 
         if let Some(mut prompt_element) = prompt_element {
@@ -3795,6 +3802,7 @@ impl Window {
 
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
         crate::fast::retained::reuse_window_control_hitboxes(self, &range);
+        crate::fast::composition::reuse_starts(self, &range);
         self.next_frame.cursor_styles.extend(
             self.rendered_frame.cursor_styles
                 [range.start.cursor_styles_index..range.end.cursor_styles_index]
