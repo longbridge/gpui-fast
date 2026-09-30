@@ -1093,8 +1093,9 @@ fn layout_fingerprint(style: &Style, rem_size: Pixels, scale_factor: f32) -> u64
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::layout_fingerprint;
     use crate::px;
+    use crate::{GridTemplate, Style, taffy::ToTaffy as _};
 
     /// Every field the conversion to a Taffy style reads has to reach the
     /// fingerprint too: a change the fingerprint cannot see is one a retained

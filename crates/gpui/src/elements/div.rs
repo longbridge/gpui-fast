@@ -2216,7 +2216,8 @@ impl Interactivity {
         f: impl FnOnce(Style, &mut Window, &mut App) -> LayoutId,
     ) -> LayoutId {
         #[cfg(any(feature = "inspector", debug_assertions))]
-        window.with_inspector_state(
+        crate::fast::global_id::with_active_inspector_state(
+            window,
             _inspector_id,
             cx,
             |inspector_state: &mut Option<DivInspectorState>, _window| {
@@ -2314,7 +2315,8 @@ impl Interactivity {
         self.content_size = content_size;
 
         #[cfg(any(feature = "inspector", debug_assertions))]
-        window.with_inspector_state(
+        crate::fast::global_id::with_active_inspector_state(
+            window,
             _inspector_id,
             cx,
             |inspector_state: &mut Option<DivInspectorState>, _window| {

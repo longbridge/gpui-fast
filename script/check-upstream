@@ -252,18 +252,44 @@ def unmarked_hunks(path, old, new):
     return found
 
 
+# A method called on a field or local named `fast_...`, `self.fast_layout.end_frame()`:
+# the name marks the hunk but hides which `fast` module holds the method, so the hook
+# names its path instead, `crate::fast::layout_key::WindowLayout::end_frame(&mut ...)`.
+METHOD_ON_FAST = re.compile(r"\bfast_\w+(\.\w+)*\.\w+\s*(::<[^>]*>)?\(")
+
+
+def method_hooks(path, old, new):
+    """Finds lines a changed upstream Rust file adds that call a method on a `fast_...` value.
+
+    Returns `(line number, line)` for each.
+    """
+    if not path.endswith(".rs"):
+        return []
+    old_lines = [normalize(line) for line in old.decode("utf-8", errors="replace").splitlines()]
+    new_lines = new.decode("utf-8", errors="replace").splitlines()
+    found = []
+    for added, _ in diff_hunk_lines(old_lines, [normalize(line) for line in new_lines]):
+        for index in added:
+            if METHOD_ON_FAST.search(new_lines[index]):
+                found.append((index + 1, new_lines[index]))
+    return found
+
+
 GLOB_FROM_FAST = re.compile(rb"\buse\s+[\w:]*\bfast(::\w+)*::\*")
+# Inside `fast/`, `use` lines are fine but globs of any kind, `use super::*` included, are not.
+ANY_GLOB = re.compile(rb"^\s*(pub(\([\w:]+\))?\s+)?use\s+[^;]*::\*")
 
 
 def fast_globs(paths):
-    """Finds `use ...fast::*` and `use ...fast::<topic>::*` lines, which hide where code lives."""
+    """Finds `use ...fast::*` and `use ...fast::<topic>::*` lines, and any glob import inside `fast/`."""
     found = []
     for path in paths:
         if not path.endswith(".rs"):
             continue
+        in_fast = "/src/fast/" in path
         with open(os.path.join(ROOT, path), "rb") as file:
             for number, line in enumerate(file, 1):
-                if GLOB_FROM_FAST.search(line):
+                if GLOB_FROM_FAST.search(line) or (in_fast and ANY_GLOB.search(line)):
                     found.append(f"{path}:{number}")
     return found
 
@@ -318,6 +344,7 @@ def main():
     rows = []
     violations = 0
     unmarked = []
+    methods = []
     for path in changed:
         allowance = find_allowance(allowances, path)
         max_hunk = allowance.max_hunk if allowance and allowance.max_hunk is not None else args.max_hunk
@@ -362,6 +389,11 @@ def main():
                     problems.append(f"{len(marks)} hunk(s) don't name fast")
                     if not allowed_anything:
                         unmarked.extend((f"{path}:{number}", lines) for number, lines in marks)
+                calls = method_hooks(path, old, new)
+                if calls:
+                    problems.append(f"{len(calls)} method call(s) on a fast_ value")
+                    if not allowed_anything:
+                        methods.extend((f"{path}:{number}", line) for number, line in calls)
 
         if not problems:
             status = "ok" + (" (allow-listed)" if allowance else "")
@@ -396,9 +428,15 @@ def main():
     if unmarked:
         print()
 
+    for location, line in methods:
+        print(f"FAIL: {location}: method called on a `fast_` value; call it by its path, `crate::fast::<topic>::Type::method(...)`")
+        print(f"    + {line}")
+    if methods:
+        print()
+
     globs = fast_globs(path for path in ours if os.path.isfile(os.path.join(ROOT, path)))
     for location in globs:
-        print(f"FAIL: {location}: glob import from `fast`; name `crate::fast::<topic>::Name` instead")
+        print(f"FAIL: {location}: glob import; list the names, or name `crate::fast::<topic>::Name` instead")
     violations += len(globs)
     imports = fast_imports(path for path in ours if os.path.isfile(os.path.join(ROOT, path)))
     for location in imports:

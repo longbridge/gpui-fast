@@ -3238,7 +3238,7 @@ impl Window {
         }
 
         self.layout_engine.as_mut().unwrap().clear();
-        self.fast_layout.end_frame();
+        crate::fast::layout_key::WindowLayout::end_frame(&mut self.fast_layout);
         self.text_system().finish_frame();
         crate::fast::global_id::GlobalIdCache::finish_frame(&mut self.global_ids);
         crate::fast::retained::finish_retained_frame(self);
@@ -3436,7 +3436,7 @@ impl Window {
         let scale_factor = self.scale_factor();
         let mut root_element = self.root.as_ref().unwrap().clone().into_any_element();
         let root_layout_id = root_element.request_layout(self, cx);
-        self.fast_layout.phase_times.end_build();
+        crate::fast::stats::FramePhaseTimes::end_build(&mut self.fast_layout.phase_times);
         self.layout_engine
             .as_mut()
             .unwrap()
@@ -3471,7 +3471,7 @@ impl Window {
             tooltip_element = self.prepaint_tooltip(cx);
         }
 
-        self.fast_layout.phase_times.end_prepaint();
+        crate::fast::stats::FramePhaseTimes::end_prepaint(&mut self.fast_layout.phase_times);
         self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
 
         // Now actually paint the elements.
@@ -3493,7 +3493,7 @@ impl Window {
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         self.paint_inspector_hitbox(cx);
-        self.fast_layout.phase_times.end_paint();
+        crate::fast::stats::FramePhaseTimes::end_paint(&mut self.fast_layout.phase_times);
 
         // a11y may have been activated/deactivated halfway through the frame
         let a11y_active_start_of_frame = self.a11y.is_active();
@@ -6827,8 +6827,19 @@ impl Window {
         _inspector_id: Option<&crate::InspectorElementId>,
         cx: &mut App,
         f: impl FnOnce(&mut Option<T>, &mut Self) -> R,
-    ) -> Option<R> {
-        crate::fast::global_id::with_active_inspector_state(self, _inspector_id, cx, f)
+    ) -> R {
+        if let Some(inspector_id) = _inspector_id
+            && let Some(inspector) = &self.inspector
+        {
+            let inspector = inspector.clone();
+            let active_element_id = inspector.read(cx).active_element_id();
+            if Some(inspector_id) == active_element_id {
+                return inspector.update(cx, |inspector, _cx| {
+                    inspector.with_active_element_state(self, f)
+                });
+            }
+        }
+        f(&mut None, self)
     }
 
     #[cfg(any(feature = "inspector", debug_assertions))]

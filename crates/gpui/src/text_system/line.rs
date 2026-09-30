@@ -368,7 +368,6 @@ fn paint_line(
         let mut color = black();
         let mut current_underline: Option<(Point<Pixels>, UnderlineStyle)> = None;
         let mut current_strikethrough: Option<(Point<Pixels>, StrikethroughStyle)> = None;
-        let content_mask = window.content_mask();
         let mut glyph_painter = crate::fast::glyphs::LineGlyphPainter::new(window);
         let mut glyph_origin = point(
             aligned_origin_x(
@@ -533,6 +532,7 @@ fn paint_line(
                     size: max_glyph_size,
                 };
 
+                let content_mask = window.content_mask();
                 if max_glyph_bounds.intersects(&content_mask.bounds) {
                     let vertical_offset = point(px(0.0), glyph.position.y);
                     if glyph.is_emoji {

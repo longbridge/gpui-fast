@@ -610,7 +610,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{BoundsTree, CELL_SIZE, CHANGED_CELLS, MAX_CELLS_PER_AXIS};
     use crate::{Bounds, Point, Size};
     use rand::{Rng, SeedableRng};
 

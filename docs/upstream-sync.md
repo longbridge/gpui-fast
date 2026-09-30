@@ -88,13 +88,18 @@ working tree, so run it before committing. It fails when:
   covers the hunk, since rustfmt may spread one call over several lines. Hunks
   that only remove lines, or only change `use` declarations or blank lines,
   are exempt;
+- a line added to an upstream `.rs` file calls a method on a value named
+  `fast_...` (`self.fast_layout.end_frame()`): the name marks the hunk but
+  hides which module the method is in, so the hook calls it by its path,
+  `crate::fast::layout_key::WindowLayout::end_frame(&mut self.fast_layout)`;
 - a binary file differs;
-- any file, `fast/` included, glob-imports from `fast` (`use ...fast::*`,
-  `use ...fast::<topic>::*`);
+- any file glob-imports from `fast` (`use ...fast::*`,
+  `use ...fast::<topic>::*`), or a file inside `fast/` has a glob import of
+  any kind, `use super::*` in a test module included;
 - a file outside `fast/` has a `use` of `fast` at all (`use crate::fast::…`,
   `pub(crate) use …`): only a public `pub use fast::…` export passes.
 
-Apart from the glob rule, files under any `src/fast/` directory are never
+Apart from the glob rules, files under any `src/fast/` directory are never
 checked. A line that differs from upstream's only by a visibility bump
 (`pub(crate)`, `pub(super)`) is a hook by definition: it is counted in the
 table's `pub(crate)` column and not against any budget.
@@ -111,6 +116,24 @@ crates/gpui/src/view.rs removed=210 # ViewElement's cache-by-bounds is replaced 
 
 Removed lines deserve the most care: upstream's changes to code we deleted
 conflict on every sync, and have to be ported into `fast/` by hand.
+
+### Where our API differs from upstream's
+
+The check cannot see a change to what upstream's public types offer, so the
+few places where gpui-fast's differs from upstream's are listed here. Each is
+forced by what `fast/` keeps; anything not listed here is upstream's API
+unchanged, and a new entry needs as good a reason.
+
+- `GlobalElementId` carries the hash of its path next to the path
+  (`fast::global_id::PathHash`), so ids compare and hash in constant time.
+  It no longer implements `DerefMut`: changing the path in place would leave
+  the hash stale. `Default`, `PartialEq`, `Eq` and `Hash` are implemented in
+  `fast/global_id.rs` instead of derived, with upstream's meaning.
+- `ViewElement`'s `Element::RequestLayoutState` and `PrepaintState` are
+  `fast::retained::ViewLayoutState` and `ViewPrepaintState`, opaque types, in
+  place of `Option<AnyElement>`. `ViewElement` is `#[doc(hidden)]`, and the
+  states are only ever handed back to it by GPUI.
+- `crates/gpui/Cargo.toml` names this repository and sets `publish = false`.
 
 When the check fails, move the change into a `fast/` module and leave a hook
 behind that names it; use `git diff <import_commit> -- <file>` to see what

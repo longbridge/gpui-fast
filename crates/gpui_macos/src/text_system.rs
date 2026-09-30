@@ -592,7 +592,6 @@ impl MacTextSystemState {
                     .unwrap()
             };
             let font_id = self.id_for_native_font(font);
-            let fast_is_emoji = self.is_emoji(font_id);
 
             let glyphs = match runs.last_mut() {
                 Some(run) if run.font_id == font_id => &mut run.glyphs,
@@ -620,7 +619,7 @@ impl MacTextSystemState {
                     id: GlyphId(glyph_id as u32),
                     position: point(position.x as f32, position.y as f32).map(px),
                     index: ix_converter.utf8_ix,
-                    is_emoji: fast_is_emoji,
+                    is_emoji: self.is_emoji(font_id),
                 });
             }
         }

@@ -141,7 +141,9 @@ pub(crate) fn release_closed_inspector_ids(window: &mut crate::Window) {
 
 /// Runs `f` with the inspector's state for the element `inspector_id`
 /// names, if that is the element the inspector has selected, and does
-/// nothing otherwise. See [`crate::Window::with_inspector_state`].
+/// nothing otherwise. [`crate::Window::with_inspector_state`] runs `f` with
+/// `None` for every other element, which costs a div a clone of its style on
+/// every frame for nothing, so divs call this instead.
 #[cfg(any(feature = "inspector", debug_assertions))]
 #[inline]
 pub(crate) fn with_active_inspector_state<T: 'static, R>(
@@ -163,8 +165,9 @@ pub(crate) fn with_active_inspector_state<T: 'static, R>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{ElementId, GlobalElementId, GlobalIdCache};
     use std::hash::{BuildHasher, BuildHasherDefault};
+    use std::sync::Arc;
 
     /// An id's hash is worked out from its path when it is made, so ids made
     /// apart from the same path have to agree, and ids of different paths
