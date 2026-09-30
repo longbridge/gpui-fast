@@ -26,7 +26,7 @@ use crate::{
             record::LayerRecord,
             scene::{
                 LayerContent, LayerFrame, LayerKey, decode_layer_tile, layer_tile_id,
-                layer_tile_texture_id, translate_primitive,
+                layer_tile_texture_id, translate_primitive, visible_bounds,
             },
             tiles::{dirty_tiles, tile_hashes},
         },
@@ -415,6 +415,7 @@ pub(crate) fn insert_layer(
     let stats = &mut window.layout_engine.as_mut().unwrap().retention.stats;
     stats.layer_frames_composited += 1;
     stats.tiles_dirtied += dirtied as u64;
+    policy::note_work(window, id, 0.);
 }
 
 /// Inserts into `scene` the quads of the tiles of `layer` that show in
@@ -745,6 +746,21 @@ fn repaint(
         Ok((content, paths)) => (content, paths, false),
         Err(content) => (*content, Rc::from([]), true),
     };
+    let mut visible = painting.viewport.scale(scale_factor);
+    visible.origin += to_content;
+    let mut rendered_work = 0;
+    let mut visible_work = 0;
+    for operation in &content.paint_operations {
+        if let PaintOperation::Primitive(primitive) = operation {
+            rendered_work += 1;
+            visible_work += usize::from(visible_bounds(primitive).intersects(&visible));
+        }
+    }
+    policy::note_work(
+        window,
+        &painting.id,
+        rendered_work as f32 / visible_work.max(1) as f32,
+    );
     let hashes = tile_hashes(&content, TILE_SIZE, region);
     if has_paths {
         draw_into_frame(window, &painting.scene.paint_operations, Point::default());

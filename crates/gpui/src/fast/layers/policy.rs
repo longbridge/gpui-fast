@@ -16,6 +16,7 @@
 
 use crate::fast::layers::invalidate::OwnerWatch;
 use crate::fast::layers::record::LayerRecord;
+use crate::fast::layers::work::WorkBudget;
 use crate::fast::layers::{Layer, WindowLayers, input, invalidate, lists, scene::LayerKey};
 use crate::{
     App, Bounds, ContentMask, EntityId, GlobalElementId, Pixels, Point, Size, TextStyle, Window,
@@ -36,19 +37,17 @@ pub(crate) enum Decision {
 
 /// How many frames in a row a container must scroll on to get a layer.
 const PROMOTE_AFTER_SCROLLED_FRAMES: u8 = 2;
-/// A layer whose content changed on more of the last 16 frames than this
-/// is demoted.
-const MAX_CHANGED_FRAMES: u32 = 8;
-/// The same for a list's layer. A list renders only the rows it shows, while
-/// its layer paints them and two viewports of rows on each side, about five
-/// times the rows, on every frame its content changes (a hover changes only
-/// its row). Content changing on a fifth of the frames, as a feed of 60
-/// updates a second does at 120 Hz on half of them, then costs more than
-/// the list without a layer.
-const LIST_MAX_CHANGED_FRAMES: u32 = 3;
+/// A layer whose content changed on at least this many of the last 16
+/// frames is demoted. Include the halfway boundary at 120 Hz.
+const DEMOTE_AFTER_CHANGED_FRAMES: u32 = 8;
+/// Lists rebuild about five viewports on content changes, so their
+/// frequency limit is lower even before the work budget is exhausted.
+const LIST_DEMOTE_AFTER_CHANGED_FRAMES: u32 = 4;
 /// How many frames a demoted container's content must be stable for before
 /// it may get a layer again.
 const REPROMOTE_AFTER_STABLE_FRAMES: u64 = 60;
+/// Repeatedly unprofitable caches wait longer, up to this many doublings.
+const MAX_COOLDOWN_DOUBLINGS: u8 = 5;
 /// How many frames a container whose content held what a layer cannot
 /// composite waits before its content is painted into a layer again.
 const RETRY_AFTER_INELIGIBLE_FRAMES: u64 = 8;
@@ -95,6 +94,12 @@ pub(crate) struct LayerPolicy {
     /// Whether the content, as last painted into the layer, prepainted an
     /// anchored element.
     content_anchored: bool,
+    /// Recent rebuilding work, relative to drawing the visible content.
+    work: WorkBudget,
+    /// Backoff survives dropping the record and its cached rows.
+    cooldown_doublings: u8,
+    cooldown_frames: u64,
+    last_content_change: u64,
 }
 
 impl LayerPolicy {
@@ -197,7 +202,9 @@ pub(crate) fn decide(
     let changed_while_demoted =
         demoted_until.is_some() && invalidate::changed_without_layer(window, cx, id);
     if changed_while_demoted {
-        demoted_until = demoted_until.map(|until| until.max(frame + REPROMOTE_AFTER_STABLE_FRAMES));
+        demoted_until = demoted_until.map(|until| {
+            until.max(frame + policy.cooldown_frames.max(REPROMOTE_AFTER_STABLE_FRAMES))
+        });
     }
     if demoted_until.is_some_and(|until| frame >= until) {
         demoted_until = None;
@@ -207,7 +214,7 @@ pub(crate) fn decide(
     // for it, and whether it is dropped for holding what it cannot
     // composite.
     let mut changed = false;
-    let mut demote = false;
+    let mut demote = layer.record.is_some() && policy.work.over_budget();
     let mut ineligible = false;
     let decision = match &layer.record {
         _ if demoted_until.is_some() => Decision::Bypass,
@@ -250,15 +257,16 @@ pub(crate) fn decide(
         .unwrap_or_default();
     if changed {
         history |= 1;
-        let max_changed = if layer.rows.list {
-            LIST_MAX_CHANGED_FRAMES
+        let changed_limit = if layer.rows.list {
+            LIST_DEMOTE_AFTER_CHANGED_FRAMES
         } else {
-            MAX_CHANGED_FRAMES
+            DEMOTE_AFTER_CHANGED_FRAMES
         };
-        demote |= history.count_ones() > max_changed;
+        demote |= history.count_ones() >= changed_limit;
     }
     let decision = if demote { Decision::Bypass } else { decision };
 
+    let starting_cache = decision == Decision::Repaint && layer.record.is_none();
     let owner = invalidate::owner_view(window);
     let layer = window.fast_layers.layers.get_mut(id).unwrap();
     let policy = &mut layer.policy;
@@ -275,13 +283,28 @@ pub(crate) fn decide(
     policy.last_decision = Some(decision);
     policy.change_history = history;
     policy.demoted_until = demoted_until;
+    if starting_cache {
+        policy.work = WorkBudget::default();
+    }
+    if frame.saturating_sub(policy.last_content_change)
+        >= REPROMOTE_AFTER_STABLE_FRAMES << MAX_COOLDOWN_DOUBLINGS
+    {
+        policy.cooldown_doublings = 0;
+    }
+    if changed || changed_while_demoted {
+        policy.last_content_change = frame;
+    }
     if demote {
         layer.record = None;
+        layer.rows = lists::LayerRows::default();
+        policy.work = WorkBudget::default();
         policy.painted_in = None;
         policy.change_history = 0;
         policy.scrolled_streak = 0;
         policy.stable_since = frame;
-        policy.demoted_until = Some(frame + REPROMOTE_AFTER_STABLE_FRAMES);
+        policy.cooldown_frames = REPROMOTE_AFTER_STABLE_FRAMES << policy.cooldown_doublings;
+        policy.cooldown_doublings = (policy.cooldown_doublings + 1).min(MAX_COOLDOWN_DOUBLINGS);
+        policy.demoted_until = Some(frame + policy.cooldown_frames);
         if let Some(engine) = window.layout_engine.as_mut() {
             engine.retention.stats.layers_demoted += 1;
         }
@@ -305,6 +328,22 @@ pub(crate) fn decide(
         Decision::Bypass => {}
     }
     decision
+}
+
+/// Records work completed for the layer in this frame. One unit is the
+/// work of drawing its visible content directly; overscan and rows rebuilt
+/// for hover count too. The next prepaint can fall back before doing more.
+pub(crate) fn note_work(window: &mut Window, id: &GlobalElementId, work: f32) {
+    let frame = window.fast_layers.frame;
+    if let Some(layer) = window.fast_layers.layers.get_mut(id) {
+        layer.policy.work.note(frame, work);
+        if layer.policy.last_seen_frame == frame
+            && layer.policy.last_decision == Some(Decision::Repaint)
+            && layer.policy.last_content_change == frame
+        {
+            layer.policy.work.note_refresh(frame, work);
+        }
+    }
 }
 
 /// Whether the content `record` holds can ever be composited from a layer:
@@ -373,13 +412,20 @@ pub(crate) fn finish_frame(layers: &mut WindowLayers) {
 }
 
 /// Whether the layer is kept at the end of `frame`: it was composited
-/// lately, or it is demoted and remembers until when.
+/// lately, or it is demoted and remembers until when. Keep the lightweight
+/// policy briefly after cooldown too, so re-promotion does not lose backoff.
 pub(crate) fn keep(layer: &Layer, frame: u64) -> bool {
     frame < layer.last_composited_frame + DROP_AFTER_FRAMES
+        || (layer.policy.cooldown_doublings > 0
+            && frame
+                < layer
+                    .policy
+                    .last_seen_frame
+                    .saturating_add(DROP_AFTER_FRAMES))
         || layer
             .policy
             .demoted_until
-            .is_some_and(|until| frame < until)
+            .is_some_and(|until| frame < until.saturating_add(DROP_AFTER_FRAMES))
 }
 
 /// Whether the part of the content `record` painted still covers the

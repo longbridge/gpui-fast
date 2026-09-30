@@ -2001,6 +2001,8 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
         mem::swap(&mut window.next_frame.scene, &mut paint.scene);
         window.content_mask_stack.pop();
     }
+    let rendered_rows = paint.spans.len();
+    let rendered_operations = paint.scene.paint_operations.len();
     let painted = paint.scene;
 
     let scale_factor = window.scale_factor();
@@ -2116,6 +2118,13 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
         );
     }
     rows.list = true;
+    let visible_operations: usize = rows
+        .rows
+        .range(frame.visible.clone())
+        .map(|(_, row)| row.part.scene.paint_operations.len())
+        .sum();
+    let work = (rendered_rows as f32 / frame.visible.len().max(1) as f32)
+        .max(rendered_operations as f32 / visible_operations.max(1) as f32);
 
     // The content: the rows in order.
     let content = LayerContent::from_parts(rows.rows.values().map(|row| row.part.clone()));
@@ -2193,6 +2202,7 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
             .stats
             .layer_frames_repainted += 1;
     }
+    policy::note_work(window, id, work);
     paint::insert_layer(window, id, translation, dirtied);
 }
 

@@ -2394,7 +2394,9 @@ mod decisions {
             })),
             Some(Decision::Repaint)
         );
-        assert_eq!(scroll(cx, window, -20.), Some(Decision::Composite));
+        // Repeated broad repaints now fall back rather than keeping the
+        // expensive overscan alive.
+        assert_eq!(scroll(cx, window, -20.), Some(Decision::Bypass));
     }
 
     #[crate::test]
@@ -2446,7 +2448,9 @@ mod decisions {
             })
         });
         assert_eq!(decision(cx, window), Some(Decision::Repaint));
-        assert_eq!(scroll(cx, window, -20.), Some(Decision::Composite));
+        // Repeated broad repaints now fall back rather than keeping the
+        // expensive overscan alive.
+        assert_eq!(scroll(cx, window, -20.), Some(Decision::Bypass));
     }
 
     #[crate::test]
@@ -2963,19 +2967,13 @@ mod policies {
             }
         };
         promote(cx, window);
-        // Changed on eight frames of the last sixteen, the layer is kept;
-        // on the ninth, it is dropped.
+        // Frequency and work guards both apply; expensive overscan may
+        // demote the layer before the eighth changed frame.
         for tint in 1..=8 {
-            assert_eq!(
-                scroll_and(cx, window, -10., change(0x100000 + tint)),
-                Some(Decision::Repaint)
-            );
+            if scroll_and(cx, window, -10., change(0x100000 + tint)) == Some(Decision::Bypass) {
+                break;
+            }
         }
-        assert_eq!(layers_demoted(cx, window), 0);
-        assert_eq!(
-            scroll_and(cx, window, -10., change(0x200000)),
-            Some(Decision::Bypass)
-        );
         assert_eq!(layers_demoted(cx, window), 1);
         assert!(!has_record(cx, window));
         assert_eq!(scroll(cx, window, -10.), Some(Decision::Bypass));
@@ -2991,6 +2989,133 @@ mod policies {
         assert_eq!(scroll(cx, window, -10.), Some(Decision::Bypass));
         assert_eq!(scroll(cx, window, -10.), Some(Decision::Repaint));
         assert_eq!(scroll(cx, window, -10.), Some(Decision::Composite));
+    }
+
+    #[crate::test]
+    fn content_changing_every_other_frame_is_demoted(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let handle = page(cx, true);
+        let window = handle.into();
+        let rows = handle
+            .read_with(cx, |page, _| page.rows.clone().unwrap())
+            .unwrap();
+        promote(cx, window);
+        // A 60 Hz feed in a 120 Hz window must not keep repainting the
+        // layer's overscan indefinitely at the eight-of-sixteen boundary.
+        for tint in 1..=8 {
+            if scroll(cx, window, -10.) == Some(Decision::Bypass) {
+                break;
+            }
+            if scroll_and(cx, window, -10., |cx| {
+                rows.update(cx, |rows, cx| {
+                    rows.tint = 0x100000 + tint;
+                    cx.notify();
+                });
+            }) == Some(Decision::Bypass)
+            {
+                break;
+            }
+        }
+        assert_eq!(layers_demoted(cx, window), 1);
+        assert!(!has_record(cx, window));
+    }
+
+    #[crate::test]
+    fn overscan_repaints_below_the_frequency_threshold_are_demoted(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let handle = page(cx, true);
+        let window = handle.into();
+        let rows = handle
+            .read_with(cx, |page, _| page.rows.clone().unwrap())
+            .unwrap();
+        promote(cx, window);
+        for frame in 0..64 {
+            scroll_and(cx, window, -5., |cx| {
+                if frame % 4 == 0 {
+                    rows.update(cx, |rows, cx| {
+                        rows.tint += 1;
+                        cx.notify();
+                    });
+                }
+            });
+        }
+        assert_eq!(decision(cx, window), Some(Decision::Bypass));
+        assert_eq!(layers_demoted(cx, window), 1);
+        assert!(!has_record(cx, window));
+    }
+
+    #[crate::test]
+    fn repeatedly_unprofitable_layers_extend_their_cooldown(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let handle = page(cx, true);
+        let window = handle.into();
+        let rows = handle
+            .read_with(cx, |page, _| page.rows.clone().unwrap())
+            .unwrap();
+        promote(cx, window);
+        for cooldown in [60, 120, 240, 480, 960, 1920] {
+            for _ in 0..8 {
+                if scroll_and(cx, window, -1., |cx| {
+                    rows.update(cx, |rows, cx| {
+                        rows.tint += 1;
+                        cx.notify();
+                    });
+                }) == Some(Decision::Bypass)
+                {
+                    break;
+                }
+            }
+            let id = scroller_id(cx, window);
+            let remaining = with_window(cx, window, |window, _| {
+                window.fast_layers.layers[&id].policy.demoted_until.unwrap()
+                    - (window.fast_layers.frame - 1)
+            });
+            assert_eq!(remaining, cooldown);
+            assert!(!has_record(cx, window));
+            for _ in 0..cooldown - 1 {
+                draw(cx, window);
+            }
+            assert!(has_layer(cx, window, &id), "cooldown retains backoff");
+            // A retained ancestor may skip the first resumed prepaint.
+            // Give the wheel enough frames to promote the container again.
+            for _ in 0..4 {
+                scroll(cx, window, -1.);
+                if has_record(cx, window) {
+                    break;
+                }
+            }
+            assert!(has_record(cx, window), "stable content is promoted again");
+            assert_eq!(scroll(cx, window, -1.), Some(Decision::Composite));
+        }
+        assert_eq!(layers_demoted(cx, window), 6);
+        // The last recovery followed 1920 quiet frames, so a new period
+        // of expensive refreshes starts with the initial cooldown again.
+        for _ in 0..8 {
+            if scroll_and(cx, window, -1., |cx| {
+                rows.update(cx, |rows, cx| {
+                    rows.tint += 1;
+                    cx.notify();
+                });
+            }) == Some(Decision::Bypass)
+            {
+                break;
+            }
+        }
+        let id = scroller_id(cx, window);
+        assert_eq!(
+            with_window(cx, window, |window, _| {
+                window.fast_layers.layers[&id].policy.demoted_until.unwrap()
+                    - (window.fast_layers.frame - 1)
+            }),
+            60
+        );
+        assert_eq!(layers_demoted(cx, window), 7);
     }
 
     #[crate::test]
@@ -3454,7 +3579,9 @@ mod input {
         // Outside the viewport, a move after a scroll does not rebuild. (The
         // first scroll moves the pointer off the rows, a hover change.)
         scroll(cx, window, -20.);
-        assert_eq!(scroll(cx, window, -20.), Some(Decision::Composite));
+        // Repeated broad repaints now fall back rather than keeping the
+        // expensive overscan alive.
+        assert_eq!(scroll(cx, window, -20.), Some(Decision::Bypass));
         dispatch(cx, window, [mouse_move(point(px(300.), px(300.)), false)]);
         assert_eq!(rebuilds(cx, window), 1);
     }

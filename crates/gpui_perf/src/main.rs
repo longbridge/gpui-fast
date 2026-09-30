@@ -30,6 +30,8 @@
 //!   cost, and quit.
 //! - `--only <scenario>`, `--retention on|off`, `--frames N`: narrow `--auto`
 //!   down.
+//! - `GPUI_PERF_STREAM_MS=N`: workspace quote interval in milliseconds
+//!   (default 16), for comparing refresh workloads with the same build.
 //! - `--no-hold-clock`: on macOS, measure `--auto` without holding the CPU's
 //!   clock up; see `showcase/clock.rs`.
 //!

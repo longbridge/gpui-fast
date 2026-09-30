@@ -367,10 +367,21 @@ A scroll container gets a layer when all hold:
   an animation frame this frame. Any of these makes the container use today's
   path for the frame.
 
-Demotion: a layer whose content changed on more than 50 % of the last 16
-frames (spinners, streaming text), or that exceeds the tile budget, is
-dropped and the container stays on today's path until it has been stable for
-60 frames. A layer not composited for 120 frames is dropped.
+Demotion: a layer whose content changed on at least 50 % of the last 16
+frames (spinners, streaming text), that exceeds the tile budget, or whose
+estimated rebuilding work exceeds direct drawing's budget over 32 completed
+layer frames, is dropped and the container stays on today's path until it has been stable for
+60 frames. Rebuilding work counts rendered rows and paint operations relative
+to the visible content, including overscan, hover and input rebuilds, with a
+quarter-frame reserve for bookkeeping and tile rendering. The initial cache
+build is excluded; the history has a fixed size and is reset on demotion,
+which also releases cached rows. Two content refreshes that each rebuild more
+than two visible regions trigger demotion even when the average is cheap;
+initial cache builds and duplicate rebuilds of one refresh do not count as
+separate refreshes. Repeated demotions double the stable-frame cooldown from
+60 up to 1920 frames; notifications during cooldown restart its full wait,
+and 1920 quiet frames reset the backoff. These are work estimates, not a CPU
+or GPU timing guarantee. A layer not composited for 120 frames is dropped.
 
 ### 6.6 Nested scroll containers
 

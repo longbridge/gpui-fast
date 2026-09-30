@@ -407,9 +407,18 @@ impl Workspace {
         if self.stream.take().is_some() {
             return false;
         }
+        let interval = std::env::var("GPUI_PERF_STREAM_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|&millis| millis > 0)
+            .map(Duration::from_millis)
+            .unwrap_or(STREAM_EVERY);
+        if std::env::args().any(|arg| arg == "--auto") {
+            eprintln!("Workspace quote interval: {} ms", interval.as_millis());
+        }
         self.stream = Some(cx.spawn_in(window, async move |this, cx| {
             loop {
-                cx.background_executor().timer(STREAM_EVERY).await;
+                cx.background_executor().timer(interval).await;
                 if this.update(cx, |this, cx| this.tick(cx)).is_err() {
                     break;
                 }

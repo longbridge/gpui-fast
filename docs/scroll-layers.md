@@ -69,8 +69,28 @@ each frame it then takes one of three paths (`fast::layers::policy::decide`):
   - the background under the viewport is not one opaque solid quad;
   - the content has deferred or anchored elements, a focused input, or
     surfaces;
-  - the content changes on most frames (demotion);
+  - the content changes on at least eight of the last sixteen frames (demotion);
   - paths in the content are covered by something drawn after them.
+
+The demotion policy also tracks rebuilding work over the last 32 completed
+layer frames. Virtual lists count the rows and paint operations they actually
+rebuilt relative to the visible rows; other scroll containers count painted
+primitives relative to those visible in the viewport. Scroll extensions, hover
+changes and input rebuilds count too. The initial cache build is excluded, and
+a quarter of each frame's budget is reserved for cache bookkeeping and tile
+rendering. A layer whose estimated work reaches direct drawing's budget falls
+back even if updates occur on fewer than half the frames. Two content refreshes
+that each rebuild more than two visible regions also trigger fallback, without
+waiting for the average: rare broad updates must not keep causing latency
+spikes. One isolated update and the initial cache build are not enough to
+trigger this guard.
+
+Demotion releases cached rows and resets the fixed-size work history. The
+first cooldown requires 60 stable frames; repeated demotions double that wait,
+up to 1920 frames, so periodic refreshes do not keep rebuilding and discarding
+the cache. Updates during cooldown restart its full wait. After 1920 quiet
+frames the backoff resets. This is a work estimate, not a measurement of GPU
+time, and does not depend on the monitor's refresh rate.
 
 Paths are never rasterized into tiles, because odd translations change their
 antialiasing. When nothing covers them, they are drawn over the tiles in the
@@ -151,3 +171,12 @@ Most of what remains in the Button story is GPUI Kit, not the scrolled content.
 GPUI Kit writes window-wide state during render (`sync_focused_input_registry`,
 `GlobalState`, `SelectionStateRegistry`), which rebuilds the ancestor views on
 every scrolled frame.
+
+Refresh workloads can be measured with the same release build using
+`GPUI_PERF_STREAM_MS`, the showcase workspace's quote interval in milliseconds
+(default 16), and switching only `GPUI_SCROLL_LAYERS`. For example:
+
+```sh
+GPUI_PERF_STREAM_MS=133 cargo run -p gpui_perf --release -- --auto --only WorkspaceScroll --retention on --frames 600
+GPUI_PERF_STREAM_MS=133 GPUI_SCROLL_LAYERS=0 cargo run -p gpui_perf --release -- --auto --only WorkspaceScroll --retention on --frames 600
+```

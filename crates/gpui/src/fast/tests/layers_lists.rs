@@ -235,6 +235,7 @@ mod uniform {
     pub(super) struct UniformPage {
         pub(super) count: usize,
         pub(super) row_height: f32,
+        tint: bool,
         pub(super) rendered: Rc<RefCell<Vec<Range<usize>>>>,
     }
 
@@ -242,6 +243,7 @@ mod uniform {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let rendered = self.rendered.clone();
             let row_height = self.row_height;
+            let tint = self.tint;
             div().size_full().bg(rgb(0xffffff)).child(
                 crate::uniform_list(
                     "list",
@@ -250,10 +252,11 @@ mod uniform {
                         rendered.borrow_mut().push(range.clone());
                         range
                             .map(|row| {
-                                div()
-                                    .w(px(VIEWPORT_WIDTH))
-                                    .h(px(row_height))
-                                    .bg(row_color(row))
+                                div().w(px(VIEWPORT_WIDTH)).h(px(row_height)).bg(if tint {
+                                    rgb(0x224466).into()
+                                } else {
+                                    row_color(row)
+                                })
                             })
                             .collect::<Vec<_>>()
                     }),
@@ -282,6 +285,7 @@ mod uniform {
         let window = cx.add_window(move |_, _| UniformPage {
             count,
             row_height,
+            tint: false,
             rendered: log,
         });
         open_at(cx, window.into(), scale_factor);
@@ -304,6 +308,78 @@ mod uniform {
         assert_eq!(decision(cx, window), Some(Decision::Bypass));
         wheel(cx, window, -ROW_HEIGHT);
         assert_eq!(decision(cx, window), Some(Decision::Repaint));
+    }
+
+    #[crate::test]
+    fn uniform_list_with_expensive_quarter_rate_updates_falls_back(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let (handle, log) = page(cx, 1000);
+        let window = handle.into();
+        promote(cx, window);
+        for frame in 0..64 {
+            if frame % 4 == 0 {
+                handle
+                    .update(cx, |page, _, cx| {
+                        page.tint = !page.tint;
+                        cx.notify();
+                    })
+                    .unwrap();
+            }
+            rendered_rows(&log);
+            wheel(cx, window, -ROW_HEIGHT);
+        }
+        assert_eq!(decision(cx, window), Some(Decision::Bypass));
+        assert!(
+            held_rows(cx, window).is_empty(),
+            "demotion releases cached rows"
+        );
+        assert!(
+            rendered_rows(&log)
+                .iter()
+                .map(|range| range.len())
+                .sum::<usize>()
+                <= 6,
+            "the fallback renders the viewport, without layer overscan"
+        );
+        assert_eq!(
+            with_window(cx, window, |window, _| window.layout_stats().layers_demoted),
+            1
+        );
+        // Ongoing refreshes never re-promoted the layer. Once they stop,
+        // the same container may cache again, with a fresh work budget.
+        for _ in 0..64 {
+            wheel(cx, window, -ROW_HEIGHT);
+        }
+        assert_eq!(decision(cx, window), Some(Decision::Composite));
+        assert!(!held_rows(cx, window).is_empty());
+    }
+
+    #[crate::test]
+    fn uniform_list_with_sparse_broad_updates_stays_demoted(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let (handle, _) = page(cx, 1000);
+        let window = handle.into();
+        promote(cx, window);
+        for frame in 0..128 {
+            if frame % 16 == 0 {
+                handle
+                    .update(cx, |page, _, cx| {
+                        page.tint = !page.tint;
+                        cx.notify();
+                    })
+                    .unwrap();
+            }
+            wheel(cx, window, -ROW_HEIGHT);
+        }
+        assert_eq!(decision(cx, window), Some(Decision::Bypass));
+        assert_eq!(
+            with_window(cx, window, |window, _| window.layout_stats().layers_demoted),
+            1
+        );
     }
 
     #[crate::test]
@@ -371,8 +447,8 @@ mod uniform {
 
     /// A list whose content changes on every other frame while it scrolls, as
     /// a feed of 60 updates a second does at 120 Hz, would paint five
-    /// viewports of rows on each of them: its layer is demoted on the fourth
-    /// change within sixteen frames, and stays demoted while the feed goes on.
+    /// viewports of rows on each of them: its layer is demoted by the fourth
+    /// change within sixteen frames (the work guard may act earlier), and stays demoted while the feed goes on.
     #[crate::test]
     fn a_list_whose_content_keeps_changing_is_demoted(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {
@@ -403,22 +479,13 @@ mod uniform {
             with_window(cx, window, |window, _| window.layout_stats().layers_demoted)
         };
         promote(cx, window);
-        for step in 0..3 {
+        for _ in 0..4 {
             change(cx);
-            assert_eq!(
-                decision(cx, window),
-                Some(Decision::Repaint),
-                "change {step}"
-            );
+            if decision(cx, window) == Some(Decision::Bypass) {
+                break;
+            }
             wheel(cx, window, -ROW_HEIGHT);
-            assert_eq!(
-                decision(cx, window),
-                Some(Decision::Composite),
-                "step {step}"
-            );
         }
-        assert_eq!(demoted(cx), 0);
-        change(cx);
         assert_eq!(decision(cx, window), Some(Decision::Bypass));
         assert_eq!(demoted(cx), 1);
         for step in 0..20 {
@@ -780,11 +847,17 @@ mod list {
         alignment: ListAlignment,
     ) -> usize {
         let mut composited = 0;
+        let mut cached_rows = 0;
+        let mut direct_rows = 0;
         for seed in 0..8 {
-            let (with_layers, _) = page_at(cx, ListState::new(300, alignment, px(50.)), 1.25);
-            let (without_layers, _) = page_at(cx, ListState::new(300, alignment, px(50.)), 1.25);
+            let (with_layers, cached_log) =
+                page_at(cx, ListState::new(300, alignment, px(50.)), 1.25);
+            let (without_layers, direct_log) =
+                page_at(cx, ListState::new(300, alignment, px(50.)), 1.25);
             let with_layers: AnyWindowHandle = with_layers.into();
             let without_layers: AnyWindowHandle = without_layers.into();
+            cached_log.borrow_mut().clear();
+            direct_log.borrow_mut().clear();
             composited += compare_with_layers_off(
                 cx,
                 with_layers,
@@ -792,7 +865,13 @@ mod list {
                 &fractional_deltas(seed, 120),
                 &format!("{alignment:?}, seed {seed}"),
             );
+            cached_rows += cached_log.borrow().len();
+            direct_rows += direct_log.borrow().len();
         }
+        assert!(
+            cached_rows < direct_rows,
+            "{alignment:?}: cached path rendered {cached_rows} rows, direct path {direct_rows}"
+        );
         composited
     }
 
@@ -805,7 +884,9 @@ mod list {
         let composited = list_matches_layers_off_at_a_fractional_scale(cx, ListAlignment::Top);
         assert!(composited > 480, "the layer was composited ({composited})");
         let extended = extended_frames() - extended;
-        assert!(extended > 600, "frames kept the rows held ({extended})");
+        // Expensive extensions may fall back; the differential helper also
+        // checks that the cached path renders fewer rows overall.
+        assert!(extended > 480, "frames kept the rows held ({extended})");
     }
 
     #[crate::test]
@@ -817,7 +898,9 @@ mod list {
         let composited = list_matches_layers_off_at_a_fractional_scale(cx, ListAlignment::Bottom);
         assert!(composited > 480, "the layer was composited ({composited})");
         let extended = extended_frames() - extended;
-        assert!(extended > 600, "frames kept the rows held ({extended})");
+        // Expensive extensions may fall back; the differential helper also
+        // checks that the cached path renders fewer rows overall.
+        assert!(extended > 480, "frames kept the rows held ({extended})");
     }
 
     #[crate::test]
