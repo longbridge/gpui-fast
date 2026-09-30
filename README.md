@@ -115,12 +115,41 @@ compiles here untouched. One thing to know: state a view's render reads that
 gpui-fast cannot observe — an `Rc<RefCell<..>>` outside an entity, the time —
 needs a `cx.notify()` when it changes, as it already does for a cached view.
 
-Point a project at it in place of upstream GPUI:
+Point a project at it in place of upstream GPUI. Its crates carry the names
+and version of the [gpui-pre](#gpui-fast-gpui-pre-and-gpui-ce) snapshot GPUI
+Kit pins (`gpui-pre`, `gpui-pre-platform`, ... at `0.3.7`), while the library
+names stay GPUI's, so code keeps writing `gpui::`:
 
 ```toml
 [dependencies]
-gpui = { git = "https://github.com/longbridge/gpui-fast" }
+gpui = { package = "gpui-pre", git = "https://github.com/longbridge/gpui-fast" }
+gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/longbridge/gpui-fast" }
 ```
+
+### With GPUI Kit
+
+Because the names and version match, an application on
+[GPUI Kit](https://github.com/longbridge/gpui-kit) swaps its GPUI for
+gpui-fast by patching the snapshot crates the Kit depends on, whether it takes
+the Kit from crates.io or from git:
+
+```toml
+[patch.crates-io]
+gpui-pre = { git = "https://github.com/longbridge/gpui-fast" }
+gpui-pre-platform = { git = "https://github.com/longbridge/gpui-fast" }
+gpui-pre-macros = { git = "https://github.com/longbridge/gpui-fast" }
+gpui-pre-sum-tree = { git = "https://github.com/longbridge/gpui-fast" }
+# and gpui-pre-web / gpui-pre-reqwest-client when the graph has them
+```
+
+Two things to know:
+
+- The version tracks the snapshot the Kit pins exactly. When GPUI Kit moves to
+  a newer `gpui-pre`, the patch stops applying (Cargo warns that it was not
+  used) until gpui-fast moves too.
+- gpui-pre rewrites the `gpui::` paths its macros emit to `::gpui_kit::`;
+  gpui-fast's macros do not. A crate that depends on the Kit alone aliases it
+  at its root: `extern crate gpui_kit as gpui;`.
 
 ## gpui-fast, gpui-pre and gpui-ce
 
@@ -129,7 +158,8 @@ Several projects build on GPUI outside Zed:
 - **gpui-pre** publishes snapshots of upstream GPUI to crates.io, unmodified,
   so that libraries such as [GPUI Kit](https://github.com/longbridge/gpui-kit)
   can depend on a released GPUI. gpui-fast is a separate experiment and is
-  not part of it.
+  not part of it; it only takes gpui-pre's crate names and version, so that it
+  can be patched in where gpui-pre is used.
 - **gpui-ce** is a community-maintained GPUI.
 
 gpui-fast has a narrower focus: Retained Mode and window composition for

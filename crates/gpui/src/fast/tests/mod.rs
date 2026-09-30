@@ -3,6 +3,8 @@
 mod dependencies;
 mod dispatch;
 mod global_id;
+#[cfg(any(feature = "inspector", debug_assertions))]
+mod inspector;
 mod layout;
 mod number_shaping;
 mod oracle;

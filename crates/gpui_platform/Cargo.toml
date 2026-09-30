@@ -1,6 +1,6 @@
 [package]
-name = "gpui_platform"
-version = "0.1.0"
+name = "gpui-pre-platform"
+version = "0.3.7"
 edition.workspace = true
 publish.workspace = true
 license = "Apache-2.0"
@@ -9,6 +9,7 @@ license = "Apache-2.0"
 workspace = true
 
 [lib]
+name = "gpui_platform"
 path = "src/gpui_platform.rs"
 
 [features]

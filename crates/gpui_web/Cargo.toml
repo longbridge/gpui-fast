@@ -1,6 +1,6 @@
 [package]
-name = "gpui_web"
-version = "0.1.0"
+name = "gpui-pre-web"
+version = "0.3.7"
 publish.workspace = true
 edition.workspace = true
 license = "Apache-2.0"
@@ -14,6 +14,7 @@ default = ["multithreaded"]
 multithreaded = ["dep:wasm_thread", "scheduler/wasm-threads"]
 
 [lib]
+name = "gpui_web"
 path = "src/gpui_web.rs"
 
 [dependencies]

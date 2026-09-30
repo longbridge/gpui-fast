@@ -1,6 +1,6 @@
 [package]
-name = "sum_tree"
-version = "0.1.0"
+name = "gpui-pre-sum-tree"
+version = "0.3.7"
 edition.workspace = true
 publish = false
 license = "Apache-2.0"
@@ -10,6 +10,7 @@ description = "A sum tree data structure, a concurrency-friendly B-tree"
 workspace = true
 
 [lib]
+name = "sum_tree"
 path = "src/sum_tree.rs"
 doctest = false
 

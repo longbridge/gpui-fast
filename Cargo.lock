@@ -2528,8 +2528,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui"
-version = "0.2.2"
+name = "gpui-pre"
+version = "0.3.7"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -2550,8 +2550,10 @@ dependencies = [
  "futures",
  "futures-concurrency",
  "getrandom 0.3.4",
- "gpui_macros",
- "gpui_platform",
+ "gpui-pre-macros 0.3.7",
+ "gpui-pre-platform 0.3.7",
+ "gpui-pre-reqwest-client",
+ "gpui-pre-sum-tree 0.3.7",
  "gpui_shared_string",
  "gpui_util",
  "hdrhistogram",
@@ -2576,7 +2578,6 @@ dependencies = [
  "raw-window-handle",
  "refineable",
  "regex",
- "reqwest_client",
  "resvg",
  "scheduler",
  "schemars",
@@ -2588,7 +2589,6 @@ dependencies = [
  "spin 0.10.0",
  "stacksafe",
  "strum",
- "sum_tree",
  "taffy",
  "thiserror 2.0.17",
  "tracing",
@@ -2631,11 +2631,11 @@ dependencies = [
  "getrandom 0.3.4",
  "gpui-pre-collections",
  "gpui-pre-http-client",
- "gpui-pre-macros",
+ "gpui-pre-macros 0.3.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "gpui-pre-refineable",
  "gpui-pre-scheduler",
  "gpui-pre-shared-string",
- "gpui-pre-sum-tree",
+ "gpui-pre-sum-tree 0.3.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "gpui-pre-util",
  "gpui-pre-util-macros",
  "heapless",
@@ -2693,7 +2693,7 @@ dependencies = [
  "derive_more",
  "etagere",
  "foreign-types",
- "gpui-pre",
+ "gpui-pre 0.3.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "image",
  "log",
  "metal",
@@ -2762,7 +2762,7 @@ dependencies = [
  "calloop-wayland-source",
  "filedescriptor",
  "futures",
- "gpui-pre",
+ "gpui-pre 0.3.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "gpui-pre-collections",
  "gpui-pre-http-client",
  "gpui-pre-util",
@@ -2812,7 +2812,7 @@ dependencies = [
  "dispatch2",
  "foreign-types",
  "futures",
- "gpui-pre",
+ "gpui-pre 0.3.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "gpui-pre-apple",
  "gpui-pre-collections",
  "gpui-pre-util",
@@ -2842,6 +2842,17 @@ dependencies = [
 [[package]]
 name = "gpui-pre-macros"
 version = "0.3.7"
+dependencies = [
+ "gpui-pre 0.3.7",
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "gpui-pre-macros"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1627c5dd3c3351e39e0621d3f3e31dbbe7c7658df90b1d2ec12bfe95d54cd37"
 dependencies = [
@@ -2866,15 +2877,27 @@ dependencies = [
 [[package]]
 name = "gpui-pre-platform"
 version = "0.3.7"
+dependencies = [
+ "console_error_panic_hook",
+ "gpui-pre 0.3.7",
+ "gpui-pre-web 0.3.7",
+ "gpui_linux",
+ "gpui_macos",
+ "gpui_windows",
+]
+
+[[package]]
+name = "gpui-pre-platform"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0112105c2ac6757fbf527c9c92a753be9bcbce9f4cf26959a11eaa1db6565aa5"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
- "gpui-pre",
+ "gpui-pre 0.3.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "gpui-pre-linux",
  "gpui-pre-macos",
- "gpui-pre-web",
+ "gpui-pre-web 0.3.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "gpui-pre-windows",
 ]
 
@@ -2885,6 +2908,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ffd14639e5dfab906bbaeabfe0f94289120dcf2e6ed37217deb13964867e89a5"
 dependencies = [
  "gpui-pre-derive-refineable",
+]
+
+[[package]]
+name = "gpui-pre-reqwest-client"
+version = "0.3.7"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures",
+ "gpui_util",
+ "http_client",
+ "http_client_tls",
+ "log",
+ "regex",
+ "tokio",
+ "zed-reqwest",
 ]
 
 [[package]]
@@ -2913,6 +2952,21 @@ dependencies = [
  "schemars",
  "serde",
  "smol_str",
+]
+
+[[package]]
+name = "gpui-pre-sum-tree"
+version = "0.3.7"
+dependencies = [
+ "ctor",
+ "heapless",
+ "log",
+ "proptest",
+ "rand 0.9.4",
+ "rayon",
+ "tracing",
+ "zlog",
+ "ztracing",
 ]
 
 [[package]]
@@ -2953,13 +3007,40 @@ dependencies = [
 [[package]]
 name = "gpui-pre-web"
 version = "0.3.7"
+dependencies = [
+ "anyhow",
+ "console_error_panic_hook",
+ "futures",
+ "gpui-pre 0.3.7",
+ "gpui_wgpu",
+ "http_client",
+ "js-sys",
+ "log",
+ "parking_lot",
+ "raw-window-handle",
+ "scheduler",
+ "smallvec",
+ "unicode-properties",
+ "unicode-script",
+ "unicode-segmentation",
+ "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm_thread 0.3.3 (git+https://github.com/zed-industries/wasm_thread?rev=0cf96c7708dfb97ccf3da50347e25edcf75d6937)",
+ "web-sys",
+ "web-time",
+]
+
+[[package]]
+name = "gpui-pre-web"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab3870cc909471bb830c3d79496770c754401aad6cfa122147ccb13e8908ad08"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
  "futures",
- "gpui-pre",
+ "gpui-pre 0.3.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "gpui-pre-http-client",
  "gpui-pre-scheduler",
  "gpui-pre-wgpu",
@@ -2989,7 +3070,7 @@ dependencies = [
  "bytemuck",
  "cosmic-text",
  "etagere",
- "gpui-pre",
+ "gpui-pre 0.3.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "gpui-pre-collections",
  "gpui-pre-util",
  "itertools 0.14.0",
@@ -3018,7 +3099,7 @@ dependencies = [
  "dunce",
  "etagere",
  "futures",
- "gpui-pre",
+ "gpui-pre 0.3.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "gpui-pre-collections",
  "gpui-pre-util",
  "image",
@@ -3079,7 +3160,7 @@ dependencies = [
  "derive_more",
  "etagere",
  "foreign-types",
- "gpui",
+ "gpui-pre 0.3.7",
  "image",
  "log",
  "metal",
@@ -3104,7 +3185,7 @@ dependencies = [
  "collections",
  "filedescriptor",
  "futures",
- "gpui",
+ "gpui-pre 0.3.7",
  "gpui_util",
  "gpui_wgpu",
  "http_client",
@@ -3153,7 +3234,7 @@ dependencies = [
  "dispatch2",
  "foreign-types",
  "futures",
- "gpui",
+ "gpui-pre 0.3.7",
  "gpui_apple",
  "gpui_util",
  "image",
@@ -3180,41 +3261,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui_macros"
-version = "0.1.0"
-dependencies = [
- "gpui",
- "heck 0.5.0",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "gpui_perf"
 version = "0.1.0"
 dependencies = [
- "gpui",
- "gpui-pre",
- "gpui-pre-platform",
- "gpui_platform",
+ "gpui-pre 0.3.7",
+ "gpui-pre 0.3.7 (registry+https://github.com/rust-lang/crates.io-index)",
+ "gpui-pre-platform 0.3.7",
+ "gpui-pre-platform 0.3.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "gpui_wgpu",
  "libc",
  "serde",
  "serde_json",
  "smol",
-]
-
-[[package]]
-name = "gpui_platform"
-version = "0.1.0"
-dependencies = [
- "console_error_panic_hook",
- "gpui",
- "gpui_linux",
- "gpui_macos",
- "gpui_web",
- "gpui_windows",
 ]
 
 [[package]]
@@ -3236,33 +3294,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui_web"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "console_error_panic_hook",
- "futures",
- "gpui",
- "gpui_wgpu",
- "http_client",
- "js-sys",
- "log",
- "parking_lot",
- "raw-window-handle",
- "scheduler",
- "smallvec",
- "unicode-properties",
- "unicode-script",
- "unicode-segmentation",
- "uuid",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm_thread 0.3.3 (git+https://github.com/zed-industries/wasm_thread?rev=0cf96c7708dfb97ccf3da50347e25edcf75d6937)",
- "web-sys",
- "web-time",
-]
-
-[[package]]
 name = "gpui_wgpu"
 version = "0.1.0"
 dependencies = [
@@ -3272,7 +3303,7 @@ dependencies = [
  "cosmic-text",
  "criterion",
  "etagere",
- "gpui",
+ "gpui-pre 0.3.7",
  "gpui_util",
  "itertools 0.14.0",
  "log",
@@ -3300,7 +3331,7 @@ dependencies = [
  "dunce",
  "etagere",
  "futures",
- "gpui",
+ "gpui-pre 0.3.7",
  "gpui_util",
  "image",
  "itertools 0.14.0",
@@ -5983,22 +6014,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
-name = "reqwest_client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "futures",
- "gpui_util",
- "http_client",
- "http_client_tls",
- "log",
- "regex",
- "tokio",
- "zed-reqwest",
-]
-
-[[package]]
 name = "resvg"
 version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6808,21 +6823,6 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
-
-[[package]]
-name = "sum_tree"
-version = "0.1.0"
-dependencies = [
- "ctor",
- "heapless",
- "log",
- "proptest",
- "rand 0.9.4",
- "rayon",
- "tracing",
- "zlog",
- "ztracing",
-]
 
 [[package]]
 name = "sval"

@@ -1,6 +1,6 @@
 [package]
-name = "reqwest_client"
-version = "0.1.0"
+name = "gpui-pre-reqwest-client"
+version = "0.3.7"
 edition.workspace = true
 publish.workspace = true
 license = "Apache-2.0"
@@ -12,6 +12,7 @@ workspace = true
 test-support = []
 
 [lib]
+name = "reqwest_client"
 path = "src/reqwest_client.rs"
 doctest = true
 

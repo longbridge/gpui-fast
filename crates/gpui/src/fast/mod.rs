@@ -18,6 +18,8 @@ pub(crate) mod dependencies;
 pub(crate) mod dispatch;
 pub(crate) mod global_id;
 pub(crate) mod glyphs;
+#[cfg(any(feature = "inspector", debug_assertions))]
+pub(crate) mod inspector;
 pub(crate) mod interactivity;
 pub(crate) mod layout;
 pub(crate) mod layout_bounds;

@@ -39,15 +39,15 @@ edition = "2024"
 [workspace.dependencies]
 collections = { path = "crates/collections", version = "0.1.0" }
 derive_refineable = { path = "crates/refineable/derive_refineable" }
-gpui = { path = "crates/gpui", default-features = false }
+gpui = { package = "gpui-pre", path = "crates/gpui", default-features = false }
 gpui_apple = { path = "crates/gpui_apple" }
 gpui_linux = { path = "crates/gpui_linux", default-features = false }
 gpui_macos = { path = "crates/gpui_macos", default-features = false }
-gpui_macros = { path = "crates/gpui_macros" }
-gpui_platform = { path = "crates/gpui_platform", default-features = false }
+gpui_macros = { package = "gpui-pre-macros", path = "crates/gpui_macros" }
+gpui_platform = { package = "gpui-pre-platform", path = "crates/gpui_platform", default-features = false }
 gpui_shared_string = { path = "crates/gpui_shared_string" }
 gpui_util = { path = "crates/gpui_util" }
-gpui_web = { path = "crates/gpui_web" }
+gpui_web = { package = "gpui-pre-web", path = "crates/gpui_web" }
 gpui_wgpu = { path = "crates/gpui_wgpu" }
 gpui_windows = { path = "crates/gpui_windows", default-features = false }
 http_client = { path = "crates/http_client" }
@@ -56,9 +56,9 @@ media = { path = "crates/media" }
 path = { path = "crates/path" }
 perf = { path = "tooling/perf" }
 refineable = { path = "crates/refineable" }
-reqwest_client = { path = "crates/reqwest_client" }
+reqwest_client = { package = "gpui-pre-reqwest-client", path = "crates/reqwest_client" }
 scheduler = { path = "crates/scheduler" }
-sum_tree = { path = "crates/sum_tree" }
+sum_tree = { package = "gpui-pre-sum-tree", path = "crates/sum_tree" }
 util = { path = "crates/util" }
 util_macros = { path = "crates/util_macros" }
 zlog = { path = "crates/zlog" }
@@ -417,14 +417,14 @@ debug = "full"
 
 [profile.dev.package]
 # proc-macros start
-gpui_macros = { opt-level = 3 }
+gpui-pre-macros = { opt-level = 3 }
 derive_refineable = { opt-level = 3 }
 util_macros = { opt-level = 3 }
 # proc-macros end
 # Build single-source-file crates with cg=1 as it helps make `cargo build` of a whole workspace a bit faster
 collections = { codegen-units = 1 }
 refineable = { codegen-units = 1 }
-reqwest_client = { codegen-units = 1 }
+gpui-pre-reqwest-client = { codegen-units = 1 }
 
 [profile.release]
 debug = "limited"

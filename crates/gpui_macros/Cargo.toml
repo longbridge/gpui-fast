@@ -1,6 +1,6 @@
 [package]
-name = "gpui_macros"
-version = "0.1.0"
+name = "gpui-pre-macros"
+version = "0.3.7"
 edition.workspace = true
 publish = false
 license = "Apache-2.0"
@@ -13,6 +13,7 @@ workspace = true
 inspector = []
 
 [lib]
+name = "gpui_macros"
 path = "src/gpui_macros.rs"
 proc-macro = true
 doctest = true

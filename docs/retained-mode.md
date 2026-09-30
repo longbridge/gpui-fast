@@ -177,7 +177,7 @@ A retained frame has to be the frame drawing from scratch would have produced.
   every simulated screen.
 
 ```sh
-cargo test -p gpui --features test-support
+cargo test -p gpui-pre --features test-support
 cargo run -p gpui_perf --release -- --headless --verify
 ```
 
@@ -220,5 +220,5 @@ A headless benchmark of 60 panel views × 64 labels is in
 `crates/gpui/src/fast/tests/retained_bench.rs`:
 
 ```sh
-cargo test -p gpui --lib --release retained_bench -- --ignored --nocapture
+cargo test -p gpui-pre --lib --release retained_bench -- --ignored --nocapture
 ```

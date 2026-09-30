@@ -134,6 +134,14 @@ unchanged, and a new entry needs as good a reason.
   place of `Option<AnyElement>`. `ViewElement` is `#[doc(hidden)]`, and the
   states are only ever handed back to it by GPUI.
 - `crates/gpui/Cargo.toml` names this repository and sets `publish = false`.
+- The crates GPUI Kit depends on are named after the gpui-pre snapshot it pins
+  (`gpui-pre`, `gpui-pre-platform`, `gpui-pre-web`, `gpui-pre-macros`,
+  `gpui-pre-reqwest-client`, `gpui-pre-sum-tree`) at its version, with `[lib]`
+  keeping upstream's crate name, so an application patches gpui-fast in with
+  `[patch.crates-io]`. The version moves with the snapshot GPUI Kit pins.
+- `App::register_inspector_element` takes a factory, the form newer upstream
+  has and GPUI Kit is written against; `fast::inspector` adapts it onto this
+  snapshot's registry.
 
 When the check fails, move the change into a `fast/` module and leave a hook
 behind that names it; use `git diff <import_commit> -- <file>` to see what

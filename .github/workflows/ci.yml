@@ -42,7 +42,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Test gpui
-        run: cargo test -p gpui --features test-support
+        run: cargo test -p gpui-pre --features test-support
 
       - name: Check gpui_perf
         run: cargo check -p gpui_perf --all-targets
@@ -74,7 +74,7 @@ jobs:
         run: script/check-upstream
 
       - name: Rustfmt
-        run: cargo fmt -p gpui -p gpui_perf -- --check
+        run: cargo fmt -p gpui-pre -p gpui_perf -- --check
 
       - name: Clippy
-        run: cargo clippy -p gpui -p gpui_perf --all-targets --features gpui/test-support -- -D warnings
+        run: cargo clippy -p gpui-pre -p gpui_perf --all-targets --features gpui-pre/test-support -- -D warnings
