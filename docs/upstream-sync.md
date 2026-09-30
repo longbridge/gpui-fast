@@ -145,6 +145,25 @@ unchanged, and a new entry needs as good a reason.
 - `App::register_inspector_element` takes a factory, the form newer upstream
   has and GPUI Kit is written against; `fast::inspector` adapts it onto this
   snapshot's registry.
+- Window composition, the API of
+  [zed#62379](https://github.com/zed-industries/zed/pull/62379), which
+  upstream has not merged yet: native views drawn between a window's GPUI
+  content and its overlays. `gpui` exports `WindowComposition`,
+  `WindowCompositionSurface`, `CompositionSurfaceId`,
+  `CompositionSurfaceKind`, `PlatformSurfaceAttachment`,
+  `PlatformCompositionSurface`, `PlatformCompositionSurfaceContent`,
+  `ComposedScene` and `ComposedSceneLayer`; `PlatformWindow` gains
+  `draw_composed`, `enable_window_composition`, `create_native_surface` and
+  `set_composition_order`, with defaults that keep a backend without
+  composition working; `Scene` gains `is_empty` and `replay_balanced`, and
+  `ComposedScene::layer_scene`, ours, cuts one layer's scene out for a
+  renderer; `Window` gains `enable_window_composition` and
+  `with_composition_surface`. It all lives in `fast::composition`, so when
+  upstream merges its version, the sync replaces ours with it. Two things
+  behave differently from the pull request: a retained view drawn again from
+  last frame keeps the surface switches it made, and `with_composition_surface`
+  inside a scroll layer paints where the layer does. The `native_webview`
+  example in `gpui_perf` shows it on macOS, Windows and Linux.
 
 When the check fails, move the change into a `fast/` module and leave a hook
 behind that names it; use `git diff <import_commit> -- <file>` to see what
