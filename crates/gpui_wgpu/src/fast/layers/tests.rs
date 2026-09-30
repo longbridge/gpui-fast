@@ -170,7 +170,7 @@ fn composite_and_compare(harness: &mut Harness, translation: (f32, f32), paths: 
 }
 
 #[test]
-fn a_changed_generation_rerasterizes_only_dirty_tiles() {
+fn dirty_tiles_are_rasterized_once_they_are_shown() {
     let mut cache = TileCache::default();
     let key = LayerKey(3);
     let all = [coord(0, 0), coord(1, 0), coord(0, 1), coord(1, 1)];
@@ -186,23 +186,24 @@ fn a_changed_generation_rerasterizes_only_dirty_tiles() {
                 .collect::<Vec<_>>()
         };
 
-    // A new layer: every dirty tile, shown or not.
-    let mut sorted = all.to_vec();
-    sorted.sort();
-    assert_eq!(frame(&mut cache, 1, &all, &all[..2]), sorted);
+    let [a, b, c, _] = all;
+    // A new layer: only the dirty tiles shown. The others wait until they are.
+    let mut shown = vec![a, b];
+    shown.sort();
+    assert_eq!(frame(&mut cache, 1, &all, &[a, b]), shown);
     // The same generation again: nothing.
-    assert_eq!(frame(&mut cache, 1, &all, &all[..2]), vec![]);
-    // The next generation: only its dirty tile, although others are shown.
-    assert_eq!(
-        frame(&mut cache, 2, &[coord(1, 0)], &all),
-        vec![coord(1, 0)]
-    );
-    assert_eq!(frame(&mut cache, 2, &[coord(1, 0)], &all), vec![]);
+    assert_eq!(frame(&mut cache, 1, &all, &[a, b]), vec![]);
+    // The next generation dirties a held tile that is not shown: it waits.
+    assert_eq!(frame(&mut cache, 2, &[b, c], &[a]), vec![]);
+    // Shown again, it is rasterized, and only it.
+    assert_eq!(frame(&mut cache, 2, &[b, c], &[a, b]), vec![b]);
+    // A dirty tile never shown before is rasterized once it is.
+    assert_eq!(frame(&mut cache, 3, &[], &[a, b, c]), vec![c]);
     // A skipped generation may have dirtied any tile: shown tiles again.
-    assert_eq!(frame(&mut cache, 4, &[], &all[..1]), vec![coord(0, 0)]);
+    assert_eq!(frame(&mut cache, 5, &[], &[a]), vec![a]);
     // A shown tile the cache never had.
-    assert_eq!(frame(&mut cache, 4, &[], &[coord(2, 0)]), vec![coord(2, 0)]);
-    assert_eq!(rasterized, 7);
+    assert_eq!(frame(&mut cache, 5, &[], &[coord(2, 0)]), vec![coord(2, 0)]);
+    assert_eq!(rasterized, 6);
 }
 
 #[test]
@@ -309,11 +310,32 @@ fn scene_layers(key: LayerKey, generation: u64, dirty: &[TileCoord]) -> SceneLay
 fn rasterize_and_assemble(harness: &mut Harness, content: Scene, tiles: &[(i32, i32)]) -> Vec<u8> {
     let key = LayerKey(1);
     let coords: Vec<TileCoord> = tiles.iter().map(|&(x, y)| coord(x, y)).collect();
+    // The frame composites the tiles, where they were painted: tiles are
+    // rasterized once a frame shows them.
+    let layer = layer_frame(key, 1, content, &coords);
     let mut frame = Scene::default();
-    frame
-        .layers
-        .frames
-        .push(layer_frame(key, 1, content, &coords));
+    for &tile in &coords {
+        let bounds = layer.tile_bounds(tile);
+        frame.insert_primitive(PolychromeSprite {
+            order: 0,
+            pad: 0,
+            grayscale: false.into(),
+            opacity: 1.,
+            bounds,
+            content_mask: ContentMask { bounds },
+            corner_radii: Corners::default(),
+            tile: AtlasTile {
+                texture_id: layer_tile_texture_id(key),
+                tile_id: layer_tile_id(tile),
+                padding: 0,
+                bounds: Bounds {
+                    origin: point(DevicePixels(0), DevicePixels(0)),
+                    size: device_size(TILE as i32, TILE as i32),
+                },
+            },
+        });
+    }
+    frame.layers.frames.push(layer);
     frame.finish();
     harness.render(&frame, device_size(16, 16), background());
 

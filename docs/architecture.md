@@ -569,12 +569,13 @@ The core hands renderers two things through `Scene` (`fast/layers/scene.rs`):
 - **`Scene.layers`**: each composited layer's content scene (shared, handed
   over without copying), its generation and its dirty tiles.
 
-A renderer keeps tile textures by layer and generation, rasterizes dirty and
-missing tiles before its main pass from `LayerFrame::tile_scene`, and binds a
+A renderer keeps tile textures by layer and generation, marks dirty tiles
+stale, rasterizes the stale and missing tiles the frame composites before its
+main pass from `LayerFrame::tile_scene`, and binds a
 tile's texture when it meets a tile sprite. Nothing flows back to the core.
 Layers are compiled in only where a renderer implements this
-(`fast::layers::COMPILED`): Linux (wgpu) and macOS (Metal) today. The
-Direct3D renderer is being ported. Each renderer is verified by the same pixel
+(`fast::layers::COMPILED`): Linux (wgpu), macOS (Metal) and Windows
+(Direct3D 11). Each renderer is verified by the same pixel
 tests on its platform's CI. Metal's gradient dither is seeded from the
 position within the quad rather than on screen, so a gradient rasterized into
 a tile gets the same noise as one drawn in the window.

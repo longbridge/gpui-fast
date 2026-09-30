@@ -369,6 +369,68 @@ mod uniform {
         }
     }
 
+    /// A list whose content changes on every other frame while it scrolls, as
+    /// a feed of 60 updates a second does at 120 Hz, would paint five
+    /// viewports of rows on each of them: its layer is demoted on the fourth
+    /// change within sixteen frames, and stays demoted while the feed goes on.
+    #[crate::test]
+    fn a_list_whose_content_keeps_changing_is_demoted(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let (handle, _log) = page(cx, 1000);
+        let window: AnyWindowHandle = handle.into();
+        // Changes every row and draws the frame that follows, unless the
+        // change drew it.
+        let change = |cx: &mut TestAppContext| {
+            let frame = with_window(cx, window, |window, _| window.fast_layers.frame);
+            handle
+                .update(cx, |page, _, cx| {
+                    // A new row height: every row the layer holds changes.
+                    page.row_height = if page.row_height == ROW_HEIGHT {
+                        ROW_HEIGHT + 1.
+                    } else {
+                        ROW_HEIGHT
+                    };
+                    cx.notify();
+                })
+                .unwrap();
+            if with_window(cx, window, |window, _| window.fast_layers.frame) == frame {
+                draw(cx, window);
+            }
+        };
+        let demoted = |cx: &mut TestAppContext| {
+            with_window(cx, window, |window, _| window.layout_stats().layers_demoted)
+        };
+        promote(cx, window);
+        for step in 0..3 {
+            change(cx);
+            assert_eq!(
+                decision(cx, window),
+                Some(Decision::Repaint),
+                "change {step}"
+            );
+            wheel(cx, window, -ROW_HEIGHT);
+            assert_eq!(
+                decision(cx, window),
+                Some(Decision::Composite),
+                "step {step}"
+            );
+        }
+        assert_eq!(demoted(cx), 0);
+        change(cx);
+        assert_eq!(decision(cx, window), Some(Decision::Bypass));
+        assert_eq!(demoted(cx), 1);
+        for step in 0..20 {
+            if step % 2 == 0 {
+                change(cx);
+            } else {
+                wheel(cx, window, -ROW_HEIGHT);
+            }
+            assert_eq!(decision(cx, window), Some(Decision::Bypass), "step {step}");
+        }
+    }
+
     #[crate::test]
     fn uniform_list_matches_layers_off(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {

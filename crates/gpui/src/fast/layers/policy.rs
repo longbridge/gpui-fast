@@ -39,6 +39,13 @@ const PROMOTE_AFTER_SCROLLED_FRAMES: u8 = 2;
 /// A layer whose content changed on more of the last 16 frames than this
 /// is demoted.
 const MAX_CHANGED_FRAMES: u32 = 8;
+/// The same for a list's layer. A list renders only the rows it shows, while
+/// its layer paints them and two viewports of rows on each side, about five
+/// times the rows, on every frame its content changes (a hover changes only
+/// its row). Content changing on a fifth of the frames, as a feed of 60
+/// updates a second does at 120 Hz on half of them, then costs more than
+/// the list without a layer.
+const LIST_MAX_CHANGED_FRAMES: u32 = 3;
 /// How many frames a demoted container's content must be stable for before
 /// it may get a layer again.
 const REPROMOTE_AFTER_STABLE_FRAMES: u64 = 60;
@@ -243,7 +250,12 @@ pub(crate) fn decide(
         .unwrap_or_default();
     if changed {
         history |= 1;
-        demote |= history.count_ones() > MAX_CHANGED_FRAMES;
+        let max_changed = if layer.rows.list {
+            LIST_MAX_CHANGED_FRAMES
+        } else {
+            MAX_CHANGED_FRAMES
+        };
+        demote |= history.count_ones() > max_changed;
     }
     let decision = if demote { Decision::Bypass } else { decision };
 

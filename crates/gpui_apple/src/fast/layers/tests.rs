@@ -219,7 +219,7 @@ fn resize_releases_every_tile() {
 }
 
 #[test]
-fn a_changed_generation_rerasterizes_only_dirty_tiles() {
+fn dirty_tiles_are_rasterized_once_they_are_shown() {
     let mut cache = TileCache::default();
     let key = LayerKey(3);
     let all = [coord(0, 0), coord(1, 0), coord(0, 1), coord(1, 1)];
@@ -235,23 +235,24 @@ fn a_changed_generation_rerasterizes_only_dirty_tiles() {
                 .collect::<Vec<_>>()
         };
 
-    // A new layer: every dirty tile, shown or not.
-    let mut sorted = all.to_vec();
-    sorted.sort();
-    assert_eq!(frame(&mut cache, 1, &all, &all[..2]), sorted);
+    let [a, b, c, _] = all;
+    // A new layer: only the dirty tiles shown. The others wait until they are.
+    let mut shown = vec![a, b];
+    shown.sort();
+    assert_eq!(frame(&mut cache, 1, &all, &[a, b]), shown);
     // The same generation again: nothing.
-    assert_eq!(frame(&mut cache, 1, &all, &all[..2]), vec![]);
-    // The next generation: only its dirty tile, although others are shown.
-    assert_eq!(
-        frame(&mut cache, 2, &[coord(1, 0)], &all),
-        vec![coord(1, 0)]
-    );
-    assert_eq!(frame(&mut cache, 2, &[coord(1, 0)], &all), vec![]);
+    assert_eq!(frame(&mut cache, 1, &all, &[a, b]), vec![]);
+    // The next generation dirties a held tile that is not shown: it waits.
+    assert_eq!(frame(&mut cache, 2, &[b, c], &[a]), vec![]);
+    // Shown again, it is rasterized, and only it.
+    assert_eq!(frame(&mut cache, 2, &[b, c], &[a, b]), vec![b]);
+    // A dirty tile never shown before is rasterized once it is.
+    assert_eq!(frame(&mut cache, 3, &[], &[a, b, c]), vec![c]);
     // A skipped generation may have dirtied any tile: shown tiles again.
-    assert_eq!(frame(&mut cache, 4, &[], &all[..1]), vec![coord(0, 0)]);
+    assert_eq!(frame(&mut cache, 5, &[], &[a]), vec![a]);
     // A shown tile the cache never had.
-    assert_eq!(frame(&mut cache, 4, &[], &[coord(2, 0)]), vec![coord(2, 0)]);
-    assert_eq!(rasterized, 7);
+    assert_eq!(frame(&mut cache, 5, &[], &[coord(2, 0)]), vec![coord(2, 0)]);
+    assert_eq!(rasterized, 6);
 }
 
 #[test]

@@ -127,9 +127,11 @@ impl TileCache {
 
     /// Starts a frame that composites the tiles `composited` of the layers in
     /// `layers`. Returns the tiles to rasterize before they are drawn, each
-    /// with the index of its layer in `layers.frames`: the dirty tiles of a
-    /// generation the cache sees for the first time, and every composited
-    /// tile the cache does not hold. They count as held from here on.
+    /// with the index of its layer in `layers.frames`: every composited tile
+    /// the cache does not hold, or holds from an older generation. A dirty
+    /// tile the frame does not composite is only marked stale, and waits
+    /// until a frame shows it: a scrolling list dirties the tiles at the edge
+    /// of its overscan on most frames. They count as held from here on.
     pub(crate) fn begin_frame(
         &mut self,
         layers: &SceneLayers,
@@ -139,7 +141,7 @@ impl TileCache {
         let frame = self.frame;
         let mut planned = FxHashSet::default();
 
-        for (index, layer) in layers.frames.iter().enumerate() {
+        for layer in &layers.frames {
             let seen = self.layers.entry(layer.key).or_insert(SeenLayer {
                 generation: layer.generation.wrapping_sub(2),
                 last_frame: frame,
@@ -167,7 +169,6 @@ impl TileCache {
                     tile.valid = false;
                 }
             }
-            planned.extend(layer.dirty_tiles.iter().map(|tile| (index, *tile)));
         }
 
         let mut indices = FxHashMap::default();
