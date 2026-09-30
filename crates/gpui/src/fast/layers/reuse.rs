@@ -12,10 +12,11 @@
 //! scene, which the layer's tiles stand for, and with the hitboxes moved by
 //! the scroll since the content was painted and clipped to the viewport.
 
-use std::rc::Rc;
+use std::{ops::Range, rc::Rc};
 
 use crate::{
-    App, Bounds, EntityId, GlobalElementId, LayoutId, Pixels, Point, Window,
+    App, Bounds, EntityId, GlobalElementId, Hitbox, LayoutId, PaintIndex, Pixels, Point,
+    PrepaintStateIndex, Window,
     fast::{dependencies::RenderDependencies, layers::input::LayerInput, retained::RetainedLayout},
 };
 
@@ -28,7 +29,6 @@ pub(crate) fn carry_prepaint(
     viewport: Bounds<Pixels>,
     scroll_offset: Point<Pixels>,
 ) {
-    let start = window.prepaint_index();
     let Some(layer) = window.fast_layers.layers.get_mut(id) else {
         return;
     };
@@ -42,28 +42,57 @@ pub(crate) fn carry_prepaint(
     input.stale = delta;
     input.viewport = viewport;
     input.handle_offset.set(delta);
+    // The hitboxes are the layer's, lent to the carry while it runs.
+    let hitboxes = std::mem::take(&mut input.hitboxes);
+    let carried = carry_prepaint_records(window, &range, &hitboxes, delta, viewport, !moved, true);
+    if let Some(layer) = window.fast_layers.layers.get_mut(id) {
+        layer.input.hitboxes = hitboxes;
+        if let Some(record) = layer.record.as_mut() {
+            record.prepaint_range = carried;
+        }
+    }
+}
 
+/// Carries the prepaint records the rendered frame holds over `range` into
+/// the frame being drawn, where prepainting what added them would add them
+/// again, returning where they lie in it: `hitboxes`, which stand for those
+/// of the range, moved by `delta` and clipped to `viewport`; its tooltips if
+/// `tooltips`, a tooltip showing where its element was when it was
+/// requested; its element states if `element_states`, which are dropped
+/// otherwise; its line layouts and dispatch nodes.
+#[inline]
+pub(crate) fn carry_prepaint_records(
+    window: &mut Window,
+    range: &Range<PrepaintStateIndex>,
+    hitboxes: &[Hitbox],
+    delta: Point<Pixels>,
+    viewport: Bounds<Pixels>,
+    tooltips: bool,
+    element_states: bool,
+) -> Range<PrepaintStateIndex> {
+    let start = window.prepaint_index();
     let next = &mut window.next_frame;
     let rendered = &mut window.rendered_frame;
     next.hitboxes
-        .extend(LayerInput::hitboxes_at(&input.hitboxes, delta, viewport));
-    // A tooltip shows where its element was when it was requested; a scroll
-    // hides tooltips (spec §7, rule 5).
-    let tooltips =
+        .extend(LayerInput::hitboxes_at(hitboxes, delta, viewport));
+    // A scroll hides tooltips (spec §7, rule 5).
+    let requests =
         &mut rendered.tooltip_requests[range.start.tooltips_index..range.end.tooltips_index];
-    if !moved {
+    if tooltips {
         next.tooltip_requests
-            .extend(tooltips.iter_mut().map(|request| request.take()));
+            .extend(requests.iter_mut().map(|request| request.take()));
     }
-    next.accessed_element_states.extend(
-        rendered.accessed_element_states
-            [range.start.accessed_element_states_index..range.end.accessed_element_states_index]
-            .iter()
-            .cloned(),
-    );
+    if element_states {
+        next.accessed_element_states.extend(
+            rendered.accessed_element_states[range.start.accessed_element_states_index
+                ..range.end.accessed_element_states_index]
+                .iter()
+                .cloned(),
+        );
+    }
     window
         .text_system
-        .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
+        .reuse_layouts(range.start.line_layout_index.clone()..range.end.line_layout_index.clone());
     let subtree = next.dispatch_tree.reuse_subtree(
         range.start.dispatch_tree_index..range.end.dispatch_tree_index,
         &mut rendered.dispatch_tree,
@@ -77,23 +106,13 @@ pub(crate) fn carry_prepaint(
         range.start.deferred_draws_index,
         range.end.deferred_draws_index
     );
-
-    let end = window.prepaint_index();
-    if let Some(record) = window
-        .fast_layers
-        .layers
-        .get_mut(id)
-        .and_then(|layer| layer.record.as_mut())
-    {
-        record.prepaint_range = start..end;
-    }
+    start..window.prepaint_index()
 }
 
 /// Carries the paint records of the content of the layer of the container
 /// `id` into the frame being drawn, where painting the content would add
 /// them: what [`carry_prepaint`] carried the prepaint records of.
 pub(crate) fn carry_paint(window: &mut Window, id: &GlobalElementId) {
-    let start = window.paint_index();
     let frame = window.fast_layers.frame;
     let Some(layer) = window.fast_layers.layers.get_mut(id) else {
         return;
@@ -104,7 +123,34 @@ pub(crate) fn carry_paint(window: &mut Window, id: &GlobalElementId) {
     let range = record.paint_range.clone();
     let delta = layer.input.stale;
     let viewport = layer.input.viewport;
+    let mut carried = carry_paint_records(window, &range, delta, viewport, true);
+    let Some(layer) = window.fast_layers.layers.get_mut(id) else {
+        return;
+    };
+    if let Some(record) = layer.record.as_mut() {
+        // The content's scene is the layer's, which is not carried.
+        carried.start.scene_index = record.paint_range.start.scene_index;
+        carried.end.scene_index = record.paint_range.end.scene_index;
+        record.paint_range = carried;
+    }
+    layer.input.ranges_frame = Some(frame);
+}
 
+/// Carries the paint records the rendered frame holds over `range` into
+/// the frame being drawn, where painting what added them would add them
+/// again, returning where they lie in it: its window control hitboxes,
+/// moved by `delta` and clipped to `viewport`, cursor styles, input
+/// handlers, mouse listeners, element states if `element_states`, tab stops
+/// and line layouts. The scene is not carried.
+#[inline]
+pub(crate) fn carry_paint_records(
+    window: &mut Window,
+    range: &Range<PaintIndex>,
+    delta: Point<Pixels>,
+    viewport: Bounds<Pixels>,
+    element_states: bool,
+) -> Range<PaintIndex> {
+    let start = window.paint_index();
     let next = &mut window.next_frame;
     let rendered = &mut window.rendered_frame;
     next.window_control_hitboxes.extend(
@@ -134,32 +180,22 @@ pub(crate) fn carry_paint(window: &mut Window, id: &GlobalElementId) {
             .iter_mut()
             .map(|listener| listener.take()),
     );
-    next.accessed_element_states.extend(
-        rendered.accessed_element_states
-            [range.start.accessed_element_states_index..range.end.accessed_element_states_index]
-            .iter()
-            .cloned(),
-    );
+    if element_states {
+        next.accessed_element_states.extend(
+            rendered.accessed_element_states[range.start.accessed_element_states_index
+                ..range.end.accessed_element_states_index]
+                .iter()
+                .cloned(),
+        );
+    }
     next.tab_stops.replay(
         &rendered.tab_stops.insertion_history
             [range.start.tab_handle_index..range.end.tab_handle_index],
     );
     window
         .text_system
-        .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
-
-    let mut end = window.paint_index();
-    let Some(layer) = window.fast_layers.layers.get_mut(id) else {
-        return;
-    };
-    if let Some(record) = layer.record.as_mut() {
-        // The content's scene is the layer's, which is not carried.
-        end.scene_index = record.paint_range.end.scene_index;
-        let mut start = start;
-        start.scene_index = record.paint_range.start.scene_index;
-        record.paint_range = start..end;
-    }
-    layer.input.ranges_frame = Some(frame);
+        .reuse_layouts(range.start.line_layout_index.clone()..range.end.line_layout_index.clone());
+    start..window.paint_index()
 }
 
 /// How a view drawn inside a layer's content was laid out when the content
