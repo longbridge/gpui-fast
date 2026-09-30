@@ -44,6 +44,12 @@ jobs:
       - name: Test gpui
         run: cargo test -p gpui --features test-support
 
+      # Scroll layer tiles must match drawing directly, byte for byte, on
+      # each renderer; these run on the runner's GPU.
+      - name: Test scroll layers on Metal
+        if: runner.os == 'macOS'
+        run: cargo test -p gpui_apple fast::layers -- --nocapture
+
       - name: Check gpui_perf
         run: cargo check -p gpui_perf --all-targets
 
