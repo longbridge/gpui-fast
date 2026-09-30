@@ -30,6 +30,10 @@ pub(crate) struct LayerInput {
     /// The frame the layer's record's prepaint and paint ranges index the
     /// records of: they can be carried into the frame after it only.
     pub(crate) ranges_frame: Option<u64>,
+    /// The frame that copied the layer's prepaint records along with the
+    /// view holding it, if it did, for its paint records to follow them.
+    /// See [`crate::fast::layers::reuse::follow_prepaint`].
+    pub(crate) prepaint_followed: Option<u64>,
     /// How far the content shown last frame had scrolled since it was
     /// painted: how far behind the positions its closures and element
     /// states hold are.
@@ -52,9 +56,14 @@ pub(crate) struct LayerInput {
 pub(crate) struct PaintingInput {
     /// The mask of each hitbox the content inserted, in order, before
     /// [`hitbox_mask`] clipped it to the viewport.
-    hitbox_masks: Vec<ContentMask<Pixels>>,
+    pub(crate) hitbox_masks: Vec<ContentMask<Pixels>>,
     /// Shared with the scroll handles tracking elements inside the content.
-    handle_offset: Rc<Cell<Point<Pixels>>>,
+    pub(crate) handle_offset: Rc<Cell<Point<Pixels>>>,
+    /// For a virtual list's rows, the part of the content painted, which
+    /// the list's own clip, its viewport, is taken out of the masks noted
+    /// for: rows are prepainted inside that clip, which does not move with
+    /// them. See [`unclip`].
+    pub(crate) list_region: Option<Bounds<Pixels>>,
 }
 
 /// A scroll handle's state, as a handle shares it.
@@ -174,7 +183,10 @@ pub(crate) fn before_dispatch(window: &mut Window, cx: &mut App, event: &Platfor
         // hitboxes, which is all its hover handling needs, and must not
         // rebuild it on every frame of the drag.
         PlatformInput::MouseMove(_) => &|_, layer| {
-            moved_onto.is_some_and(|id| layer.input.hitboxes.iter().any(|hitbox| hitbox.id == id))
+            moved_onto.is_some_and(|id| {
+                layer.input.hitboxes.iter().any(|hitbox| hitbox.id == id)
+                    || layer.rows.holds_hitbox(id)
+            })
         },
         // Presses, releases and drops, wherever they land: a press starts
         // what later moves continue (a drag, a selection) with the bounds
@@ -298,9 +310,55 @@ pub(crate) fn hitbox_mask(window: &mut Window) -> ContentMask<Pixels> {
     let Some(painting) = window.fast_layers.painting.as_mut() else {
         return mask;
     };
-    painting.input.hitbox_masks.push(mask);
+    let noted = match painting.input.list_region {
+        Some(region) => unclip(mask, painting.viewport, region),
+        None => mask,
+    };
+    painting.input.hitbox_masks.push(noted);
     ContentMask {
         bounds: mask.bounds.intersect(&painting.viewport),
+    }
+}
+
+/// `mask`, a mask inside `viewport`, with each edge it shares with
+/// `viewport` moved out to `region`'s: the clips of what lies inside a
+/// virtual list's rows, which move with the rows, without the list's own,
+/// which does not.
+fn unclip(
+    mask: ContentMask<Pixels>,
+    viewport: Bounds<Pixels>,
+    region: Bounds<Pixels>,
+) -> ContentMask<Pixels> {
+    let mask = mask.bounds;
+    let pick = |edge: Pixels, viewport: Pixels, region: Pixels| {
+        if edge == viewport { region } else { edge }
+    };
+    let top_left = crate::point(
+        pick(
+            mask.origin.x,
+            viewport.origin.x,
+            region.origin.x.min(viewport.origin.x),
+        ),
+        pick(
+            mask.origin.y,
+            viewport.origin.y,
+            region.origin.y.min(viewport.origin.y),
+        ),
+    );
+    let bottom_right = crate::point(
+        pick(
+            mask.right(),
+            viewport.right(),
+            region.right().max(viewport.right()),
+        ),
+        pick(
+            mask.bottom(),
+            viewport.bottom(),
+            region.bottom().max(viewport.bottom()),
+        ),
+    );
+    ContentMask {
+        bounds: Bounds::from_corners(top_left, bottom_right),
     }
 }
 

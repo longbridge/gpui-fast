@@ -158,6 +158,109 @@ fn a_tile_scene_keeps_layers_sharing_one_draw_order() {
     assert_eq!(t10.quads[0].bounds, sp(600. - 512., 10., 10., 10.));
 }
 
+/// Content handed to the renderer in parts, as a virtual list's rows are,
+/// draws over each tile what it draws handed over as one scene: a part
+/// reaching no pixel of a tile is left out of the tile's scene.
+#[test]
+fn content_in_parts_draws_each_tile_as_one_scene_does() {
+    use crate::fast::layers::{
+        scene::{LayerContent, LayerPart},
+        tiles::part_tile_hashes,
+    };
+    use crate::scene::PaintOperation;
+    use std::rc::Rc;
+
+    let color = |row: usize| crate::hsla(row as f32 / 7., 0.5, 0.5, 1.);
+    // Six rows, 200 px tall and 700 px wide: a background each; in every
+    // other row a layer around two overlapping quads; in row 3 a shadow
+    // blurred into the rows beside it.
+    let rows: Vec<Vec<PaintOperation>> = (0..6)
+        .map(|row| {
+            let y = row as f32 * 200.;
+            let mut operations = vec![PaintOperation::Primitive(
+                Quad {
+                    background: color(row).into(),
+                    ..quad(sp(0., y, 700., 200.))
+                }
+                .into(),
+            )];
+            if row % 2 == 0 {
+                operations.push(PaintOperation::StartLayer(sp(0., y, 700., 200.)));
+                operations.push(PaintOperation::Primitive(
+                    quad(sp(480., y + 50., 60., 60.)).into(),
+                ));
+                operations.push(PaintOperation::Primitive(
+                    Quad {
+                        background: color(row + 1).into(),
+                        ..quad(sp(500., y + 70., 60., 60.))
+                    }
+                    .into(),
+                ));
+                operations.push(PaintOperation::EndLayer);
+            }
+            if row == 3 {
+                operations.push(PaintOperation::Primitive(
+                    Shadow {
+                        order: 0,
+                        blur_radius: ScaledPixels(20.),
+                        bounds: sp(100., y + 150., 300., 40.),
+                        corner_radii: Default::default(),
+                        content_mask: wide_mask(),
+                        color: Hsla::black(),
+                        element_bounds: sp(100., y + 150., 300., 40.),
+                        element_corner_radii: Default::default(),
+                        inset: 0,
+                        pad: 0,
+                    }
+                    .into(),
+                ));
+            }
+            operations
+        })
+        .collect();
+
+    let mut whole = Scene::default();
+    for operation in rows.iter().flatten() {
+        match operation {
+            PaintOperation::Primitive(primitive) => whole.insert_primitive(primitive.clone()),
+            PaintOperation::StartLayer(bounds) => whole.push_layer(*bounds),
+            PaintOperation::EndLayer => whole.pop_layer(),
+        }
+    }
+    whole.finish();
+    let parts = rows.iter().map(|operations| {
+        let (_, reach) = part_tile_hashes(operations, 512);
+        let mut scene = Scene::default();
+        scene.paint_operations = operations
+            .iter()
+            .map(|operation| match operation {
+                PaintOperation::Primitive(primitive) => {
+                    PaintOperation::Primitive(primitive.clone())
+                }
+                PaintOperation::StartLayer(bounds) => PaintOperation::StartLayer(*bounds),
+                PaintOperation::EndLayer => PaintOperation::EndLayer,
+            })
+            .collect();
+        LayerPart {
+            bounds: Some(reach.unwrap_or_default()),
+            scene: Rc::new(scene),
+        }
+    });
+    let whole = layer(whole);
+    let in_parts = LayerFrame {
+        content: LayerContent::from_parts(parts),
+        ..whole.clone()
+    };
+    for y in -1..4 {
+        for x in -1..3 {
+            let tile = TileCoord { x, y };
+            let drawn =
+                |frame: &LayerFrame| crate::fast::layers::verify::drawn(&frame.tile_scene(tile));
+            assert_eq!(drawn(&in_parts), drawn(&whole), "tile {tile:?}");
+        }
+    }
+}
+
 fn atlas_tile() -> AtlasTile {
     AtlasTile {
         texture_id: AtlasTextureId {

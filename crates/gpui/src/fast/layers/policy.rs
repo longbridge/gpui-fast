@@ -203,7 +203,7 @@ pub(crate) fn decide(
     let mut ineligible = false;
     let decision = match &layer.record {
         _ if demoted_until.is_some() => Decision::Bypass,
-        Some(record) if !fits(window, record) || lists::holds_input(layer) => {
+        Some(record) if !fits(window, record) => {
             demote = true;
             Decision::Bypass
         }
@@ -229,8 +229,7 @@ pub(crate) fn decide(
             Decision::Repaint
         }
         None if streak >= PROMOTE_AFTER_SCROLLED_FRAMES
-            && policy.retry_at.is_none_or(|at| frame >= at)
-            && !lists::took_input_off_layer(layer) =>
+            && policy.retry_at.is_none_or(|at| frame >= at) =>
         {
             Decision::Repaint
         }

@@ -653,6 +653,9 @@ impl Window {
         // is what it was copied from, entry for entry.
         let copied_whole = end == prepaint_range.end.shifted(&prepaint_range.start, &start);
         debug_assert!(copied_whole, "a reused prepaint range changed length");
+        if copied_whole {
+            crate::fast::layers::reuse::follow_prepaint(self, &prepaint_range, &start);
+        }
         // Nothing written since the records were built changed what they
         // read, or they would not be reused: they are up to date as of now.
         let writes_now = cx.entities.write_generation();
@@ -723,6 +726,9 @@ impl Window {
         let end = self.paint_index();
         let copied_whole = end == source.end.shifted(&source.start, &start);
         debug_assert!(copied_whole, "a reused paint range changed length");
+        if copied_whole {
+            crate::fast::layers::reuse::follow_paint(self, &source, &start);
+        }
         let record = &mut self.next_frame.retained.records[index];
         record.paint_range = start..end;
         record.paint = PaintStatus::Painted {

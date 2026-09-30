@@ -285,6 +285,12 @@ impl TaffyLayoutEngine {
         self.retention.claimed_key_log.len()
     }
 
+    /// The keys an open recording saw since `start`, where the log was then.
+    pub(crate) fn claimed_keys_since(&self, start: usize) -> &[u64] {
+        let log = &self.retention.claimed_key_log;
+        &log[start.min(log.len())..]
+    }
+
     /// Ends the recording started at `start`, returning the keys it saw.
     pub(crate) fn finish_recording_claimed_keys(&mut self, start: usize) -> Vec<u64> {
         let retention = &mut self.retention;

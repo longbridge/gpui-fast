@@ -171,12 +171,25 @@ impl From<Rc<Scene>> for LayerContent {
 }
 
 impl LayerContent {
+    /// Content made of `parts`, drawn in order.
+    pub(crate) fn from_parts(parts: impl IntoIterator<Item = LayerPart>) -> Self {
+        LayerContent {
+            parts: parts.into_iter().collect(),
+        }
+    }
+
     /// The content's scene, when it is one part, as a `div`'s is.
     pub fn scene(&self) -> Option<&Scene> {
         match &*self.parts {
             [part] => Some(&part.scene),
             _ => None,
         }
+    }
+
+    /// The scenes of the content's parts, in order.
+    #[cfg(test)]
+    pub(crate) fn part_scenes(&self) -> impl Iterator<Item = &Rc<Scene>> {
+        self.parts.iter().map(|part| &part.scene)
     }
 
     /// Whether `self` and `other` are the same content, shared.
@@ -222,7 +235,13 @@ fn translate_bounds(
 /// its element's bounds (`vs_shadow`); a mono or subpixel sprite's bounds
 /// are transformed (`to_device_position_transformed`).
 pub(crate) fn visible_bounds(primitive: &Primitive) -> Bounds<ScaledPixels> {
-    let drawn = match primitive {
+    drawn_bounds(primitive).intersect(&primitive.content_mask().bounds)
+}
+
+/// The part of window (or content) space `primitive` can draw into, its
+/// content mask aside. See [`visible_bounds`].
+pub(crate) fn drawn_bounds(primitive: &Primitive) -> Bounds<ScaledPixels> {
+    match primitive {
         Primitive::Shadow(shadow) if shadow.inset != 0 => shadow.element_bounds,
         Primitive::Shadow(shadow) => {
             let margin = ScaledPixels(3. * shadow.blur_radius.0.max(0.));
@@ -244,8 +263,7 @@ pub(crate) fn visible_bounds(primitive: &Primitive) -> Bounds<ScaledPixels> {
             transformed_bounds(sprite.bounds, &sprite.transformation)
         }
         primitive => *primitive.bounds(),
-    };
-    drawn.intersect(&primitive.content_mask().bounds)
+    }
 }
 
 /// The smallest rectangle holding `bounds` transformed by `matrix`.
@@ -286,8 +304,14 @@ fn transformed_bounds(
 /// included, so it draws the same pixels `delta` away.
 pub(crate) fn translate_primitive(primitive: &Primitive, delta: Point<ScaledPixels>) -> Primitive {
     let mut primitive = primitive.clone();
+    move_primitive(&mut primitive, delta);
+    primitive
+}
+
+/// Moves `primitive` by `delta`, as [`translate_primitive`] does, in place.
+pub(crate) fn move_primitive(primitive: &mut Primitive, delta: Point<ScaledPixels>) {
     let mv = |bounds: &mut Bounds<ScaledPixels>| *bounds = translate_bounds(*bounds, delta);
-    match &mut primitive {
+    match primitive {
         Primitive::Shadow(shadow) => {
             mv(&mut shadow.bounds);
             mv(&mut shadow.element_bounds);
@@ -328,7 +352,6 @@ pub(crate) fn translate_primitive(primitive: &Primitive, delta: Point<ScaledPixe
             mv(&mut surface.content_mask.bounds);
         }
     }
-    primitive
 }
 
 /// A sprite's transformation applies to window positions (`R·p + t`, see

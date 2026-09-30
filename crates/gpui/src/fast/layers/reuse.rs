@@ -198,6 +198,115 @@ pub(crate) fn carry_paint_records(
     start..window.paint_index()
 }
 
+/// Follows, in the records of the virtual lists' layers whose rows lie
+/// inside a retained subtree the frame being drawn copies from the last
+/// one, the copy of its prepaint records: those the rendered frame held over
+/// `from` land from `to` on. A frame drawing the view holding a list from
+/// the last one neither prepaints nor paints the list, but carries its rows'
+/// records along, so that the next frame can carry them in turn.
+///
+/// A `div`'s layer is painted again after such a frame instead: whether its
+/// content's hovers changed is told from the last frame's hit test, which a
+/// scroll since leaves behind, while a list's rows foretell theirs (see
+/// [`crate::fast::layers::lists`]).
+pub(crate) fn follow_prepaint(
+    window: &mut Window,
+    from: &Range<PrepaintStateIndex>,
+    to: &PrepaintStateIndex,
+) {
+    if window.fast_layers.layers.is_empty() {
+        return;
+    }
+    let frame = window.fast_layers.frame;
+    let inside = |range: &Range<PrepaintStateIndex>| {
+        let (a, b) = (&range.start, &range.end);
+        let (c, d) = (&from.start, &from.end);
+        a.hitboxes_index >= c.hitboxes_index
+            && b.hitboxes_index <= d.hitboxes_index
+            && a.tooltips_index >= c.tooltips_index
+            && b.tooltips_index <= d.tooltips_index
+            && a.deferred_draws_index >= c.deferred_draws_index
+            && b.deferred_draws_index <= d.deferred_draws_index
+            && a.dispatch_tree_index >= c.dispatch_tree_index
+            && b.dispatch_tree_index <= d.dispatch_tree_index
+            && a.accessed_element_states_index >= c.accessed_element_states_index
+            && b.accessed_element_states_index <= d.accessed_element_states_index
+            && a.line_layout_index.lines_index >= c.line_layout_index.lines_index
+            && b.line_layout_index.lines_index <= d.line_layout_index.lines_index
+    };
+    let shift = |range: &Range<PrepaintStateIndex>| {
+        range.start.shifted(&from.start, to)..range.end.shifted(&from.start, to)
+    };
+    for layer in window.fast_layers.layers.values_mut() {
+        let current = layer
+            .input
+            .ranges_frame
+            .is_some_and(|painted| painted + 1 == frame);
+        let Some(record) = layer.record.as_mut() else {
+            continue;
+        };
+        if !current || !layer.rows.list || !inside(&record.prepaint_range) {
+            continue;
+        }
+        record.prepaint_range = shift(&record.prepaint_range);
+        layer.rows.follow_prepaint(&shift);
+        layer.input.prepaint_followed = Some(frame);
+    }
+}
+
+/// Follows, as [`follow_prepaint`] does, the copy of the paint records the
+/// rendered frame held over `from` to `to` on. The scene index of a layer's
+/// paint range is its own scene's, which is not copied.
+pub(crate) fn follow_paint(window: &mut Window, from: &Range<PaintIndex>, to: &PaintIndex) {
+    if window.fast_layers.layers.is_empty() {
+        return;
+    }
+    let frame = window.fast_layers.frame;
+    let inside = |range: &Range<PaintIndex>| {
+        let (a, b) = (&range.start, &range.end);
+        let (c, d) = (&from.start, &from.end);
+        a.fast_window_control_hitboxes_index >= c.fast_window_control_hitboxes_index
+            && b.fast_window_control_hitboxes_index <= d.fast_window_control_hitboxes_index
+            && a.mouse_listeners_index >= c.mouse_listeners_index
+            && b.mouse_listeners_index <= d.mouse_listeners_index
+            && a.input_handlers_index >= c.input_handlers_index
+            && b.input_handlers_index <= d.input_handlers_index
+            && a.cursor_styles_index >= c.cursor_styles_index
+            && b.cursor_styles_index <= d.cursor_styles_index
+            && a.accessed_element_states_index >= c.accessed_element_states_index
+            && b.accessed_element_states_index <= d.accessed_element_states_index
+            && a.tab_handle_index >= c.tab_handle_index
+            && b.tab_handle_index <= d.tab_handle_index
+            && a.line_layout_index.lines_index >= c.line_layout_index.lines_index
+            && b.line_layout_index.lines_index <= d.line_layout_index.lines_index
+    };
+    let shift = |range: &Range<PaintIndex>| {
+        let mut start = range.start.shifted(&from.start, to);
+        let mut end = range.end.shifted(&from.start, to);
+        start.scene_index = range.start.scene_index;
+        end.scene_index = range.end.scene_index;
+        start..end
+    };
+    for layer in window.fast_layers.layers.values_mut() {
+        if layer.input.prepaint_followed != Some(frame) {
+            continue;
+        }
+        let Some(record) = layer.record.as_mut() else {
+            continue;
+        };
+        let mut paint_range = record.paint_range.clone();
+        // Only its scene index can lie outside what was copied.
+        paint_range.start.scene_index = from.start.scene_index;
+        paint_range.end.scene_index = from.start.scene_index;
+        if !inside(&paint_range) {
+            continue;
+        }
+        record.paint_range = shift(&record.paint_range);
+        layer.rows.follow_paint(&shift);
+        layer.input.ranges_frame = Some(frame);
+    }
+}
+
 /// How a view drawn inside a layer's content was laid out when the content
 /// was painted, for frames that composite the layer to lay it out again
 /// without rendering it.

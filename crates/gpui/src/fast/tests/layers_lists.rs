@@ -66,7 +66,7 @@ fn decision(cx: &mut TestAppContext, window: AnyWindowHandle) -> Option<Decision
 fn held_rows(cx: &mut TestAppContext, window: AnyWindowHandle) -> Vec<usize> {
     with_window(cx, window, |window, _| {
         let layer = window.fast_layers.layers.values().next().expect("a layer");
-        layer.rows.painted.iter().copied().collect()
+        layer.rows.held().collect()
     })
 }
 
@@ -315,44 +315,59 @@ mod uniform {
         let (handle, log) = page(cx, 1000);
         let window = handle.into();
         promote(cx, window);
-        // Rows 2..7 show; five rows of overscan above (as far as row 0) and
-        // below.
-        assert_eq!(held_rows(cx, window), (0..12).collect::<Vec<_>>());
+        // Rows 2..7 show, and ten rows of overscan below them and above them,
+        // as far as row 0. Row 1 showed in the frame before, and was left out:
+        // painted into the layer, it could have kept element states that a
+        // list without a layer drops.
+        let mut expected: Vec<usize> = [0].into_iter().chain(2..17).collect();
+        assert_eq!(held_rows(cx, window), expected);
         rendered_rows(&log);
 
-        for step in 0..10 {
+        wheel(cx, window, -ROW_HEIGHT);
+        assert_eq!(decision(cx, window), Some(Decision::Composite));
+        assert_eq!(
+            rendered_rows(&log),
+            vec![1..2, 17..18],
+            "the row left out is rendered, and the row entering the overscan"
+        );
+
+        for step in 0..14 {
             wheel(cx, window, -ROW_HEIGHT);
             assert_eq!(decision(cx, window), Some(Decision::Composite));
-            let new_row = 12 + step;
+            let new_row = 18 + step;
             assert_eq!(
                 rendered_rows(&log),
                 vec![new_row..new_row + 1],
-                "scrolling down one row renders the row entering the overscan"
+                "step {step}: scrolling down one row renders the row entering the overscan"
             );
+            // Rows that left the overscan are kept until they are more than
+            // a quarter of the rows the layer is to hold, then dropped.
+            let first = if step < 13 { 0 } else { new_row - 24 };
+            expected = (first..new_row + 1).collect();
+            assert_eq!(held_rows(cx, window), expected, "step {step}");
         }
-        // Rows 12..17 show; rows that left the overscan were dropped.
-        assert_eq!(held_rows(cx, window), (7..22).collect::<Vec<_>>());
+        // Rows 17..22 show.
+        assert_eq!(held_rows(cx, window), (7..32).collect::<Vec<_>>());
 
         wheel(cx, window, ROW_HEIGHT);
         assert_eq!(decision(cx, window), Some(Decision::Composite));
         assert_eq!(
             rendered_rows(&log),
             vec![6..7],
-            "scrolling up one row renders the row entering the overscan"
+            "scrolling up one row renders the dropped row entering the overscan"
         );
-        assert_eq!(held_rows(cx, window), (6..21).collect::<Vec<_>>());
+        assert_eq!(held_rows(cx, window), (6..32).collect::<Vec<_>>());
 
-        // Rows 11..16 show; a quarter of a row down, 11..17 do.
-        wheel(cx, window, -ROW_HEIGHT / 4.);
-        assert_eq!(decision(cx, window), Some(Decision::Composite));
-        assert_eq!(rendered_rows(&log), vec![21..22]);
-        wheel(cx, window, -ROW_HEIGHT / 4.);
-        assert_eq!(decision(cx, window), Some(Decision::Composite));
-        assert_eq!(
-            rendered_rows(&log),
-            Vec::<Range<usize>>::new(),
-            "a scroll that uncovers no row renders none"
-        );
+        // Rows 16..21 show; a quarter of a row down, 16..22 do, all held.
+        for _ in 0..2 {
+            wheel(cx, window, -ROW_HEIGHT / 4.);
+            assert_eq!(decision(cx, window), Some(Decision::Composite));
+            assert_eq!(
+                rendered_rows(&log),
+                Vec::<Range<usize>>::new(),
+                "a scroll that uncovers no row renders none"
+            );
+        }
     }
 
     #[crate::test]
@@ -491,6 +506,48 @@ mod uniform {
     fn promote_from_second_frame(cx: &mut TestAppContext, window: AnyWindowHandle) {
         wheel(cx, window, -ROW_HEIGHT);
         assert_eq!(decision(cx, window), Some(Decision::Repaint));
+    }
+
+    #[crate::test]
+    #[ignore = "list layers are off (fast::layers::lists::LIST_LAYERS)"]
+    fn adding_a_row_keeps_the_rows_held_as_they_were(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let (handle, log) = page(cx, 1000);
+        let window = handle.into();
+        promote(cx, window);
+        wheel(cx, window, -ROW_HEIGHT);
+        let parts = |cx: &mut TestAppContext| {
+            with_window(cx, window, |window, _| {
+                let layer = window.fast_layers.layers.values().next().unwrap();
+                let record = layer.record.as_ref().unwrap();
+                let parts: Vec<_> = record.content.part_scenes().cloned().collect();
+                (parts, record.dirty_tiles.clone(), record.tile_hashes.len())
+            })
+        };
+        for step in 0..10 {
+            let (before, _, _) = parts(cx);
+            rendered_rows(&log);
+            wheel(cx, window, -ROW_HEIGHT);
+            assert_eq!(decision(cx, window), Some(Decision::Composite));
+            assert_eq!(rendered_rows(&log).len(), 1, "step {step}: one row added");
+            let (after, dirty, tiles) = parts(cx);
+            // One part per row: those of the rows kept are the ones the layer
+            // held, not copies, and only the tiles the new row reaches are
+            // hashed differently.
+            assert_eq!(after.len(), before.len() + 1, "step {step}");
+            let kept = after
+                .iter()
+                .filter(|part| before.iter().any(|old| std::rc::Rc::ptr_eq(old, part)))
+                .count();
+            assert_eq!(kept, before.len(), "step {step}");
+            assert!(
+                (1..=2).contains(&dirty.len()) && dirty.len() < tiles,
+                "step {step}: {} of {tiles} tiles dirty",
+                dirty.len()
+            );
+        }
     }
 }
 
@@ -894,13 +951,14 @@ mod list {
 mod rows {
     use super::{
         Decision, VIEWPORT_HEIGHT, VIEWPORT_WIDTH, compare_with_layers_off, decision, draw,
-        expanded_quads, open_at, row_color, wheel, with_window,
+        expanded_quads, held_rows, open_at, row_color, wheel, with_window,
     };
     use crate::{
         AnyWindowHandle, AppContext as _, Bounds, Context, Entity, IntoElement, ListAlignment,
         ListState, ParentElement as _, Pixels, Render, StatefulInteractiveElement as _,
         Styled as _, TestAppContext, Window, div, px, rgb,
     };
+    use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 
     /// What each row of a [`RowsPage`] holds besides its colour.
     #[derive(Clone, Copy)]
@@ -1086,13 +1144,14 @@ mod rows {
         }
     }
 
-    /// A list whose rows take input is kept on today's path, whose frames a
-    /// layer that does not carry its rows' hitboxes cannot composite: its
-    /// rows are never painted into a layer only to find that out, however
-    /// long it scrolls.
+    /// A list whose rows take input (a hover style: a hitbox, a listener,
+    /// element state) is composited from its layer while it scrolls under a
+    /// still pointer, its rows' records carried from frame to frame; the
+    /// rows whose hover changes, and only those, are rendered again, and it
+    /// draws and can be hit as without layers.
     #[crate::test]
     #[ignore = "list layers are off (fast::layers::lists::LIST_LAYERS)"]
-    fn a_list_whose_rows_take_input_is_never_painted_into_a_layer(cx: &mut TestAppContext) {
+    fn a_list_whose_rows_take_input_composites_its_layer(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {
             return;
         }
@@ -1100,17 +1159,123 @@ mod rows {
             let with_layers = page(cx, RowKind::Hover, uniform);
             let without_layers = page(cx, RowKind::Hover, uniform);
             with_window(cx, with_layers, |window, _| window.reset_layout_stats());
+            let extended = crate::fast::layers::lists::extended_frames();
+            let for_hover = crate::fast::layers::lists::rows_rendered_for_hover();
+            let mut composited = 0;
             for sweep in 0..3 {
                 let dy = if sweep % 2 == 0 { -5. } else { 5. };
-                compare_with_layers_off(cx, with_layers, without_layers, &[dy; 80], "scroll");
+                composited +=
+                    compare_with_layers_off(cx, with_layers, without_layers, &[dy; 80], "scroll");
+                assert_eq!(
+                    hittable(cx, with_layers),
+                    hittable(cx, without_layers),
+                    "uniform {uniform}, sweep {sweep}"
+                );
             }
+            let extended = crate::fast::layers::lists::extended_frames() - extended;
+            let for_hover = crate::fast::layers::lists::rows_rendered_for_hover() - for_hover;
             let stats = with_window(cx, with_layers, |window, _| window.layout_stats());
-            assert_eq!(
-                (stats.layer_frames_repainted, stats.layers_demoted),
-                (0, 0),
-                "uniform {uniform}"
+            assert!(
+                composited >= 235,
+                "uniform {uniform}: composited {composited}"
+            );
+            assert!(
+                extended >= 235,
+                "uniform {uniform}: kept rows in {extended}"
+            );
+            assert_eq!(stats.layers_demoted, 0, "uniform {uniform}");
+            // The pointer, near the top of the list, crosses into another row
+            // every eight frames: the row it leaves and the row it enters are
+            // rendered again, and so is a row showing again after it left.
+            assert!(
+                (50..=90).contains(&for_hover),
+                "uniform {uniform}: {for_hover} rows rendered again for their hover"
             );
         }
+    }
+
+    /// A white panel holding a uniform list of 300 rows with a hover style,
+    /// 40 px tall, 100 px tall itself, at the top left of the window. Every
+    /// range of rows the list renders is logged.
+    struct HoverRowsPage {
+        rendered: Rc<RefCell<Vec<std::ops::Range<usize>>>>,
+    }
+
+    impl Render for HoverRowsPage {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let rendered = self.rendered.clone();
+            div().size_full().bg(rgb(0xffffff)).child(
+                crate::uniform_list(
+                    "list",
+                    300,
+                    cx.processor(move |_, range: std::ops::Range<usize>, _, _| {
+                        rendered.borrow_mut().push(range.clone());
+                        range.map(|ix| row(RowKind::Hover, ix)).collect::<Vec<_>>()
+                    }),
+                )
+                .w(px(VIEWPORT_WIDTH))
+                .h(px(VIEWPORT_HEIGHT)),
+            )
+        }
+    }
+
+    /// Rows move under a still pointer: a frame renders the rows new to the
+    /// layer and, when the pointer crosses into another row, the row it left
+    /// and the row it entered, whose hover styles change, and no other.
+    #[crate::test]
+    #[ignore = "list layers are off (fast::layers::lists::LIST_LAYERS)"]
+    fn a_hover_change_renders_only_the_rows_it_touches(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let rendered = Rc::new(RefCell::new(Vec::new()));
+        let log = rendered.clone();
+        let window: AnyWindowHandle = cx
+            .add_window(move |_, _| HoverRowsPage { rendered: log })
+            .into();
+        open_at(cx, window, 1.);
+        // Far enough down that row 0, which the list renders alone to measure
+        // it, is not held.
+        for _ in 0..40 {
+            wheel(cx, window, -40.);
+        }
+        let step = 5.;
+        wheel(cx, window, -step);
+        assert_eq!(decision(cx, window), Some(Decision::Composite));
+        // The wheel is turned with the pointer 20 px down the list.
+        let hovered = |offset: f32| ((20. + offset) / 40.).floor() as usize;
+        let mut offset = 1600. + step;
+        let mut held: BTreeSet<usize> = held_rows(cx, window).into_iter().collect();
+        let mut crossings = 0;
+        rendered.borrow_mut().clear();
+        for frame in 0..60 {
+            let before = hovered(offset);
+            offset += step;
+            wheel(cx, window, -step);
+            assert_eq!(
+                decision(cx, window),
+                Some(Decision::Composite),
+                "frame {frame}"
+            );
+            let now: BTreeSet<usize> = held_rows(cx, window).into_iter().collect();
+            let rows: BTreeSet<usize> = rendered
+                .borrow_mut()
+                .drain(..)
+                .filter(|range| *range != (0..1))
+                .flatten()
+                .collect();
+            let again: BTreeSet<usize> = rows.intersection(&held).copied().collect();
+            let expected: BTreeSet<usize> = if hovered(offset) == before {
+                BTreeSet::new()
+            } else {
+                crossings += 1;
+                [before, hovered(offset)].into()
+            };
+            assert_eq!(again, expected, "frame {frame}: rows rendered again");
+            assert!(rows.len() <= 3, "frame {frame}: {rows:?}");
+            held = now;
+        }
+        assert!(crossings >= 7, "the pointer crossed {crossings} rows");
     }
 
     /// A row in a view of its own, of `color`.
@@ -1241,7 +1406,7 @@ mod rows {
             with_window(cx, window, |window, _| {
                 let layer = window.fast_layers.layers.values().next().unwrap();
                 let views = layer.record.as_ref().unwrap().views.len();
-                let held = layer.rows.painted.len();
+                let held = layer.rows.held().count();
                 assert!(
                     views <= held * 6,
                     "step {step}: the layer remembers {views} views for {held} rows"

@@ -538,7 +538,12 @@ impl Element for UniformList {
                                 window,
                                 cx,
                             );
-                            item.prepaint_at(item_origin, window, cx);
+                            crate::fast::layers::lists::prepaint_row(
+                                window,
+                                cx,
+                                ix,
+                                |window, cx| item.prepaint_at(item_origin, window, cx),
+                            );
                             frame_state.items.push(item);
                         }
                         crate::fast::layers::lists::end_rows(window, cx, fast_rows);

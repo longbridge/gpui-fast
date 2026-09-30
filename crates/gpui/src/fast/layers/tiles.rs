@@ -14,7 +14,7 @@
 use crate::{
     AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, Point, ScaledPixels, Scene,
     TileCoord, TransformationMatrix,
-    fast::layers::scene::{translate_primitive, visible_bounds},
+    fast::layers::scene::{drawn_bounds, translate_primitive, visible_bounds},
     point,
     scene::{PaintOperation, Primitive},
     size,
@@ -66,6 +66,75 @@ pub(crate) fn tile_hashes(
                     });
                 }
             }
+        }
+    }
+    hashers
+        .into_iter()
+        .map(|(tile, hasher)| (tile, hasher.finish()))
+        .collect()
+}
+
+/// The hash of what the paint operations `operations` (content space,
+/// device pixels) draw, and the tiles they reach, each with that hash: a
+/// virtual list's row, hashed once when it is painted, in one pass. See
+/// [`combine_tile_hashes`].
+///
+/// Each primitive is hashed with its masks clipped to the part of space it
+/// draws in, outside which they change no pixel: a row painted again with
+/// the part of the content painted around it grown or moved hashes alike.
+/// A primitive drawing nothing is left out, and so are the bounds of the
+/// layers the operations push: both only raise the draw orders of what
+/// follows, which keeps every overlapping pair in order.
+pub(crate) fn part_tile_hashes(
+    operations: &[PaintOperation],
+    tile_size: u32,
+) -> (Vec<(TileCoord, u64)>, Option<Bounds<ScaledPixels>>) {
+    let mut hasher = FxHasher::default();
+    let mut reach: Option<Bounds<ScaledPixels>> = None;
+    for operation in operations {
+        match operation {
+            PaintOperation::Primitive(primitive) => {
+                let drawn = drawn_bounds(primitive);
+                let visible = drawn.intersect(&primitive.content_mask().bounds);
+                if visible.size.width.0 <= 0. || visible.size.height.0 <= 0. {
+                    continue;
+                }
+                reach = Some(reach.map_or(visible, |reach| reach.union(&visible)));
+                hasher.write_u8(0);
+                hash_primitive(primitive, &drawn, &mut hasher);
+            }
+            PaintOperation::StartLayer(_) => hasher.write_u8(1),
+            PaintOperation::EndLayer => hasher.write_u8(2),
+        }
+    }
+    let hash = hasher.finish();
+    let tiles = reach
+        .map(|reach| {
+            tiles_over(reach, tile_size)
+                .map(|tile| (tile, hash))
+                .collect()
+        })
+        .unwrap_or_default();
+    (tiles, reach)
+}
+
+/// The hash of every tile of content made of parts drawn in order, each
+/// with the hash of what it draws over each tile it reaches (see
+/// [`part_tile_hashes`]), and of every tile of `region`, empty or not. Two
+/// tiles hashing alike draw the same pixels, as with [`tile_hashes`]: a
+/// tile's pixels are what the parts reaching it draw, in order.
+pub(crate) fn combine_tile_hashes<'a>(
+    parts: impl IntoIterator<Item = &'a [(TileCoord, u64)]>,
+    tile_size: u32,
+    region: Bounds<ScaledPixels>,
+) -> FxHashMap<TileCoord, u64> {
+    let mut hashers: FxHashMap<TileCoord, FxHasher> = FxHashMap::default();
+    for coord in tiles_over(region, tile_size) {
+        hashers.insert(coord, FxHasher::default());
+    }
+    for part in parts {
+        for (coord, hash) in part {
+            hashers.entry(*coord).or_default().write_u64(*hash);
         }
     }
     hashers
