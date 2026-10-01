@@ -3,7 +3,6 @@
 mod dependencies;
 mod dispatch;
 mod global_id;
-#[cfg(any(feature = "inspector", debug_assertions))]
 mod layers;
 mod layers_lists;
 mod layers_oracle;
