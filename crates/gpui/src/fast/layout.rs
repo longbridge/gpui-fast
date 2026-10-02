@@ -69,6 +69,102 @@ pub(crate) struct LayoutRetention {
     /// The [`layout_fingerprint`] of the default style, which every text leaf
     /// asks for, under the rem size and scale factor it was taken at.
     default_fingerprint: Option<(Pixels, f32, u64)>,
+    /// The leaves the layout being computed measured, kept between
+    /// computations so that its table is not allocated for each one. See
+    /// [`settle_measured_leaves`].
+    pub(crate) measured_leaves: MeasuredLeaves,
+}
+
+/// The leaves a layout computation measured, each with the width it was last
+/// measured at: the width it was given, or the definite width it was offered,
+/// or none when it was asked for its content size.
+#[derive(Default)]
+pub(crate) struct MeasuredLeaves(FxHashMap<taffy::NodeId, Option<Pixels>>);
+
+impl MeasuredLeaves {
+    /// Records that Taffy measured `node` under these constraints, replacing
+    /// whatever it was measured at before in this computation.
+    #[inline]
+    pub(crate) fn note(
+        &mut self,
+        node: taffy::NodeId,
+        known_dimensions: Size<Option<Pixels>>,
+        available_space: Size<AvailableSpace>,
+    ) {
+        let width = known_dimensions.width.or(match available_space.width {
+            AvailableSpace::Definite(width) => Some(width),
+            AvailableSpace::MinContent | AvailableSpace::MaxContent => None,
+        });
+        self.0.insert(node, width);
+    }
+}
+
+/// Measures again, at the size it was laid out at, every leaf whose last
+/// measurement in the layout just computed was taken at another width.
+///
+/// A measured leaf keeps what its last measurement produced, and that is what
+/// it paints: text paints the lines it was last shaped into. Upstream lays
+/// every node out afresh each frame, and Taffy's last question to a leaf is the
+/// one that places it, at the width it ends up with. A retained node keeps the
+/// layout Taffy placed it at, and Taffy answers that question from its cache,
+/// while it can still ask the leaf for its size under other constraints when a
+/// node above it is laid out again. Two such questions can even take turns
+/// evicting each other from the one cache slot they share, so the leaf is
+/// measured again each time it is asked. Its last measurement is then a probe:
+/// a `flex_1` text whose row is sized to its content is measured at width zero,
+/// and painted one glyph to a line in the box it was laid out in.
+pub(crate) fn settle_measured_leaves(
+    engine: &mut TaffyLayoutEngine,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let mut leaves = mem::take(&mut engine.retention.measured_leaves);
+    let scale_factor = window.scale_factor();
+    for (node, width) in leaves.0.drain() {
+        let Ok(layout) = engine.taffy.layout(node) else {
+            continue;
+        };
+        let content = Size {
+            width: Pixels(
+                (layout.size.width
+                    - layout.padding.left
+                    - layout.padding.right
+                    - layout.border.left
+                    - layout.border.right)
+                    .max(0.)
+                    / scale_factor,
+            ),
+            height: Pixels(
+                (layout.size.height
+                    - layout.padding.top
+                    - layout.padding.bottom
+                    - layout.border.top
+                    - layout.border.bottom)
+                    .max(0.)
+                    / scale_factor,
+            ),
+        };
+        if width == Some(content.width) {
+            continue;
+        }
+        let Some(context) = engine.taffy.get_node_context_mut(node) else {
+            continue;
+        };
+        engine.retention.stats.measure_calls += 1;
+        (context.measure)(
+            Size {
+                width: Some(content.width),
+                height: Some(content.height),
+            },
+            Size {
+                width: AvailableSpace::Definite(content.width),
+                height: AvailableSpace::Definite(content.height),
+            },
+            window,
+            cx,
+        );
+    }
+    engine.retention.measured_leaves = leaves;
 }
 
 /// Removes a node from the tree, and with it what its measurement captured.

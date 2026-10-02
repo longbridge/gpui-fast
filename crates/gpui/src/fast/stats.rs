@@ -152,6 +152,9 @@ pub(crate) struct MeasureTally {
     calls: u64,
     time: Duration,
     compute_started_at: Option<Instant>,
+    /// The leaves measured, and the width each was last measured at. See
+    /// [`crate::fast::layout::MeasuredLeaves`].
+    pub(crate) leaves: crate::fast::layout::MeasuredLeaves,
 }
 
 impl MeasureTally {
@@ -187,13 +190,14 @@ impl TaffyLayoutEngine {
 
 /// Starts counting the measurements of a layout computation.
 #[inline(always)]
-pub(crate) fn begin_measure_tally(engine: &TaffyLayoutEngine) -> MeasureTally {
+pub(crate) fn begin_measure_tally(engine: &mut TaffyLayoutEngine) -> MeasureTally {
     let timed = engine.retention.timed;
     MeasureTally {
         timed,
         calls: 0,
         time: Duration::ZERO,
         compute_started_at: timed.then(Instant::now),
+        leaves: std::mem::take(&mut engine.retention.measured_leaves),
     }
 }
 
@@ -207,6 +211,7 @@ pub(crate) fn finish_measure_tally(engine: &mut TaffyLayoutEngine, tally: Measur
     }
     stats.measure_calls += tally.calls;
     stats.measure_time += tally.time;
+    engine.retention.measured_leaves = tally.leaves;
 }
 
 impl Window {

@@ -246,11 +246,18 @@ impl TaffyLayoutEngine {
                     let measured_size: Size<Pixels> =
                         (node_context.measure)(known_dimensions, available_space, window, cx);
                     crate::fast::stats::MeasureTally::finish(&mut measures, measure_started_at);
+                    crate::fast::layout::MeasuredLeaves::note(
+                        &mut measures.leaves,
+                        _id,
+                        known_dimensions,
+                        available_space,
+                    );
                     snap_measured_size_to_device_pixels(measured_size, scale_factor).into()
                 },
             )
             .expect(EXPECT_MESSAGE);
         crate::fast::stats::finish_measure_tally(self, measures);
+        crate::fast::layout::settle_measured_leaves(self, window, cx);
     }
 
     // Pixel snapping
