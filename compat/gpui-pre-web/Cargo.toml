@@ -1,6 +1,6 @@
 [package]
 name = "gpui-pre-web"
-version = "0.3.7"
+version = "0.3.8"
 description = "gpui-fast's `gpui_web`, under the name and version of the gpui-pre snapshot GPUI Kit pins."
 license = "Apache-2.0"
 edition.workspace = true

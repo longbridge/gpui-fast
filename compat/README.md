@@ -23,7 +23,7 @@ upstream's names and versions.
 
 Two things to keep in mind:
 
-- The version is the snapshot GPUI Kit pins, `=0.3.7` today. When GPUI Kit
+- The version is the snapshot GPUI Kit pins, `=0.3.8` today. When GPUI Kit
   moves to a newer `gpui-pre`, move every crate here with it; until then Cargo
   warns that the patch was not used and keeps the snapshot.
 - gpui-pre rewrites the `gpui::` paths its macros emit to `::gpui_kit::`, and
