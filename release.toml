@@ -2,6 +2,8 @@
 snapshot_version = "0.3.8"
 repository = "https://github.com/longbridge/gpui-fast"
 homepage = "https://github.com/longbridge/gpui-fast"
+# zed-scap's Windows backend requires the five-argument capture settings API.
+windows_capture_version = "=1.4.2"
 
 # Dependencies come before their consumers.
 crates = [

@@ -44,7 +44,7 @@ local rehearsal to test before creating that tag.
 
 ## Release-only changes
 
-`script/prepare-release --tag v0.1.0` generates `target/release-workspace`.
+`bun script/prepare-release.ts --tag v0.1.0` generates `target/release-workspace`.
 Only these generated copies receive package names, exact sibling versions,
 registry dependency substitutions, repository/homepage URLs, descriptions,
 READMEs and license files. Original manifests and Rust source stay unchanged.
@@ -55,6 +55,9 @@ root or crate NOTICE files are included in the corresponding package.
 Release manifests do not inherit workspace Git patches. The Apple package
 bundles the GPUI source inputs used by cbindgen so its shader build does not
 depend on a sibling checkout directory.
+The core's Windows screen-capture feature constrains `windows-capture` to
+the registry version in `release.toml`; version 1.5 changed the constructor
+used by `zed-scap` and cannot compile that backend.
 
 Applications should alias the released libraries to their original names:
 
@@ -73,12 +76,10 @@ before their GPUI types can be mixed.
 Run from the repository root:
 
 ```sh
-python3 -m venv target/release-tools
-target/release-tools/bin/pip install tomlkit==0.13.3
-target/release-tools/bin/python script/prepare-release --tag v0.1.0
-target/release-tools/bin/python script/publish-release
+bun script/prepare-release.ts --tag v0.1.0
+bun script/publish-release.ts
 cargo check --manifest-path target/release-workspace/Cargo.toml --workspace --lib --all-features
-target/release-tools/bin/python script/publish-release --dry-run
+bun script/publish-release.ts --dry-run
 ```
 
 Preparation replaces the previous generated directory, including its build
@@ -90,3 +91,6 @@ If publication stops midway, rerun the workflow with the same tag and
 `dry_run` disabled. Already published packages are skipped only when their
 archive checksum matches; yanked versions and differing contents fail and
 require a new version tag. Registry or authentication errors stop the run.
+
+CI pins Bun 1.4.2. The release scripts use Bun's built-in TOML parser and
+serializer and require no npm packages.
