@@ -95,11 +95,18 @@ def publish(config, version):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--publish", action="store_true", help="Upload; default only validates packaging")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--publish", action="store_true", help="Upload; default only validates packaging")
+    mode.add_argument("--dry-run", action="store_true", help="Build every packaged crate without uploading")
     args = parser.parse_args()
     config = tomllib.loads((ROOT / "release.toml").read_text(encoding="utf-8"))
     version = validate(config)
     if args.publish:
         publish(config, version)
+    elif args.dry_run:
+        subprocess.run([
+            "cargo", "publish", "--manifest-path", str(DEST / "Cargo.toml"),
+            "--workspace", "--dry-run", "--allow-dirty", "--registry", "crates-io",
+        ], check=True, cwd=ROOT)
     else:
         print(f"Validated packaging and dependency order for {len(config['crates'])} crates at {version}")

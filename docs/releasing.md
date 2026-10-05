@@ -29,10 +29,18 @@ backend on nightly (matching upstream's Web example), and then publishes in
 dependency order. Cargo verifies each unpacked package before uploading it
 and waits until its version is available in the registry index.
 
-The workflow can also be run manually against an existing tag. `dry_run`
-defaults to true and performs compilation, package-file and dependency-order
-checks without uploading. It does not run `cargo publish --dry-run`: that
-cannot resolve unpublished sibling packages on the first release.
+Changes to release configuration also run the validation jobs on pull requests,
+using version `0.1.0` for rehearsal; the publish job is disabled for PRs.
+Validation includes `cargo publish --workspace --dry-run`, which packages and
+builds all nine archives against Cargo's temporary registry without uploading
+anything. Packaging the entire workspace supports unpublished sibling packages.
+The `release-crates` Actions artifact contains the nine rehearsed `.crate`
+archives for inspection.
+
+After the workflow is merged into `main`, it can also be run manually against
+an existing tag. `dry_run` defaults to true and runs the same rehearsal. Pushing
+a release tag starts a real release automatically, so use PR validation or
+local rehearsal to test before creating that tag.
 
 ## Release-only changes
 
@@ -70,6 +78,7 @@ target/release-tools/bin/pip install tomlkit==0.13.3
 target/release-tools/bin/python script/prepare-release --tag v0.1.0
 target/release-tools/bin/python script/publish-release
 cargo check --manifest-path target/release-workspace/Cargo.toml --workspace --lib --all-features
+target/release-tools/bin/python script/publish-release --dry-run
 ```
 
 Preparation replaces the previous generated directory, including its build

@@ -3,6 +3,14 @@ name: Release
 on:
   push:
     tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'release.toml'
+      - 'script/prepare-release'
+      - 'script/publish-release'
+      - 'LICENSE'
+      - 'docs/releasing.md'
   workflow_dispatch:
     inputs:
       tag:
@@ -18,7 +26,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: crates-io-release
+  group: release-validation-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -32,10 +40,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
 
       - name: Require a tag on main
+        if: github.event_name != 'pull_request'
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
@@ -55,7 +64,7 @@ jobs:
       - name: Prepare release manifests
         shell: bash
         env:
-          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_TAG: ${{ inputs.tag || (github.event_name == 'push' && github.ref_name) || 'v0.1.0' }}
         run: |
           python -m pip install tomlkit==0.13.3
           python script/prepare-release --tag "$RELEASE_TAG"
@@ -91,6 +100,17 @@ jobs:
       - name: Validate package contents and release order
         run: python script/publish-release
 
+      - name: Rehearse publication without uploading
+        run: python script/publish-release --dry-run
+
+      - name: Upload rehearsed crate archives
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-crates
+          path: target/release-workspace/target/package/tmp-crate/*.crate
+          if-no-files-found: error
+
       - name: Upload prepared release
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
@@ -110,8 +130,13 @@ jobs:
   publish:
     name: Publish to crates.io
     needs: validate
-    if: github.event_name == 'push' || !inputs.dry_run
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
     runs-on: ubuntu-latest
+    concurrency:
+      group: crates-io-publish
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
