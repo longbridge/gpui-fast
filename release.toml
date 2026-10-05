@@ -1,0 +1,17 @@
+# Metadata applied only to target/release-workspace, never upstream manifests.
+snapshot_version = "0.3.8"
+repository = "https://github.com/longbridge/gpui-fast"
+homepage = "https://github.com/longbridge/gpui-fast"
+
+# Dependencies come before their consumers.
+crates = [
+    "gpui_macros",
+    "gpui",
+    "gpui_apple",
+    "gpui_wgpu",
+    "gpui_macos",
+    "gpui_linux",
+    "gpui_windows",
+    "gpui_web",
+    "gpui_platform",
+]

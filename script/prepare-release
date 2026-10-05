@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Generate registry-only release manifests without touching upstream files.
+
+Requires tomlkit==0.13.3. Run from the repository root.
+"""
+
+import argparse
+import copy
+import re
+import shutil
+import subprocess
+import tomllib
+from pathlib import Path
+
+import tomlkit
+
+
+ROOT = Path(__file__).resolve().parent.parent
+DEST = ROOT / "target/release-workspace"
+
+
+def fast_name(name):
+    return "gpui-fast" if name == "gpui" else name.replace("gpui_", "gpui-fast-").replace("_", "-")
+
+
+def snapshot_name(name):
+    # gpui_util is distinct from Zed's util crate.
+    suffix = name.removeprefix("gpui_").replace("_", "-")
+    return "gpui-pre-" + suffix
+
+
+def dependency(key, value, workspace, config):
+    if isinstance(value, str):
+        return value
+    value = copy.deepcopy(value)
+    if value.pop("workspace", False):
+        inherited = copy.deepcopy(workspace["dependencies"][key])
+        if isinstance(inherited, str):
+            inherited = {"version": inherited}
+        features = list(dict.fromkeys(inherited.get("features", []) + value.pop("features", [])))
+        inherited.update(value)
+        if features:
+            inherited["features"] = features
+        value = inherited
+    if "path" in value:
+        value.pop("path")
+        if key in config["crates"]:
+            value.update(package=fast_name(key), version="=" + config["version"], path="../" + key)
+        else:
+            value.update(package=snapshot_name(key), version="=" + config["snapshot_version"])
+    if "git" in value:
+        if "version" not in value:
+            # GPUI's property-test API is available in the released proptest.
+            if key != "proptest":
+                raise ValueError(f"{key}: Git dependency has no registry version")
+            value["version"] = "1"
+        for field in ("git", "rev", "branch", "tag"):
+            value.pop(field, None)
+    return value
+
+
+def prepare(config):
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", config["version"]):
+        raise ValueError("Release version must be a semver version without a v prefix")
+    workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]
+    if DEST.exists():
+        shutil.rmtree(DEST)
+    DEST.mkdir(parents=True)
+    (DEST / "Cargo.toml").write_text(tomlkit.dumps({"workspace": {
+        "resolver": "2", "members": config["crates"],
+    }}), encoding="utf-8")
+    shutil.copy2(ROOT / "rust-toolchain.toml", DEST)
+    for name in config["crates"]:
+        source = ROOT / "crates" / name
+        target = DEST / name
+        shutil.copytree(source, target)
+        manifest = tomllib.loads((source / "Cargo.toml").read_text(encoding="utf-8"))
+        package = manifest["package"]
+        package.update(
+            name=fast_name(name), version=config["version"], publish=["crates-io"],
+            edition=workspace["package"]["edition"], repository=config["repository"],
+            homepage=config["homepage"], readme="README.md", license="Apache-2.0",
+            documentation=f"https://docs.rs/{fast_name(name)}/{config['version']}/{name}/",
+            description=f"{name}: GPUI with gpui-fast rendering and layout optimizations",
+            autoexamples=False, autobenches=False, autotests=False,
+        )
+        package.pop("metadata", None)
+        authors = list(package.get("authors", []))
+        if "Longbridge" not in authors:
+            authors.append("Longbridge")
+        package["authors"] = authors
+        package["include"] = ["/src/**", "/build.rs", "/Cargo.toml", "/README.md", "/LICENSE", "/NOTICE"]
+        manifest["lib"]["name"] = name
+        manifest.pop("lints", None)
+        for field in ("example", "bench", "test", "dev-dependencies"):
+            manifest.pop(field, None)
+        for group in [manifest, *manifest.get("target", {}).values()]:
+            group.pop("dev-dependencies", None)
+            for section in ("dependencies", "build-dependencies"):
+                if section in group:
+                    group[section] = {
+                        key: dependency(key, value, workspace, config)
+                        for key, value in group[section].items()
+                    }
+        (target / "Cargo.toml").write_text(
+            "# Modified by Longbridge for gpui-fast publication.\n"
+            + tomlkit.dumps(manifest), encoding="utf-8"
+        )
+        shutil.copy2(ROOT / "LICENSE", target / "LICENSE")
+        notices = [path.read_text(encoding="utf-8") for path in (ROOT / "NOTICE", source / "NOTICE") if path.exists()]
+        if notices:
+            (target / "NOTICE").write_text("\n\n".join(notices), encoding="utf-8")
+        (target / "README.md").write_text(
+            f"# {fast_name(name)}\n\n"
+            f"GPUI with gpui-fast rendering and layout optimizations.\n\n"
+            f"Source and documentation: [{config['repository']}]({config['repository']}).\n\n"
+            "Forked from Zed's GPUI; distributed under Apache-2.0.\n\n"
+            "Use the core as `gpui = { package = \"gpui-fast\", version = \""
+            + config["version"] + "\" }` to preserve paths emitted by its macros.\n",
+            encoding="utf-8",
+        )
+    # cbindgen must read bundled inputs rather than a sibling registry package.
+    apple = DEST / "gpui_apple"
+    bundled = apple / "src/fast/release_gpui/src"
+    bundled.mkdir(parents=True)
+    for file in ("scene.rs", "geometry.rs", "color.rs", "window.rs", "platform.rs"):
+        shutil.copy2(ROOT / "crates/gpui/src" / file, bundled / file)
+    for directory in ("window", "platform"):
+        shutil.copytree(ROOT / "crates/gpui/src" / directory, bundled / directory)
+    build = apple / "build.rs"
+    original = build.read_text(encoding="utf-8")
+    needle = '.join("../gpui")'
+    if original.count(needle) != 1:
+        raise ValueError("gpui_apple build script changed; review bundled cbindgen inputs")
+    build.write_text(
+        "// Modified for gpui-fast releases: bundle cbindgen inputs inside this package.\n"
+        + original.replace(needle, '.join("src/fast/release_gpui")'), encoding="utf-8"
+    )
+    # Apache-2.0 section 4(b) requires modified files to carry change notices.
+    # Add them to distributed copies, keeping upstream hooks conflict-free.
+    upstream = tomllib.loads((ROOT / "UPSTREAM").read_text(encoding="utf-8"))
+    changed = subprocess.check_output([
+        "git", "diff", "--name-only", upstream["import_commit"], "--",
+        *("crates/" + name for name in config["crates"]),
+    ], text=True, cwd=ROOT).splitlines()
+    for filename in changed:
+        relative = Path(filename).relative_to("crates")
+        distributed = [DEST / relative]
+        if relative.parts[:2] == ("gpui", "src"):
+            distributed.append(bundled.joinpath(*relative.parts[2:]))
+        for file in distributed:
+            if file.is_file() and file.suffix in (".rs", ".metal", ".wgsl", ".hlsl"):
+                file.write_text(
+                    "// Modified by Longbridge for gpui-fast.\n" + file.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+    print(f"Prepared {len(config['crates'])} crates at {DEST}, version {config['version']}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tag", required=True, help="Release tag, starting at v0.1.0")
+    args = parser.parse_args()
+    config = tomllib.loads((ROOT / "release.toml").read_text(encoding="utf-8"))
+    if not re.fullmatch(r"v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", args.tag):
+        parser.error("Tag must have the form v0.1.0 or v0.1.0-rc.1")
+    config["version"] = args.tag[1:]
+    if tuple(map(int, config["version"].split("-")[0].split("."))) < (0, 1, 0):
+        parser.error("The first release version is 0.1.0")
+    prepare(config)
