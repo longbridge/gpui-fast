@@ -555,6 +555,9 @@ struct ManagedPlatformSurface {
 
 impl PlatformSurfaceAttachment for ManagedPlatformSurface {
     fn set_bounds(&self, bounds: Bounds<DevicePixels>) -> Result<()> {
+        if self.bounds.get() == bounds {
+            return Ok(());
+        }
         self.platform_surface.set_bounds(bounds)?;
         self.bounds.set(bounds);
         self.geometry_dirty.set(true);
@@ -1098,12 +1101,18 @@ mod tests {
     }
 
     struct TestPlatformSurface {
+        bounds_writes: Cell<usize>,
+        fail_next_bounds: Cell<bool>,
         bounds: Cell<Bounds<DevicePixels>>,
         parent_origin: Cell<Point<DevicePixels>>,
     }
 
     impl PlatformSurfaceAttachment for TestPlatformSurface {
         fn set_bounds(&self, bounds: Bounds<DevicePixels>) -> Result<()> {
+            self.bounds_writes.set(self.bounds_writes.get() + 1);
+            if self.fail_next_bounds.replace(false) {
+                return Err(anyhow::anyhow!("test bounds failure"));
+            }
             self.bounds.set(bounds);
             Ok(())
         }
@@ -1129,6 +1138,8 @@ mod tests {
     #[test]
     fn managed_composition_surface_tracks_window_geometry_changes() {
         let platform_surface = Rc::new(TestPlatformSurface {
+            bounds_writes: Cell::new(0),
+            fail_next_bounds: Cell::new(false),
             bounds: Cell::new(Bounds::default()),
             parent_origin: Cell::new(Point::default()),
         });
@@ -1157,6 +1168,74 @@ mod tests {
         assert_eq!(platform_surface.bounds.get(), bounds);
         assert_eq!(platform_surface.parent_origin.get(), parent_origin);
         assert!(geometry_dirty.get());
+    }
+
+    #[test]
+    fn unchanged_native_bounds_do_not_resynchronize_composition() -> Result<()> {
+        let bounds = Bounds::new(Point::default(), size(DevicePixels(300), DevicePixels(200)));
+        let platform = Rc::new(TestPlatformSurface {
+            bounds_writes: Cell::new(0),
+            fail_next_bounds: Cell::new(false),
+            bounds: Cell::new(Bounds::default()),
+            parent_origin: Cell::new(Point::default()),
+        });
+        let dirty = Rc::new(Cell::new(false));
+        let surface = ManagedPlatformSurface {
+            platform_surface: platform.clone(),
+            bounds: Cell::new(Bounds::default()),
+            geometry_dirty: dirty.clone(),
+        };
+        surface.set_bounds(bounds)?;
+        dirty.set(false);
+        for _ in 0..10 {
+            surface.set_bounds(bounds)?;
+        }
+        assert!(
+            !dirty.get(),
+            "unchanged layout must not remount native views between mouse down and up"
+        );
+        assert_eq!(platform.bounds_writes.get(), 1);
+        let moved = Bounds::new(
+            Point {
+                x: DevicePixels(20),
+                y: DevicePixels(15),
+            },
+            bounds.size,
+        );
+        surface.set_bounds(moved)?;
+        assert!(dirty.get());
+        assert_eq!(platform.bounds_writes.get(), 2);
+        assert_eq!(surface.bounds(), moved);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_native_bounds_updates_remain_retryable() -> Result<()> {
+        let bounds = Bounds::new(Point::default(), size(DevicePixels(600), DevicePixels(400)));
+        let platform = Rc::new(TestPlatformSurface {
+            bounds_writes: Cell::new(0),
+            fail_next_bounds: Cell::new(true),
+            bounds: Cell::new(Bounds::default()),
+            parent_origin: Cell::new(Point::default()),
+        });
+        let dirty = Rc::new(Cell::new(false));
+        let surface = ManagedPlatformSurface {
+            platform_surface: platform.clone(),
+            bounds: Cell::new(Bounds::default()),
+            geometry_dirty: dirty.clone(),
+        };
+        assert!(surface.set_bounds(bounds).is_err());
+        assert_eq!(surface.bounds(), Bounds::default());
+        assert!(!dirty.get());
+        surface.set_bounds(bounds)?;
+        assert!(dirty.get());
+        assert_eq!(surface.bounds(), bounds);
+        assert_eq!(platform.bounds_writes.get(), 2);
+        dirty.set(false);
+        surface.set_bounds(bounds)?;
+        assert!(!dirty.get());
+        assert_eq!(platform.bounds_writes.get(), 2);
+        Ok(())
     }
 
     fn square(side: f32) -> Bounds<ScaledPixels> {

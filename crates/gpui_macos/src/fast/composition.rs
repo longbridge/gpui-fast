@@ -71,6 +71,8 @@ pub(crate) struct MacComposition {
     gpui_surfaces: FxHashMap<CompositionSurfaceId, MacGpuiSurface>,
     /// What the window's renderer was created with, for the surfaces'.
     renderer_context: renderer::Context,
+    /// Native identities, parents and sibling order, independent of geometry.
+    view_order: Vec<(CompositionSurfaceId, usize, usize)>,
 }
 
 impl MacComposition {
@@ -79,6 +81,7 @@ impl MacComposition {
             base_surface: None,
             gpui_surfaces: FxHashMap::default(),
             renderer_context,
+            view_order: Vec::new(),
         }
     }
 }
@@ -310,8 +313,31 @@ pub(crate) fn set_composition_order(
 
     unsafe {
         let native_view = lock.native_view.as_ptr() as id;
-        for (_, view) in &views {
-            NSView::removeFromSuperview(*view);
+        let view_order = surfaces
+            .iter()
+            .filter_map(|surface| {
+                let view = views_by_id.get(&surface.id).copied()?;
+                let parent = surface
+                    .parent
+                    .and_then(|parent| views_by_id.get(&parent).copied())
+                    .unwrap_or(native_view);
+                Some((surface.id, view as usize, parent as usize))
+            })
+            .collect::<Vec<_>>();
+        // A geometry update must preserve AppKit's mouse tracking and first
+        // responder. Only a changed tree/order needs views detached and mounted.
+        let parents_changed = view_order.iter().any(|(_, view, parent)| {
+            let actual_parent: id = msg_send![*view as id, superview];
+            actual_parent as usize != *parent
+        });
+        if lock.fast_composition.view_order != view_order || parents_changed {
+            for (_, view, _) in &view_order {
+                NSView::removeFromSuperview(*view as id);
+            }
+            for (_, view, parent) in &view_order {
+                (*parent as id).addSubview_(*view as id);
+            }
+            lock.fast_composition.view_order = view_order;
         }
         for surface in surfaces {
             let Some(view) = views_by_id.get(&surface.id).copied() else {
@@ -321,7 +347,6 @@ pub(crate) fn set_composition_order(
                 .parent
                 .and_then(|parent| views_by_id.get(&parent).copied())
                 .unwrap_or(native_view);
-            parent.addSubview_(view);
             let window_frame = match surface.window_bounds {
                 Some(bounds) => window_rect(native_view, bounds, lock.scale_factor()),
                 None => NSView::bounds(native_view),
