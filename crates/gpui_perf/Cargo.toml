@@ -25,6 +25,10 @@ required-features = ["fast"]
 name = "native_webview"
 required-features = ["fast"]
 
+[[test]]
+name = "windows_manifest_coexistence"
+required-features = ["fast", "upstream"]
+
 [features]
 default = ["fast"]
 # Build against this repository's GPUI: the showcase, `--headless` and the
@@ -34,7 +38,7 @@ fast = ["dep:gpui_fast", "dep:gpui_platform_fast", "dep:gpui_wgpu"]
 # GPUI Kit pins, to compare the two on the same screens:
 # `cargo run -p gpui_perf --release --features upstream`, or with
 # `--no-default-features` too, to skip building this repository's GPUI.
-upstream = ["dep:gpui_pre", "dep:gpui_pre_platform"]
+upstream = ["dep:gpui_pre", "dep:gpui_pre_platform", "gpui_fast?/windows-manifest-provided-by-host"]
 
 [dependencies]
 # Named `gpui_fast` and `gpui_platform_fast` so that either GPUI can be named
