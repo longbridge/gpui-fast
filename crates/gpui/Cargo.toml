@@ -46,6 +46,8 @@ screen-capture = [
     "dep:objc2-core-video",
 ]
 windows-manifest = ["dep:embed-resource"]
+# GPUI Kit already brings the identical gpui-pre manifest into Windows apps.
+windows-manifest-provided-by-host = []
 profiler = ["dep:hdrhistogram"]
 stacker = ["dep:stacksafe"]
 
