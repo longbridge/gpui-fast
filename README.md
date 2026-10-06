@@ -1,10 +1,18 @@
 # GPUI Fast
 
-**An experimental project exploring Retained Mode and window composition for
-GPUI.**
+**A performance-focused fork of GPUI with Retained Mode, scroll layers and
+window composition.**
+
+[v0.1.0](docs/release-notes/0.1.0.md) is the first crates.io release, based on
+Zed's GPUI at
+[`a1b71072e5`](https://github.com/zed-industries/zed/commit/a1b71072e5b43faef437b471e988fbb5f972c99c).
+The project remains experimental.
 
 - **Retained Mode**: redraw only what changed since the last frame. How it
   works, and why it is built this way: [Architecture](docs/architecture.md).
+- **Scroll layers**: reuse cached GPU tiles while scrolling, rebuilding only
+  changed content and newly needed rows. Supported on Linux (wgpu), macOS
+  (Metal) and Windows (Direct3D 11); see [Scroll layers](docs/scroll-layers.md).
 - **Window composition**: native views such as a WebView drawn inside a
   GPUI window, with GPUI's popovers, menus and dialogs still above them. It
   brings in the work proposed in
@@ -12,7 +20,7 @@ GPUI.**
   review upstream; `cargo run -p gpui_perf --example native_webview` shows
   it.
 
-Both take deep changes to GPUI, so they are tried out here first. Once they
+These take deep changes to GPUI, so they are tried out here first. Once they
 work, we plan to propose them to [Zed's GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
 
 Every change here keeps to two rules:
@@ -107,6 +115,54 @@ A retained frame is checked against the frame drawing from scratch would
 have produced: a test drives two windows through the same random history, one
 drawing incrementally and one from scratch, and requires every frame to match.
 
+## Scroll layers
+
+Scrolling moves content and normally prevents retained views from being
+replayed at their previous positions. Scroll layers rasterize eligible content
+into cached GPU tiles and composite those tiles at the new scroll offset.
+Scrolling `div`s, `uniform_list` and `list` can use this path automatically;
+virtual lists retain individual rows and rebuild only rows that need updating.
+
+Headless CPU time per frame in Linux release builds, with retained views
+enabled in both columns, over 300 frames of real wheel events:
+
+| Scenario | Layers off | Layers on |
+| --- | --- | --- |
+| Scrolling a child view | 0.619 ms | 0.066 ms (−89%) |
+| Scrolling elements in the same view | 0.578 ms | 0.232 ms (−60%) |
+| Scrolling a uniform list | 0.397 ms | 0.137 ms (−65%) |
+| Scrolling a variable-height list | 0.377 ms | 0.147 ms (−61%) |
+
+Layers fall back to direct drawing when content cannot be cached correctly or
+rebuilding it would cost too much. `GPUI_SCROLL_LAYERS=0` disables them for
+comparison. See [Scroll layers](docs/scroll-layers.md) for eligibility, memory
+limits, renderer pixel tests and benchmark details. These measurements isolate
+scroll layers; their percentages should not be added to the retained-mode
+results above.
+
+## Window composition
+
+Window composition places native content between GPUI's base scene and its
+overlays, so an embedded WebView can coexist with GPUI popovers, menus,
+tooltips and dialogs above it. Enable it with
+`Window::enable_window_composition`; the composition API manages native,
+external GPU and additional GPUI surfaces, including their order and parentage.
+`Window::with_composition_surface` selects where GPUI content is painted.
+
+The implementation brings in
+[zed#62379](https://github.com/zed-industries/zed/pull/62379), which has not
+merged upstream as of v0.1.0. It also preserves surface switches when replaying
+retained views and handles composition inside scroll layers.
+
+```sh
+cargo run -p gpui_perf --example native_webview
+```
+
+The example hosts WKWebView on macOS and WebView2 on Windows. On Linux it
+uses an independent wgpu device to demonstrate native surface composition on
+Wayland and X11; it does not embed a WebView. X11 uses rectangular SHAPE
+cutouts, so overlay shadows and rounded corners over native content are limited.
+
 ## Using it
 
 gpui-fast is for trying Retained Mode out, and for measuring it on real
@@ -117,16 +173,29 @@ thing to know: state a view's render reads that
 gpui-fast cannot observe — an `Rc<RefCell<..>>` outside an entity, the time —
 needs a `cx.notify()` when it changes, as it already does for a cached view.
 
-Point a project at it in place of upstream GPUI:
+Use the published crates, keeping GPUI's library names as dependency aliases:
 
 ```toml
 [dependencies]
-gpui = { git = "https://github.com/longbridge/gpui-fast" }
+gpui = { package = "gpui-fast", version = "0.1.0" }
+gpui_platform = { package = "gpui-fast-platform", version = "0.1.0", features = ["wayland", "x11"] }
+```
+
+The platform features above enable Linux's Wayland and X11 backends; omit them
+on macOS and Windows. The release also includes the macros, Apple, wgpu,
+macOS, Linux, Windows and Web backend crates under `gpui-fast-*` names.
+
+To use the v0.1.0 source from Git instead:
+
+```toml
+[dependencies]
+gpui = { git = "https://github.com/longbridge/gpui-fast", tag = "v0.1.0" }
 ```
 
 An application on [GPUI Kit](https://github.com/longbridge/gpui-kit) patches
 the Kit's `gpui-pre-*` snapshots with this repository's instead; see
-[`compat/`](compat/README.md).
+[`compat/`](compat/README.md). Adding the published `gpui-fast` dependency
+alone does not replace GPUI Kit's core; both must use the same GPUI types.
 
 ## gpui-fast, gpui-pre and gpui-ce
 
@@ -144,8 +213,12 @@ into upstream GPUI reaches all of these projects, and Zed itself.
 
 ## Following upstream
 
-GPUI Fast is based on Zed at the commit recorded in [`UPSTREAM`](UPSTREAM) and
-takes upstream's changes as Zed makes them. Its own code is kept apart from
+v0.1.0 includes upstream GPUI through Zed commit
+[`a1b71072e5`](https://github.com/zed-industries/zed/commit/a1b71072e5b43faef437b471e988fbb5f972c99c),
+including the shared Apple renderer and Linux display-connection changes.
+[`UPSTREAM`](UPSTREAM) records the exact Zed commit and its imported history
+for the current checkout. GPUI Fast takes upstream's changes as Zed makes
+them. Its own code is kept apart from
 upstream's, so a new upstream is a merge rather than a port. See
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for how that is kept true, and for building,
 testing and measuring.
