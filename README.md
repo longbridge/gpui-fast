@@ -3,7 +3,7 @@
 **A performance-focused fork of GPUI with Retained Mode, scroll layers and
 window composition.**
 
-[v0.1.0](docs/release-notes/0.1.0.md) is the first crates.io release, based on
+[v0.1.0](https://github.com/longbridge/gpui-fast/releases/tag/v0.1.0) is the first crates.io release, based on
 Zed's GPUI at
 [`a1b71072e5`](https://github.com/zed-industries/zed/commit/a1b71072e5b43faef437b471e988fbb5f972c99c).
 The project remains experimental.
