@@ -25,6 +25,10 @@ required-features = ["fast"]
 name = "native_webview"
 required-features = ["fast"]
 
+[[example]]
+name = "linux_webview"
+required-features = ["fast"]
+
 [[test]]
 name = "windows_manifest_coexistence"
 required-features = ["fast", "upstream"]
@@ -76,3 +80,6 @@ windows = { workspace = true, features = [
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dev-dependencies]
 wgpu.workspace = true
+# The linux_webview example: a WebKitGTK page through Wry.
+gtk = "0.18"
+wry = { version = "0.53.3", package = "lb-wry" }

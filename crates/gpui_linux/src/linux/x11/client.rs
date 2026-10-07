@@ -877,6 +877,7 @@ impl X11Client {
             .windows
             .get(&win)
             .map(|window_reference| window_reference.window.clone())
+            .or_else(|| crate::fast::composition::x11::input_window(win))
     }
 
     fn handle_event(&self, event: Event) -> Option<()> {

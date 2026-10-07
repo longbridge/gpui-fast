@@ -271,7 +271,7 @@ pub struct X11WindowState {
     scale_factor: f32,
     /// Taken when the window is dropped. Its GPU objects use the X connection, so they mustn't
     /// outlive the window, which a display mode switch relies on.
-    renderer: Option<WgpuRenderer>,
+    pub(crate) renderer: Option<WgpuRenderer>,
     pub(crate) fast_composition: crate::fast::composition::x11::Composition,
     display: Rc<dyn PlatformDisplay>,
     input_handler: Option<PlatformInputHandler>,

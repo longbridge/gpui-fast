@@ -156,8 +156,14 @@ for `gpui_macos`, and `WgpuRenderer` gains `new_sharing_atlas` for
   upstream merges its version, the sync replaces ours with it. Two things
   behave differently from the pull request: a retained view drawn again from
   last frame keeps the surface switches it made, and `with_composition_surface`
-  inside a scroll layer paints where the layer does. The `native_webview`
-  example in `gpui_perf` shows it on macOS, Windows and Linux.
+  inside a scroll layer paints where the layer does. On X11, when a
+  compositing manager blends ARGB windows, the GPUI content above native
+  surfaces is drawn into a transparent override-redirect window over the
+  window instead of being cut out of them, so shadows and translucent
+  backdrops blend over native content; `X11Client::get_window` falls back to
+  the window such an overlay window covers. The `native_webview` example in
+  `gpui_perf` shows composition on macOS, Windows and Linux, and
+  `linux_webview` shows a WebKitGTK page under overlays on X11.
 
 When the check fails, move the change into a `fast/` module and leave a hook
 behind that names it; use `git diff <import_commit> -- <file>` to see what

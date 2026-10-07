@@ -6,6 +6,15 @@
 //! Native surfaces are child windows, and the GPUI content stacked above one
 //! is cut out of its shape (the SHAPE extension) so the window's pixels and
 //! input show through.
+//!
+//! A cutout can only replace native pixels, so shadows and translucent
+//! content (a dialog's backdrop) cannot cover a native surface that way. When
+//! a compositing manager blends windows with an ARGB visual, the GPUI content
+//! stacked above the native surfaces is instead drawn into a transparent
+//! override-redirect window kept over the window, which the compositing
+//! manager blends over the native content. Its input shape is its content, so
+//! input elsewhere reaches the windows below it, and its input is delivered
+//! to the window it covers.
 
 use std::{
     any::Any,
@@ -15,13 +24,14 @@ use std::{
 };
 
 use anyhow::{Context as _, anyhow};
-use collections::FxHashMap;
+use collections::{FxHashMap, FxHashSet};
 use gpui::{
     Bounds, ComposedScene, CompositionSurfaceId, ContentMask, DevicePixels,
     PlatformCompositionSurface, PlatformCompositionSurfaceContent, PlatformSurfaceAttachment,
-    PlatformWindow, Point, ScaledPixels, Scene,
+    PlatformWindow, Point, ScaledPixels, Scene, Size,
 };
 use gpui_util::ResultExt as _;
+use gpui_wgpu::{WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use raw_window_handle as rwh;
 use x11rb::{
     connection::{Connection as _, RequestConnection as _},
@@ -33,7 +43,9 @@ use x11rb::{
     xcb_ffi::XCBConnection,
 };
 
-use crate::linux::{X11Window, XINPUT_ALL_DEVICE_GROUPS, check_reply, xcb_flush};
+use crate::linux::{
+    X11Window, X11WindowStatePtr, XINPUT_ALL_DEVICE_GROUPS, check_reply, get_reply, xcb_flush,
+};
 
 /// An X11 window's composition state, held by `X11WindowState`.
 pub(crate) struct Composition(Rc<RefCell<X11Composition>>);
@@ -54,6 +66,7 @@ impl Composition {
             native_surfaces: Vec::new(),
             order: Vec::new(),
             occluders: FxHashMap::default(),
+            overlay: Overlay::Unknown,
         })))
     }
 
@@ -73,6 +86,7 @@ struct X11Composition {
     native_surfaces: Vec<Weak<RefCell<X11NativeSurfaceState>>>,
     order: Vec<PlatformCompositionSurface>,
     occluders: FxHashMap<CompositionSurfaceId, Vec<Bounds<DevicePixels>>>,
+    overlay: Overlay,
 }
 
 struct X11NativeSurfaceState {
@@ -525,6 +539,424 @@ impl X11Composition {
         self.order.clear();
         self.occluders.clear();
         self.base_surface = None;
+        if let Overlay::Supported {
+            colormap, window, ..
+        } = std::mem::replace(&mut self.overlay, Overlay::Unknown)
+        {
+            if let Some(mut window) = window {
+                window.destroy(&self.xcb);
+            }
+            check_reply(
+                || "X11 FreeColormap for the overlay window failed.",
+                self.xcb.free_colormap(colormap),
+            )
+            .log_err();
+            xcb_flush(&self.xcb);
+        }
+    }
+
+    /// The GPUI surfaces stacked above a native surface, drawn into the overlay
+    /// window when the window has one.
+    fn surfaces_above_native(&self) -> FxHashSet<CompositionSurfaceId> {
+        let Some(first_native) = self.order.iter().position(|surface| {
+            matches!(
+                surface.content,
+                PlatformCompositionSurfaceContent::Native(_)
+                    | PlatformCompositionSurfaceContent::ExternalGpu(_)
+            )
+        }) else {
+            return FxHashSet::default();
+        };
+        self.order[first_native + 1..]
+            .iter()
+            .filter(|surface| matches!(surface.content, PlatformCompositionSurfaceContent::Gpui))
+            .map(|surface| surface.id)
+            .collect()
+    }
+
+    /// Whether GPUI content above native surfaces can go into an overlay
+    /// window, deciding it the first time it is asked.
+    fn overlay_supported(&mut self) -> bool {
+        if matches!(self.overlay, Overlay::Unknown) {
+            self.overlay = match self.detect_overlay_support() {
+                Ok(Some((root, colormap))) => Overlay::Supported {
+                    root,
+                    colormap,
+                    window: None,
+                },
+                Ok(None) => Overlay::Unsupported,
+                Err(error) => {
+                    log::warn!("X11 composition overlay window unavailable: {error:#}");
+                    Overlay::Unsupported
+                }
+            };
+        }
+        matches!(self.overlay, Overlay::Supported { .. })
+    }
+
+    /// The root window and a colormap for an overlay window, if the window has
+    /// an ARGB visual and a compositing manager blends such windows.
+    fn detect_overlay_support(&self) -> anyhow::Result<Option<(xproto::Window, xproto::Colormap)>> {
+        if self.depth != 32 {
+            return Ok(None);
+        }
+        let root = get_reply(
+            || "X11 GetGeometry for the composition window failed.",
+            self.xcb.get_geometry(self.x_window),
+        )?
+        .root;
+        let screen = self
+            .xcb
+            .setup()
+            .roots
+            .iter()
+            .position(|screen| screen.root == root)
+            .context("composition window is on an unknown screen")?;
+        // XWayland always runs under a compositor, which may not claim the
+        // X11 compositing manager selection.
+        let composited = self
+            .xcb
+            .extension_information("XWAYLAND")
+            .context("X11 QueryExtension for XWAYLAND failed")?
+            .is_some()
+            || {
+                let atom = get_reply(
+                    || "X11 InternAtom for the compositing manager selection failed.",
+                    self.xcb
+                        .intern_atom(false, format!("_NET_WM_CM_S{screen}").as_bytes()),
+                )?
+                .atom;
+                get_reply(
+                    || "X11 GetSelectionOwner for the compositing manager failed.",
+                    self.xcb.get_selection_owner(atom),
+                )?
+                .owner
+                    != x11rb::NONE
+            };
+        if !composited {
+            return Ok(None);
+        }
+        let colormap = self.xcb.generate_id()?;
+        check_reply(
+            || "X11 CreateColormap for the overlay window failed.",
+            self.xcb
+                .create_colormap(xproto::ColormapAlloc::NONE, colormap, root, self.visual_id),
+        )?;
+        Ok(Some((root, colormap)))
+    }
+
+    /// Draws `scene`, the GPUI content above the native surfaces, into the
+    /// overlay window, creating it on first use and unmapping it when the
+    /// scene is empty.
+    fn draw_overlay(&mut self, window: &X11Window, scene: &Scene) -> anyhow::Result<()> {
+        let Overlay::Supported {
+            root,
+            colormap,
+            window: overlay,
+        } = &mut self.overlay
+        else {
+            return Ok(());
+        };
+        if scene.is_empty() {
+            if let Some(overlay) = overlay {
+                overlay.set_mapped(&self.xcb, false)?;
+            }
+            return Ok(());
+        }
+
+        let state = window.0.state.borrow();
+        let Some(window_renderer) = state.renderer.as_ref() else {
+            return Ok(());
+        };
+        if window_renderer.device_lost() {
+            return Ok(());
+        }
+        let size = window_renderer.viewport_size();
+        if overlay
+            .as_ref()
+            .is_some_and(|overlay| overlay.renderer.device_lost())
+            && let Some(mut lost) = overlay.take()
+        {
+            lost.destroy(&self.xcb);
+        }
+        let overlay = match overlay {
+            Some(overlay) => overlay,
+            None => {
+                let created = OverlayWindow::new(
+                    &self.xcb,
+                    window_renderer,
+                    *root,
+                    *colormap,
+                    self.depth,
+                    self.visual_id,
+                    size,
+                )?;
+                INPUT_WINDOWS.with(|windows| {
+                    windows
+                        .borrow_mut()
+                        .insert(created.x_window, window.0.clone())
+                });
+                overlay.insert(created)
+            }
+        };
+        drop(state);
+
+        let origin = get_reply(
+            || "X11 TranslateCoordinates for the overlay window failed.",
+            self.xcb.translate_coordinates(self.x_window, *root, 0, 0),
+        )?;
+        overlay.set_geometry(
+            &self.xcb,
+            Point::new(
+                DevicePixels(origin.dst_x.into()),
+                DevicePixels(origin.dst_y.into()),
+            ),
+            size,
+        )?;
+        overlay.set_input(&self.xcb, scene_occluders(scene))?;
+        overlay.set_mapped(&self.xcb, true)?;
+        overlay.renderer.draw(scene);
+        xcb_flush(&self.xcb);
+        Ok(())
+    }
+
+    fn hide_overlay(&mut self) {
+        if let Overlay::Supported {
+            window: Some(overlay),
+            ..
+        } = &mut self.overlay
+        {
+            overlay.set_mapped(&self.xcb, false).log_err();
+        }
+    }
+}
+
+thread_local! {
+    /// The windows that overlay windows cover, by overlay window, so input on
+    /// an overlay window is delivered to the window below it.
+    static INPUT_WINDOWS: RefCell<FxHashMap<xproto::Window, X11WindowStatePtr>> =
+        RefCell::default();
+}
+
+/// `X11Client::get_window`'s fallback for an overlay window: the window it
+/// covers, which shares its coordinate space.
+pub(crate) fn input_window(x_window: xproto::Window) -> Option<X11WindowStatePtr> {
+    INPUT_WINDOWS.with(|windows| windows.borrow().get(&x_window).cloned())
+}
+
+/// Whether a window draws the GPUI content above its native surfaces into an
+/// overlay window.
+enum Overlay {
+    Unknown,
+    Unsupported,
+    Supported {
+        root: xproto::Window,
+        colormap: xproto::Colormap,
+        window: Option<OverlayWindow>,
+    },
+}
+
+/// A transparent override-redirect window kept over a window's area, drawn by
+/// a renderer sharing the window's sprite atlas.
+struct OverlayWindow {
+    x_window: xproto::Window,
+    renderer: WgpuRenderer,
+    origin: Point<DevicePixels>,
+    size: Size<DevicePixels>,
+    input: Option<Vec<Bounds<DevicePixels>>>,
+    mapped: bool,
+}
+
+impl OverlayWindow {
+    fn new(
+        xcb: &Rc<XCBConnection>,
+        window_renderer: &WgpuRenderer,
+        root: xproto::Window,
+        colormap: xproto::Colormap,
+        depth: u8,
+        visual_id: u32,
+        size: Size<DevicePixels>,
+    ) -> anyhow::Result<Self> {
+        let x_window = xcb.generate_id()?;
+        check_reply(
+            || "X11 CreateWindow for the overlay window failed.",
+            xcb.create_window(
+                depth,
+                x_window,
+                root,
+                0,
+                0,
+                size.width.0.max(1) as u16,
+                size.height.0.max(1) as u16,
+                0,
+                xproto::WindowClass::INPUT_OUTPUT,
+                visual_id,
+                &xproto::CreateWindowAux::new()
+                    .background_pixel(0)
+                    .border_pixel(0)
+                    .colormap(colormap)
+                    .override_redirect(1),
+            ),
+        )?;
+        let mut overlay = Self {
+            x_window,
+            renderer: match Self::create_renderer(xcb, window_renderer, x_window, visual_id, size) {
+                Ok(renderer) => renderer,
+                Err(error) => {
+                    check_reply(
+                        || "X11 DestroyWindow for the overlay window failed.",
+                        xcb.destroy_window(x_window),
+                    )
+                    .log_err();
+                    return Err(error);
+                }
+            },
+            origin: Point::default(),
+            size,
+            input: None,
+            mapped: false,
+        };
+        // An empty input shape until the first frame sets it from content.
+        overlay.set_input(xcb, Vec::new())?;
+        check_reply(
+            || "X11 XiSelectEvents for the overlay window failed.",
+            xcb.xinput_xi_select_events(
+                x_window,
+                &[xinput::EventMask {
+                    deviceid: XINPUT_ALL_DEVICE_GROUPS,
+                    mask: vec![
+                        xinput::XIEventMask::MOTION
+                            | xinput::XIEventMask::BUTTON_PRESS
+                            | xinput::XIEventMask::BUTTON_RELEASE
+                            | xinput::XIEventMask::ENTER
+                            | xinput::XIEventMask::LEAVE,
+                    ],
+                }],
+            ),
+        )?;
+        Ok(overlay)
+    }
+
+    fn create_renderer(
+        xcb: &Rc<XCBConnection>,
+        window_renderer: &WgpuRenderer,
+        x_window: xproto::Window,
+        visual_id: u32,
+        size: Size<DevicePixels>,
+    ) -> anyhow::Result<WgpuRenderer> {
+        window_renderer.new_sharing_atlas(
+            &OverlayRawWindow {
+                connection: xcb.clone(),
+                x_window,
+                visual_id,
+            },
+            WgpuSurfaceConfig {
+                size,
+                transparent: true,
+                preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
+            },
+        )
+    }
+
+    fn set_geometry(
+        &mut self,
+        xcb: &XCBConnection,
+        origin: Point<DevicePixels>,
+        size: Size<DevicePixels>,
+    ) -> anyhow::Result<()> {
+        if (origin, size) == (self.origin, self.size) && self.mapped {
+            return Ok(());
+        }
+        check_reply(
+            || "X11 ConfigureWindow for the overlay window failed.",
+            xcb.configure_window(
+                self.x_window,
+                &xproto::ConfigureWindowAux::new()
+                    .x(origin.x.0)
+                    .y(origin.y.0)
+                    .width(size.width.0.max(1) as u32)
+                    .height(size.height.0.max(1) as u32),
+            ),
+        )?;
+        if size != self.size {
+            self.renderer.update_drawable_size(size);
+        }
+        self.origin = origin;
+        self.size = size;
+        Ok(())
+    }
+
+    fn set_input(
+        &mut self,
+        xcb: &XCBConnection,
+        input: Vec<Bounds<DevicePixels>>,
+    ) -> anyhow::Result<()> {
+        if self.input.as_ref() == Some(&input) {
+            return Ok(());
+        }
+        check_reply(
+            || "X11 ShapeRectangles input for the overlay window failed.",
+            xcb.shape_rectangles(
+                shape::SO::SET,
+                shape::SK::INPUT,
+                xproto::ClipOrdering::UNSORTED,
+                self.x_window,
+                0,
+                0,
+                &input.iter().copied().map(x11_rectangle).collect::<Vec<_>>(),
+            ),
+        )?;
+        self.input = Some(input);
+        Ok(())
+    }
+
+    fn set_mapped(&mut self, xcb: &XCBConnection, mapped: bool) -> anyhow::Result<()> {
+        if self.mapped == mapped {
+            return Ok(());
+        }
+        if mapped {
+            check_reply(
+                || "X11 MapWindow for the overlay window failed.",
+                xcb.map_window(self.x_window),
+            )?;
+        } else {
+            check_reply(
+                || "X11 UnmapWindow for the overlay window failed.",
+                xcb.unmap_window(self.x_window),
+            )?;
+        }
+        xcb_flush(xcb);
+        self.mapped = mapped;
+        Ok(())
+    }
+
+    fn destroy(&mut self, xcb: &XCBConnection) {
+        INPUT_WINDOWS.with(|windows| windows.borrow_mut().remove(&self.x_window));
+        // Release the wgpu surface before the window it presents to.
+        self.renderer.destroy();
+        check_reply(
+            || "X11 DestroyWindow for the overlay window failed.",
+            xcb.destroy_window(self.x_window),
+        )
+        .log_err();
+    }
+}
+
+/// The overlay window's handle for creating its renderer's surface.
+struct OverlayRawWindow {
+    connection: Rc<XCBConnection>,
+    x_window: xproto::Window,
+    visual_id: u32,
+}
+
+impl rwh::HasWindowHandle for OverlayRawWindow {
+    fn window_handle(&self) -> Result<rwh::WindowHandle<'_>, rwh::HandleError> {
+        let _ = &self.connection;
+        let window = NonZeroU32::new(self.x_window).ok_or(rwh::HandleError::Unavailable)?;
+        let mut handle = rwh::XcbWindowHandle::new(window);
+        handle.visual_id = NonZeroU32::new(self.visual_id);
+        // SAFETY: The overlay window outlives its renderer, which is destroyed first.
+        Ok(unsafe { rwh::WindowHandle::borrow_raw(handle.into()) })
     }
 }
 
@@ -545,15 +977,28 @@ pub(crate) fn draw_composed(window: &X11Window, scene: ComposedScene<'_>) {
         .native_surfaces
         .iter()
         .any(|surface| surface.strong_count() > 0);
+    let overlay_surfaces = if track_occluders && composition.overlay_supported() {
+        composition.surfaces_above_native()
+    } else {
+        FxHashSet::default()
+    };
     let mut window_scene = Scene::default();
+    let mut overlay_scene = Scene::default();
     let mut occluders = FxHashMap::default();
     for layer in scene.layers() {
+        let in_overlay = overlay_surfaces.contains(&layer.surface);
+        let cuts_out = track_occluders && layer.surface != base_surface && !in_overlay;
         let mut layer_scene = Scene::default();
         for range in &layer.ranges {
-            let replayed = window_scene
+            let target = if in_overlay {
+                &mut overlay_scene
+            } else {
+                &mut window_scene
+            };
+            let replayed = target
                 .replay_balanced(range.clone(), scene.scene())
                 .and_then(|()| {
-                    if track_occluders && layer.surface != base_surface {
+                    if cuts_out {
                         layer_scene.replay_balanced(range.clone(), scene.scene())
                     } else {
                         Ok(())
@@ -564,16 +1009,22 @@ pub(crate) fn draw_composed(window: &X11Window, scene: ComposedScene<'_>) {
                 return;
             }
         }
-        if track_occluders && layer.surface != base_surface {
+        if cuts_out {
             layer_scene.finish();
             occluders.insert(layer.surface, scene_occluders(&layer_scene));
         }
     }
     window_scene.finish();
+    overlay_scene.finish();
 
     if occluders != composition.occluders {
         composition.occluders = occluders;
         composition.apply_order().log_err();
+    }
+    if overlay_surfaces.is_empty() {
+        composition.hide_overlay();
+    } else if let Err(error) = composition.draw_overlay(window, &overlay_scene) {
+        log::error!("drawing the X11 composition overlay window: {error:#}");
     }
     drop(composition);
     window.draw(&window_scene);
