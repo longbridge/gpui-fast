@@ -233,7 +233,7 @@ const MAX_OCCLUDER_RECTANGLES: usize = 256;
 /// Shadows are left out: a cutout can only show the window's pixels, not blend
 /// a translucent shadow over the native content, so cutting out a shadow would
 /// replace native content with GPUI's background around every overlay.
-fn scene_occluders(scene: &Scene) -> Vec<Bounds<DevicePixels>> {
+fn scene_occluders(scene: &Scene, opaque_only: bool) -> Vec<Bounds<DevicePixels>> {
     fn clipped(
         bounds: Bounds<ScaledPixels>,
         content_mask: &ContentMask<ScaledPixels>,
@@ -246,6 +246,7 @@ fn scene_occluders(scene: &Scene) -> Vec<Bounds<DevicePixels>> {
         scene
             .quads
             .iter()
+            .filter(|quad| !opaque_only || quad.background.is_opaque())
             .map(|quad| clipped(quad.bounds, &quad.content_mask)),
     );
     rectangles.extend(
@@ -540,11 +541,18 @@ impl X11Composition {
         self.occluders.clear();
         self.base_surface = None;
         if let Overlay::Supported {
-            colormap, window, ..
+            colormap,
+            window,
+            spare_renderer,
+            ..
         } = std::mem::replace(&mut self.overlay, Overlay::Unknown)
         {
-            if let Some(mut window) = window {
-                window.destroy(&self.xcb);
+            for mut renderer in window
+                .map(|window| window.destroy(&self.xcb))
+                .into_iter()
+                .chain(spare_renderer)
+            {
+                renderer.destroy();
             }
             check_reply(
                 || "X11 FreeColormap for the overlay window failed.",
@@ -583,6 +591,7 @@ impl X11Composition {
                     root,
                     colormap,
                     window: None,
+                    spare_renderer: None,
                 },
                 Ok(None) => Overlay::Unsupported,
                 Err(error) => {
@@ -653,13 +662,15 @@ impl X11Composition {
             root,
             colormap,
             window: overlay,
+            spare_renderer,
         } = &mut self.overlay
         else {
             return Ok(());
         };
         if scene.is_empty() {
-            if let Some(overlay) = overlay {
-                overlay.set_mapped(&self.xcb, false)?;
+            if let Some(overlay) = overlay.take() {
+                *spare_renderer = Some(overlay.destroy(&self.xcb));
+                xcb_flush(&self.xcb);
             }
             return Ok(());
         }
@@ -675,9 +686,16 @@ impl X11Composition {
         if overlay
             .as_ref()
             .is_some_and(|overlay| overlay.renderer.device_lost())
-            && let Some(mut lost) = overlay.take()
+            && let Some(lost) = overlay.take()
         {
-            lost.destroy(&self.xcb);
+            lost.destroy(&self.xcb).destroy();
+        }
+        if spare_renderer
+            .as_ref()
+            .is_some_and(|renderer| renderer.device_lost())
+            && let Some(mut lost) = spare_renderer.take()
+        {
+            lost.destroy();
         }
         let overlay = match overlay {
             Some(overlay) => overlay,
@@ -685,6 +703,8 @@ impl X11Composition {
                 let created = OverlayWindow::new(
                     &self.xcb,
                     window_renderer,
+                    spare_renderer.take(),
+                    self.x_window,
                     *root,
                     *colormap,
                     self.depth,
@@ -713,20 +733,28 @@ impl X11Composition {
             ),
             size,
         )?;
-        overlay.set_input(&self.xcb, scene_occluders(scene))?;
-        overlay.set_mapped(&self.xcb, true)?;
+        overlay.set_input(&self.xcb, scene_occluders(scene, false))?;
+        overlay.map(&self.xcb)?;
+        overlay.raise_above(&self.xcb, self.x_window);
         overlay.renderer.draw(scene);
         xcb_flush(&self.xcb);
         Ok(())
     }
 
+    /// Destroys the overlay window rather than unmapping it, keeping its
+    /// renderer for the next one: compositors that raise a window with only
+    /// its mapped transients (Hyprland) would leave a remapped overlay window
+    /// below its floating parent, while a new window stacks on top.
     fn hide_overlay(&mut self) {
         if let Overlay::Supported {
-            window: Some(overlay),
+            window,
+            spare_renderer,
             ..
         } = &mut self.overlay
+            && let Some(overlay) = window.take()
         {
-            overlay.set_mapped(&self.xcb, false).log_err();
+            *spare_renderer = Some(overlay.destroy(&self.xcb));
+            xcb_flush(&self.xcb);
         }
     }
 }
@@ -753,6 +781,9 @@ enum Overlay {
         root: xproto::Window,
         colormap: xproto::Colormap,
         window: Option<OverlayWindow>,
+        /// The renderer of the last destroyed overlay window, reused by the
+        /// next one: its pipelines take tens of milliseconds to create.
+        spare_renderer: Option<WgpuRenderer>,
     },
 }
 
@@ -771,6 +802,8 @@ impl OverlayWindow {
     fn new(
         xcb: &Rc<XCBConnection>,
         window_renderer: &WgpuRenderer,
+        spare_renderer: Option<WgpuRenderer>,
+        parent: xproto::Window,
         root: xproto::Window,
         colormap: xproto::Colormap,
         depth: u8,
@@ -800,7 +833,14 @@ impl OverlayWindow {
         )?;
         let mut overlay = Self {
             x_window,
-            renderer: match Self::create_renderer(xcb, window_renderer, x_window, visual_id, size) {
+            renderer: match Self::create_renderer(
+                xcb,
+                window_renderer,
+                spare_renderer,
+                x_window,
+                visual_id,
+                size,
+            ) {
                 Ok(renderer) => renderer,
                 Err(error) => {
                     check_reply(
@@ -816,6 +856,7 @@ impl OverlayWindow {
             input: None,
             mapped: false,
         };
+        overlay.set_popup_hints(xcb, parent)?;
         // An empty input shape until the first frame sets it from content.
         overlay.set_input(xcb, Vec::new())?;
         check_reply(
@@ -837,25 +878,79 @@ impl OverlayWindow {
         Ok(overlay)
     }
 
+    /// Marks the window as a dropdown menu of `parent` that takes no input
+    /// focus, as X11 popup menus are. Compositors that manage override-redirect
+    /// windows otherwise focus it, which deactivates `parent` and closes GPUI's
+    /// menus and popovers, or raise `parent` above it when `parent` floats.
+    fn set_popup_hints(&self, xcb: &XCBConnection, parent: xproto::Window) -> anyhow::Result<()> {
+        use x11rb::wrapper::ConnectionExt as _;
+
+        let atom = |name: &str| -> anyhow::Result<xproto::Atom> {
+            Ok(get_reply(
+                || format!("X11 InternAtom {name} for the overlay window failed."),
+                xcb.intern_atom(false, name.as_bytes()),
+            )?
+            .atom)
+        };
+        check_reply(
+            || "X11 ChangeProperty _NET_WM_WINDOW_TYPE for the overlay window failed.",
+            xcb.change_property32(
+                xproto::PropMode::REPLACE,
+                self.x_window,
+                atom("_NET_WM_WINDOW_TYPE")?,
+                xproto::AtomEnum::ATOM,
+                &[atom("_NET_WM_WINDOW_TYPE_DROPDOWN_MENU")?],
+            ),
+        )?;
+        // WM_HINTS with only the input hint set, to false.
+        const INPUT_HINT: u32 = 1;
+        check_reply(
+            || "X11 ChangeProperty WM_HINTS for the overlay window failed.",
+            xcb.change_property32(
+                xproto::PropMode::REPLACE,
+                self.x_window,
+                xproto::AtomEnum::WM_HINTS,
+                xproto::AtomEnum::WM_HINTS,
+                &[INPUT_HINT, 0, 0, 0, 0, 0, 0, 0, 0],
+            ),
+        )?;
+        check_reply(
+            || "X11 ChangeProperty WM_TRANSIENT_FOR for the overlay window failed.",
+            xcb.change_property32(
+                xproto::PropMode::REPLACE,
+                self.x_window,
+                xproto::AtomEnum::WM_TRANSIENT_FOR,
+                xproto::AtomEnum::WINDOW,
+                &[parent],
+            ),
+        )
+    }
+
     fn create_renderer(
         xcb: &Rc<XCBConnection>,
         window_renderer: &WgpuRenderer,
+        spare_renderer: Option<WgpuRenderer>,
         x_window: xproto::Window,
         visual_id: u32,
         size: Size<DevicePixels>,
     ) -> anyhow::Result<WgpuRenderer> {
-        window_renderer.new_sharing_atlas(
-            &OverlayRawWindow {
-                connection: xcb.clone(),
-                x_window,
-                visual_id,
-            },
-            WgpuSurfaceConfig {
-                size,
-                transparent: true,
-                preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
-            },
-        )
+        let raw_window = OverlayRawWindow {
+            connection: xcb.clone(),
+            x_window,
+            visual_id,
+        };
+        let config = WgpuSurfaceConfig {
+            size,
+            transparent: true,
+            preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
+        };
+        match spare_renderer {
+            Some(mut renderer) => {
+                renderer.replace_surface_sharing_context(&raw_window, config)?;
+                Ok(renderer)
+            }
+            None => window_renderer.new_sharing_atlas(&raw_window, config),
+        }
     }
 
     fn set_geometry(
@@ -910,35 +1005,47 @@ impl OverlayWindow {
         Ok(())
     }
 
-    fn set_mapped(&mut self, xcb: &XCBConnection, mapped: bool) -> anyhow::Result<()> {
-        if self.mapped == mapped {
+    fn map(&mut self, xcb: &XCBConnection) -> anyhow::Result<()> {
+        if self.mapped {
             return Ok(());
         }
-        if mapped {
-            check_reply(
-                || "X11 MapWindow for the overlay window failed.",
-                xcb.map_window(self.x_window),
-            )?;
-        } else {
-            check_reply(
-                || "X11 UnmapWindow for the overlay window failed.",
-                xcb.unmap_window(self.x_window),
-            )?;
-        }
+        check_reply(
+            || "X11 MapWindow for the overlay window failed.",
+            xcb.map_window(self.x_window),
+        )?;
         xcb_flush(xcb);
-        self.mapped = mapped;
+        self.mapped = true;
         Ok(())
     }
 
-    fn destroy(&mut self, xcb: &XCBConnection) {
+    /// Restacks the window just above `parent`, which the compositor raises
+    /// over it when `parent` is focused or clicked.
+    fn raise_above(&self, xcb: &XCBConnection, parent: xproto::Window) {
+        // Fails harmlessly when a window manager has reparented `parent`, so
+        // the two are no longer siblings.
+        check_reply(
+            || "X11 ConfigureWindow stacking for the overlay window failed.",
+            xcb.configure_window(
+                self.x_window,
+                &xproto::ConfigureWindowAux::new()
+                    .sibling(parent)
+                    .stack_mode(xproto::StackMode::ABOVE),
+            ),
+        )
+        .log_err();
+    }
+
+    /// Destroys the window, returning its renderer with its surface released.
+    fn destroy(mut self, xcb: &XCBConnection) -> WgpuRenderer {
         INPUT_WINDOWS.with(|windows| windows.borrow_mut().remove(&self.x_window));
         // Release the wgpu surface before the window it presents to.
-        self.renderer.destroy();
+        self.renderer.unconfigure_surface();
         check_reply(
             || "X11 DestroyWindow for the overlay window failed.",
             xcb.destroy_window(self.x_window),
         )
         .log_err();
+        self.renderer
     }
 }
 
@@ -982,21 +1089,28 @@ pub(crate) fn draw_composed(window: &X11Window, scene: ComposedScene<'_>) {
     } else {
         FxHashSet::default()
     };
+    // Content drawn into the overlay window is drawn into the window too, and
+    // its opaque parts are cut out of the native surfaces: when the compositor
+    // stacks the overlay window below the window (Hyprland renders a pinned
+    // window above every other), menus and dialogs still show, only without
+    // the shadows and backdrops blended over native content.
     let mut window_scene = Scene::default();
     let mut overlay_scene = Scene::default();
     let mut occluders = FxHashMap::default();
     for layer in scene.layers() {
         let in_overlay = overlay_surfaces.contains(&layer.surface);
-        let cuts_out = track_occluders && layer.surface != base_surface && !in_overlay;
+        let cuts_out = track_occluders && layer.surface != base_surface;
         let mut layer_scene = Scene::default();
         for range in &layer.ranges {
-            let target = if in_overlay {
-                &mut overlay_scene
-            } else {
-                &mut window_scene
-            };
-            let replayed = target
+            let replayed = window_scene
                 .replay_balanced(range.clone(), scene.scene())
+                .and_then(|()| {
+                    if in_overlay {
+                        overlay_scene.replay_balanced(range.clone(), scene.scene())
+                    } else {
+                        Ok(())
+                    }
+                })
                 .and_then(|()| {
                     if cuts_out {
                         layer_scene.replay_balanced(range.clone(), scene.scene())
@@ -1011,7 +1125,7 @@ pub(crate) fn draw_composed(window: &X11Window, scene: ComposedScene<'_>) {
         }
         if cuts_out {
             layer_scene.finish();
-            occluders.insert(layer.surface, scene_occluders(&layer_scene));
+            occluders.insert(layer.surface, scene_occluders(&layer_scene, in_overlay));
         }
     }
     window_scene.finish();
@@ -1086,7 +1200,9 @@ pub(crate) fn set_composition_order(
 #[cfg(test)]
 mod tests {
     use super::scene_occluders;
-    use gpui::{Bounds, ContentMask, DevicePixels, Quad, ScaledPixels, Scene, Shadow, point, size};
+    use gpui::{
+        Bounds, ContentMask, DevicePixels, Quad, ScaledPixels, Scene, Shadow, black, point, size,
+    };
 
     fn quad(bounds: Bounds<ScaledPixels>, mask: Bounds<ScaledPixels>) -> Quad {
         Quad {
@@ -1134,8 +1250,27 @@ mod tests {
         ));
         scene.finish();
 
-        let mut occluders = scene_occluders(&scene);
+        let mut occluders = scene_occluders(&scene, false);
         occluders.sort_by_key(|bounds| bounds.origin.x);
         assert_eq!(occluders, [device(10, 10, 100, 50), device(250, 0, 20, 40)]);
+    }
+
+    #[test]
+    fn opaque_scene_occluders_skip_translucent_backgrounds() {
+        let everything = scaled(0., 0., 1000., 1000.);
+        let mut scene = Scene::default();
+        // A dialog's translucent backdrop over the whole window, and its panel.
+        scene.insert_primitive(Quad {
+            background: black().opacity(0.4).into(),
+            ..quad(everything, everything)
+        });
+        scene.insert_primitive(Quad {
+            background: black().into(),
+            ..quad(scaled(300., 200., 400., 300.), everything)
+        });
+        scene.finish();
+
+        assert_eq!(scene_occluders(&scene, true), [device(300, 200, 400, 300)]);
+        assert_eq!(scene_occluders(&scene, false), [device(0, 0, 1000, 1000)]);
     }
 }

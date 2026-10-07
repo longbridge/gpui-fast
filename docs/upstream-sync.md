@@ -151,8 +151,9 @@ unchanged, and a new entry needs as good a reason.
   `ComposedScene::layer_scene`, ours, cuts one layer's scene out for a
   renderer; `Window` gains `enable_window_composition` and
   `with_composition_surface`; `gpui_apple` exports `new_overlay_renderer`
-for `gpui_macos`, and `WgpuRenderer` gains `new_sharing_atlas` for
-`gpui_linux`. It all lives in `fast::composition`, so when
+for `gpui_macos`, `WgpuRenderer` gains `new_sharing_atlas` and
+`replace_surface_sharing_context` for `gpui_linux`, and `Background` gains
+`is_opaque` so `gpui_linux` cuts only opaque content out of native surfaces. It all lives in `fast::composition`, so when
   upstream merges its version, the sync replaces ours with it. Two things
   behave differently from the pull request: a retained view drawn again from
   last frame keeps the surface switches it made, and `with_composition_surface`
@@ -161,7 +162,10 @@ for `gpui_macos`, and `WgpuRenderer` gains `new_sharing_atlas` for
   surfaces is drawn into a transparent override-redirect window over the
   window instead of being cut out of them, so shadows and translucent
   backdrops blend over native content; `X11Client::get_window` falls back to
-  the window such an overlay window covers. The `native_webview` example in
+  the window such an overlay window covers. The overlay content is drawn into
+  the window too, with its opaque parts cut out, so it still shows when the
+  compositor stacks the overlay window below the window (Hyprland renders
+  pinned windows above all others). The `native_webview` example in
   `gpui_perf` shows composition on macOS, Windows and Linux, and
   `linux_webview` shows a WebKitGTK page under overlays on X11.
 
