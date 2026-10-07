@@ -20,13 +20,21 @@ The unchanged-window baseline disables retention in the same build; the other ro
 
 ## Window composition
 
-Opt-in composition supports macOS, Windows, Linux Wayland and X11, based on [zed#62379](https://github.com/zed-industries/zed/pull/62379).
+Opt-in composition supports macOS, Windows and Linux (Wayland and X11), based on [zed#62379](https://github.com/zed-industries/zed/pull/62379). GPUI menus, popovers and dialogs, including their shadows and translucent backdrops, render above the native content on all three:
+
+| Platform | Native content | GPUI overlays |
+| --- | --- | --- |
+| macOS | AppKit view (WKWebView) | Overlay layer |
+| Windows | WebView2 composition | Overlay layer |
+| Linux (Wayland) | Subsurface | Overlay subsurfaces |
+| Linux (X11) | Child window (WebKitGTK) | Overlay window blended by the compositing manager; cut out of the native content without one |
 
 ```sh
+# WKWebView on macOS, WebView2 on Windows, a GPU surface of its own on Linux
 cargo run -p gpui_perf --example native_webview
+# A WebKitGTK page on Linux X11 or XWayland
+cargo run -p gpui_perf --example linux_webview
 ```
-
-The example embeds WKWebView on macOS and WebView2 on Windows. Linux demonstrates an independent GPU surface rather than a WebView.
 
 ## Using it
 
