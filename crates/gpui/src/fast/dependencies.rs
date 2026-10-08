@@ -514,16 +514,42 @@ impl App {
             .entities
             .access_log
             .written_since(&dependencies.entities, &dependencies.writes)
-            || dependencies.globals.iter().any(|global| {
-                self.dependencies
-                    .global_changed_at
-                    .get(global)
-                    .is_some_and(|changed_at| *changed_at > dependencies.generation)
-            })
-            || dependencies
-                .states
-                .iter()
-                .any(|(version, read_at)| version.get() != *read_at)
+            || self.globals_or_states_changed(dependencies)
+    }
+
+    /// Whether anything in `dependencies`, read by a cached view
+    /// ([`crate::Entity::cached`]) or a view drawn inside one, changed in a
+    /// way that draws the cached view again: one of the entities was
+    /// notified, or a global or a versioned state changed.
+    ///
+    /// An entity updated without being notified does not count, whether it
+    /// was updated outside drawing or written while the window drew (see
+    /// [`note_update`]). Upstream builds a cached view again only when it,
+    /// or a view drawn in it, is notified, or it is drawn somewhere else: a
+    /// view around it rendering again, and writing to what it reads as it
+    /// does, as a view handing its child what to show does on every render,
+    /// does not. Such a write is counted for a view that is not cached
+    /// because upstream renders that view again with the view around it, and
+    /// shows what was written; it never shows it in a cached view that was
+    /// not notified. Drawing a cached view again for less than that never
+    /// draws it from older reads than upstream would.
+    pub(crate) fn notified_dependencies_changed(&self, dependencies: &RenderDependencies) -> bool {
+        self.entities
+            .access_log
+            .changed_since(&dependencies.entities, dependencies.updates, false)
+            || self.globals_or_states_changed(dependencies)
+    }
+
+    fn globals_or_states_changed(&self, dependencies: &RenderDependencies) -> bool {
+        dependencies.globals.iter().any(|global| {
+            self.dependencies
+                .global_changed_at
+                .get(global)
+                .is_some_and(|changed_at| *changed_at > dependencies.generation)
+        }) || dependencies
+            .states
+            .iter()
+            .any(|(version, read_at)| version.get() != *read_at)
     }
 }
 
@@ -1194,6 +1220,14 @@ impl RenderDependencies {
             },
             ..self.clone()
         }
+    }
+
+    /// The same dependencies, up to date with every write `other`, recorded
+    /// later, is: those of a list's row kept through a frame that built the
+    /// list again around it, whose writes, the other rows' included, are
+    /// part of building the list.
+    pub(crate) fn written_up_to_those_of(&self, other: &Self) -> Self {
+        self.written_up_to(other.writes.to)
     }
 
     /// Both sets of dependencies at once, as of the earlier generation, so

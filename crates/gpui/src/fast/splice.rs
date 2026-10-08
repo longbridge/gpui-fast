@@ -86,6 +86,11 @@ impl Rebuild {
     pub(crate) fn parent_layout_key(&self) -> u64 {
         self.parent_layout_key
     }
+
+    /// Whether the view is a cached view.
+    pub(crate) fn is_cached(&self) -> bool {
+        self.cached_style.is_some()
+    }
 }
 
 impl Window {

@@ -134,6 +134,13 @@ view drawn in it notified, still composites: it renders that row again, alone,
 as it does a row whose hover changed. A row the list only measured, without
 prepainting it, is not the layer's, and nothing it read is kept.
 
+What the list and its rows write while the list is built — a row noting in a
+model the rows read that it was drawn — is part of building the list, not a
+change of the rows the layer keeps. What the view holding the list writes in
+its `render`, as a sidebar writing the items its rows show into a model they
+read on every render, is judged with that render, by what the view read: the
+rows the layer holds are not all rendered again for it.
+
 When the view holding a `list` renders again for something the layer cannot
 tell apart (a notification, a change of what it read itself), it may hand the
 list a different row renderer. The frame still composites: the list renders
