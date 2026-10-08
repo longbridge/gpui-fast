@@ -1037,13 +1037,24 @@ mod tests {
     /// view, and what it paints moves.
     #[test]
     fn scroll_scenarios_scroll_with_the_wheel() {
-        const NAMES: [&str; 6] = [
+        const NAMES: [&str; 17] = [
             "scroll-child-view",
             "scroll-same-view",
             "scroll-uniform-list",
             "scroll-list",
             "chat-scroll",
             "chat-scroll-no-button",
+            "chat-scroll-plain",
+            "chat-scroll-reads-offset",
+            "chat-scroll-reads-at-end",
+            "chat-scroll-notifies",
+            "chat-scroll-animates",
+            "chat-scroll-sticks",
+            "chat-scroll-parent-writes",
+            "chat-scroll-chrome",
+            "chat-scroll-trackpad",
+            "chat-scroll-allsum",
+            "chat-scroll-allsum-wheel",
         ];
         let options = Options::default();
         for name in NAMES {
@@ -1054,15 +1065,19 @@ mod tests {
             let scenario = fresh_scenario(index);
             let mut cx = new_context();
             let (window, root) = open(&mut cx, &*scenario, true, &options);
-            let mut painted = painted_quads(&mut cx, window);
             assert!(
-                painted.iter().any(|line| line.starts_with("monochrome")),
+                painted_quads(&mut cx, window)
+                    .iter()
+                    .any(|line| line.starts_with("monochrome")),
                 "{name}: no icon or text painted"
             );
+            // Composited tiles are listed where the layer holds them, so
+            // compare the content they composite.
+            let mut painted = painted_primitives(&mut cx, window);
             for n in 0..6 {
                 let sample = frame(&mut cx, window, &*scenario, &root, n);
                 assert!(!sample.forced, "{name}: frame {n} drew nothing by itself");
-                let now = painted_quads(&mut cx, window);
+                let now = painted_primitives(&mut cx, window);
                 assert_ne!(
                     now, painted,
                     "{name}: frame {n} painted what frame {n} - 1 did"

@@ -2,6 +2,7 @@
 //! `pub fn scenarios() -> Vec<Box<dyn crate::Scenario>>`.
 
 pub mod chat;
+pub mod chat_patterns;
 pub mod form;
 pub mod layout;
 pub mod list;
