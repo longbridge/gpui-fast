@@ -104,6 +104,21 @@ fn paths_composite_exactly_at_even_translations() {
     composite_and_compare(&mut harness, (38., -92.), Paths::With);
 }
 
+/// Paths something draws over stay out of the tiles: the core draws them,
+/// and what it draws over them, over the composited tiles
+/// (`gpui::fast::layers::overlay`), as without a layer. That holds at odd
+/// translations too, as the paths are rasterized where they show.
+#[test]
+fn covered_paths_drawn_over_the_tiles_equal_direct_drawing() {
+    let Some(mut harness) = Harness::new() else {
+        eprintln!("skipped: no wgpu adapter");
+        return;
+    };
+    for translation in [(37., -91.), (38., -92.), (3., 5.), (101., -233.)] {
+        composite_and_compare(&mut harness, translation, Paths::Covered);
+    }
+}
+
 /// Draws a window with a viewport over a scroll layer at `translation`, once
 /// from the content directly and once from the layer's tiles, twice (the
 /// second frame from the cached tiles), and compares the pixels.
@@ -116,6 +131,9 @@ fn composite_and_compare(harness: &mut Harness, translation: (f32, f32), paths: 
     let mut direct = Scene::default();
     direct.insert_primitive(panel);
     add_content(&mut direct, harness, translation, viewport, paths);
+    if paths == Paths::Covered {
+        add_covered_paths(&mut direct, harness, translation, viewport);
+    }
     direct.insert_primitive(scrollbar);
     direct.finish();
     let expected = harness.render(&direct, window, rgba(0x000000ff));
@@ -158,6 +176,9 @@ fn composite_and_compare(harness: &mut Harness, translation: (f32, f32), paths: 
         });
     }
     composited.pop_layer();
+    if paths == Paths::Covered {
+        add_covered_paths(&mut composited, harness, translation, viewport);
+    }
     composited.insert_primitive(scrollbar);
     composited.layers.frames.push(layer);
     composited.finish();
@@ -411,6 +432,8 @@ fn content(
 enum Paths {
     With,
     Without,
+    /// No path in the tiles; [`add_covered_paths`] over them.
+    Covered,
 }
 
 fn add_content(
@@ -529,6 +552,64 @@ fn add_path(scene: &mut Scene, (ox, oy): (f32, f32), clip: Bounds<ScaledPixels>)
         point(px(600. + ox), px(450. + oy)),
     );
     path.line_to(point(px(480. + ox), px(300. + oy)));
+    path.content_mask = ContentMask {
+        bounds: clip.map(|c| px(c.0)),
+    };
+    path.color = Hsla::from(rgba(0x8800ffcc)).into();
+    scene.insert_primitive(path.scale(1.));
+}
+
+/// What GPUI Kit draws for a table's rounded frame: paths filling corner
+/// notches, a bordered quad and a glyph drawn over them, and a path nothing
+/// covers, moved by `offset` and clipped to `clip`, in drawing order.
+fn add_covered_paths(
+    scene: &mut Scene,
+    harness: &Harness,
+    (ox, oy): (f32, f32),
+    clip: Bounds<ScaledPixels>,
+) {
+    let mask = ContentMask { bounds: clip };
+    for (x, y, dx, dy) in [
+        (200., 330., 1., 1.),
+        (330.5, 330., -1., 1.),
+        (200., 410.25, 1., -1.),
+    ] {
+        let corner = point(px(x + ox), px(y + oy));
+        let mut path = Path::new(corner);
+        path.line_to(corner + point(px(9. * dx), px(0.)));
+        path.curve_to(corner + point(px(0.), px(9. * dy)), corner);
+        path.line_to(corner);
+        path.content_mask = ContentMask {
+            bounds: clip.map(|c| px(c.0)),
+        };
+        path.color = Hsla::from(rgba(0x3366ccff)).into();
+        scene.insert_primitive(path.scale(1.));
+    }
+    scene.insert_primitive(Quad {
+        bounds: sp(200. + ox, 330. + oy, 130.5, 80.25),
+        content_mask: mask,
+        background: Hsla::from(rgba(0x00000000)).into(),
+        border_color: Hsla::from(rgba(0x222222ff)),
+        corner_radii: Corners::all(ScaledPixels(9.)),
+        border_widths: Edges::all(ScaledPixels(1.)),
+        ..Default::default()
+    });
+    scene.insert_primitive(MonochromeSprite {
+        order: 0,
+        pad: 0,
+        bounds: sp(204. + ox, 334. + oy, 16., 16.),
+        content_mask: mask,
+        color: Hsla::from(rgba(0xff8800ff)),
+        tile: glyph_tile(harness, 1, false),
+        transformation: TransformationMatrix::unit(),
+    });
+    let mut path = Path::new(point(px(250. + ox), px(360. + oy)));
+    path.line_to(point(px(290.5 + ox), px(372. + oy)));
+    path.curve_to(
+        point(px(255. + ox), px(400. + oy)),
+        point(px(300. + ox), px(395. + oy)),
+    );
+    path.line_to(point(px(250. + ox), px(360. + oy)));
     path.content_mask = ContentMask {
         bounds: clip.map(|c| px(c.0)),
     };

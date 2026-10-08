@@ -42,13 +42,17 @@ drawing as it does without layers, and how to verify and measure layers.
     tiles are hashed once, when it is painted. A frame adding a row hands the
     renderer the other rows as they were and rasterizes only the tiles the
     new row reaches. Rows past the overscan are dropped a batch at a time.
-  - The first frame painting a `list`'s layer paints the whole overscan. A
+  - The first frame painting a list's layer paints the whole overscan. A
     frame painting it afresh after that, for a change of its content, paints
-    only the rows the list shows, as the list does without a layer; the frames
-    that keep the rows then grow the overscan back half a viewport a frame on
-    each side. A view holding the list that is notified now and then, as a chat
-    transcript is when it reaches its end, does not rebuild five viewports of
-    rows each time.
+    only the rows the list shows, as the list does without a layer. A frame
+    that keeps the rows renders no more than three quarters of a viewport of
+    rows, those it shows that the layer lacks first: the rest of that budget
+    grows the overscan, three quarters of it on the side the list scrolls
+    toward (`fast::layers::lists::RENDER_PER_FRAME_VIEWPORTS`). A view holding the
+    list that is notified now and then, as a chat transcript is when it
+    reaches its end, does not rebuild five viewports of rows each time, and a
+    scroll faster than the overscan grows renders the rows it shows, not five
+    viewports of rows around them.
   - A view that asks a coarse question of where a container is scrolled as
     it renders is taken to have read only the answer
     (`fast::layers::answers`): `ListState::is_scrolled_to_end` (a chat
@@ -110,22 +114,49 @@ each frame it then takes one of three paths (`fast::layers::policy::decide`):
     the layer. The layer is dropped but not demoted, and painted again as
     soon as the animation stops. An animation in a view around the one
     holding the container leaves the layer composited;
-  - the content changes on at least eight of the last sixteen frames (demotion);
-  - paths in the content are covered by something drawn after them.
+  - the scroll moved past everything the layer holds since the last frame,
+    as a scrollbar's thumb dragged fast does: the layer is dropped, and is
+    not promoted again while the scroll moves by a viewport or more a frame;
+  - the content changes on at least eight of the last sixteen frames, or
+    the layer's estimated work exceeds drawing directly (demotion, below);
+  - a row of a list draws over the paths of a row before it, or over what
+    that row drew over its paths.
+
+The view holding the container is notified by the container's wheel
+listener, and a frame is taken for a scroll only while that view was
+notified no more often than the wheel scrolled what it holds. Other wheel
+listeners react to the same scroll: GPUI Kit's scrollbar notifies the view
+again when the offset moved since it last saw it, to show itself. A
+notification of a view sent while a wheel event is dispatched, when the event
+scrolled a container that view painted, counts as one for the scroll as long
+as nothing else changed while the event was dispatched: no entity was
+updated or written and no global changed (`fast::layers::wheel`). A wheel
+listener that updates an entity and notifies changed the content, and the
+layer is painted again. What this assumes is that state outside entities
+that a listener changes in reaction to a scroll, and notifies the view for,
+does not change what the view renders inside the scrolled content: the
+scrollbar beside it is drawn afresh, the content is not. State that does
+belongs in an entity the listener updates.
 
 The demotion policy also tracks rebuilding work over the last 32 completed
-layer frames. Virtual lists count the rows and paint operations they actually
-rebuilt relative to the visible rows; other scroll containers count painted
-primitives relative to those visible in the viewport. Scroll extensions, hover
-changes and input rebuilds count too. The initial cache build is excluded, and
-a quarter of each frame's budget is reserved for cache bookkeeping and tile
-rendering. A layer whose estimated work reaches direct drawing's budget falls
-back even if updates occur on fewer than half the frames. Two content refreshes
-that each rebuild more than two visible regions within 120 frames of each other
-also trigger fallback, without waiting for the average: broad updates must not
-keep causing latency spikes. Refreshes further apart than that are paid back by
-the frames composited between them. One isolated update and the initial cache
-build are not enough to trigger this guard.
+layer frames (`fast::layers::work`), in units of drawing the visible content
+directly. Virtual lists count the rows they rendered, by their height against
+that of the rows shown (or of the viewport, if taller) and by their paint
+operations against those of the rows shown; other scroll containers count painted primitives relative to
+those visible in the viewport. Scroll extensions, hover changes and input
+rebuilds count too. Painting content afresh costs about twice what drawing it
+directly does (its tiles are hashed and its records rebuilt besides), and a
+repaint's work is counted at `REPAINT_COST` times. The initial cache build is
+excluded, and a quarter of each frame's budget is reserved for cache
+bookkeeping and tile rendering. A layer whose estimated work reaches direct
+drawing's budget falls back even if updates occur on fewer than half the
+frames, and one whose last six frames cost more than drawing directly, their upkeep
+included, half of them each costing more, falls back at once, without waiting
+for the 32-frame average. Two content refreshes that each rebuild more than two
+visible regions within 120 frames of each other also trigger fallback: broad
+updates must not keep causing latency spikes. Refreshes further apart than
+that are paid back by the frames composited between them. One isolated update
+and the initial cache build are not enough to trigger either guard.
 
 Demotion releases cached rows and resets the fixed-size work history. The
 first cooldown requires 60 stable frames; repeated demotions double that wait,
@@ -137,8 +168,17 @@ layer held it does not count as a changed frame. After 1920 quiet frames the
 backoff resets. This is a work estimate, not a measurement of GPU
 time, and does not depend on the monitor's refresh rate.
 
-Paths are never rasterized into tiles, because odd translations change their
-antialiasing. When nothing covers them, they are drawn over the tiles in the
+Paths are never rasterized into tiles: the path shaders antialias with
+screen-space derivatives (`dpdx`/`dfdx`/`ddx`), taken within the 2×2 pixel
+quads the GPU shades together, so a tile composited at an odd translation can
+come out one level apart on a path's edge pixels. Instead the content is split
+(`fast::layers::overlay`): its paths, and everything drawn after a path or
+after such a primitive that overlaps it, are the layer's *overlay*, kept out
+of the tiles and drawn over them in the frame, in drawing order, wherever the
+layer is composited. On every pixel the primitives drawing it are then drawn
+in the same order as without a layer, and the paths are rasterized where they
+show. A table in a rounded frame, whose corner notches are paths under the
+frame's border, composites with only the paths and the border drawn each
 frame.
 
 ### Changes inside a list's rows
