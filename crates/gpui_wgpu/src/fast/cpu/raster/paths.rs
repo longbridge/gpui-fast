@@ -27,6 +27,7 @@ pub(super) fn draw_batch(
     let sprite_rects: Vec<IRect> = sprites
         .iter()
         .map(|sprite| sprite_pixels(sprite).intersect(&target.clip))
+        .filter(|rect| !rect.is_empty())
         .collect();
     let area = sprite_rects
         .iter()

@@ -1785,6 +1785,52 @@ fn regions_draw_like_whole_frames() {
     }
 }
 
+/// A region beside some of a path batch's sprites, level with them, draws
+/// as the whole frame does there (their rectangles clipped to it are empty).
+#[test]
+fn regions_beside_path_sprites_draw_like_whole_frames() {
+    let Some(harness) = Harness::new() else {
+        eprintln!("skipped: no wgpu adapter");
+        return;
+    };
+    // Side by side, apart: one order, so one batch composited through a
+    // sprite per path.
+    let mut scene = Scene::default();
+    scene.insert_primitive(quad(sp(0., 0., 400., 300.), color(0x202020ff)));
+    for x in [40., 220.] {
+        let mut path = Path::new(point(px(x), px(60.)));
+        path.line_to(point(px(x + 120.), px(80.)));
+        path.curve_to(point(px(x + 20.), px(220.)), point(px(x + 100.), px(150.)));
+        path.line_to(point(px(x), px(60.)));
+        path.color = color(0x8800ffcc).into();
+        path.content_mask = ContentMask {
+            bounds: Bounds {
+                origin: point(px(-1000.), px(-1000.)),
+                size: size(px(3000.), px(3000.)),
+            },
+        };
+        scene.insert_primitive(path.scale(1.));
+    }
+    scene.finish();
+    assert_eq!(scene.paths[0].order, scene.paths[1].order);
+
+    let (w, h) = (400u32, 300u32);
+    // Over the right path only, level with the left one.
+    let region = device_bounds(230, 90, 60, 80);
+    for mode in [OPAQUE, PREMULTIPLIED] {
+        let params = harness.params(mode);
+        let whole = harness.cpu(&scene, w, h, mode, 1);
+        let mut canvas = Canvas::new(w, h);
+        draw(&mut canvas, &scene, &[region], &harness.mirror, &params, 1);
+        for y in 90..170 {
+            for x in 230..290 {
+                let index = (y * w + x) as usize;
+                assert_eq!(canvas.pixels()[index], whole[index], "pixel ({x}, {y})");
+            }
+        }
+    }
+}
+
 /// Threads draw the same pixels as one thread does.
 #[test]
 fn threaded_drawing_is_exact() {
