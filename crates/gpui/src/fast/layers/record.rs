@@ -66,4 +66,8 @@ pub(crate) struct LayerRecord {
     /// painted, by the views' ids: a frame that composites the layer lays
     /// them out again from these instead of rendering them (spec §6.3).
     pub(crate) view_layouts: Rc<FxHashMap<GlobalElementId, KeptLayout>>,
+    /// What prepainting the content added to the accessibility tree, when
+    /// accessibility was active, as painted: a frame compositing the layer
+    /// adds it again, moved by the scroll since.
+    pub(crate) a11y: Option<Rc<crate::fast::a11y::A11yStretch>>,
 }

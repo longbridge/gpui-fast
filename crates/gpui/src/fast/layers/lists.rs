@@ -75,6 +75,13 @@ use std::{
 /// Whether virtual lists get scroll layers.
 pub(crate) const LIST_LAYERS: bool = true;
 
+/// Whether a virtual list may use its layer this frame: layers are active,
+/// and accessibility is not, as a list's layer holds rows its viewport
+/// does not show, which would be in the accessibility tree.
+fn list_layers_active(window: &Window, cx: &App) -> bool {
+    active(window, cx) && !window.a11y.is_active()
+}
+
 /// The rows of a list's layer, and what the frame being drawn does with
 /// them.
 #[derive(Default)]
@@ -713,7 +720,7 @@ pub(crate) fn measure_item(
 /// The measured item's size as the layer of the list `id` keeps it, if the
 /// frame only scrolls the layer.
 fn kept_item_size(window: &Window, cx: &App, id: &GlobalElementId) -> Option<Size<Pixels>> {
-    if paint::inside_layer(window) || !active(window, cx) {
+    if paint::inside_layer(window) || !list_layers_active(window, cx) {
         return None;
     }
     let layer = window.fast_layers.layers.get(id)?;
@@ -766,7 +773,7 @@ pub(crate) fn begin_uniform_list(
     let Some(id) = id else {
         return Rows(None);
     };
-    if paint::inside_layer(window) || !active(window, cx) {
+    if paint::inside_layer(window) || !list_layers_active(window, cx) {
         return Rows(None);
     }
     let viewport = window.content_mask().bounds;
@@ -1040,6 +1047,7 @@ fn carry_prepaint_rows(window: &mut Window, id: &GlobalElementId) {
             window,
             &row.prepaint,
             &row.hitboxes,
+            None,
             delta,
             viewport,
             tooltips,
@@ -1111,6 +1119,7 @@ fn marker(id: &GlobalElementId, frame: &RowsFrame) -> Painting {
             ..Default::default()
         },
         view_layouts: FxHashMap::default(),
+        a11y: None,
     }
 }
 
@@ -1527,7 +1536,7 @@ pub(crate) fn begin_list(
     state: &crate::StateInner,
     bounds: Bounds<Pixels>,
 ) {
-    if !COMPILED || !LIST_LAYERS || paint::inside_layer(window) || !active(window, cx) {
+    if !COMPILED || !LIST_LAYERS || paint::inside_layer(window) || !list_layers_active(window, cx) {
         return;
     }
     let version = state.version.clone();
@@ -2684,6 +2693,7 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
         has_paths,
         paths: Rc::from([]),
         view_layouts: Rc::default(),
+        a11y: None,
     });
     finish_records(window, id, &frame, records);
     if frame.mode == Mode::Repaint && !has_paths {

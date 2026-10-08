@@ -132,7 +132,7 @@ pub(crate) struct A11y {
     ///
     /// Updated by AccessKit using callbacks provided to the adapter. Can change
     /// halfway through a frame.
-    active_flag: Arc<AtomicBool>,
+    pub(crate) active_flag: Arc<AtomicBool>,
     /// Whether a11y features are active for *this specific frame*.
     ///
     /// At the start of each frame, we load [`Self::active_flag`] (using
@@ -157,7 +157,7 @@ pub(crate) struct A11y {
     last_focus_without_node: Option<FocusId>,
     /// Retains the last tree update (and, in debug builds, per-node provenance)
     /// so it can be dumped via [`crate::Window::debug_a11y_tree_json`].
-    debug: debug::A11yDebug,
+    pub(crate) debug: debug::A11yDebug,
     /// Maps a view's [`EntityId`] to its `Render` type name
     #[cfg(debug_assertions)]
     pub(crate) view_type_names: FxHashMap<EntityId, &'static str>,
@@ -222,6 +222,7 @@ impl A11y {
     }
 
     pub(crate) fn set_focusable(&mut self, node_id: NodeId, focus_id: FocusId) {
+        crate::fast::a11y::A11yLog::focusable(&mut self.nodes.fast, node_id, focus_id);
         self.focus_ids.insert(node_id, focus_id);
     }
 
@@ -256,6 +257,7 @@ impl A11y {
     }
 
     pub(crate) fn set_active_descendant(&mut self, node_id: NodeId) {
+        crate::fast::a11y::A11yLog::active_descendant(&mut self.nodes.fast, node_id);
         // The active descendant must be a descendant of the focused container,
         // not the focused node itself.
         if self.nodes.node_is_focused(node_id) {
@@ -273,6 +275,7 @@ impl A11y {
 
     /// Clear per-frame state and push the root node to start a new frame.
     pub(crate) fn begin_frame(&mut self) {
+        crate::fast::a11y::begin_frame(self);
         self.focus_ids.clear();
         self.node_bounds.clear();
         self.action_listeners.clear();
@@ -281,6 +284,7 @@ impl A11y {
 
     /// Finalize the tree and produce a [`TreeUpdate`] for the platform adapter.
     pub(crate) fn end_frame(&mut self, frame: debug::FrameDebugInfo) -> TreeUpdate {
+        crate::fast::a11y::A11yLog::end_frame(&mut self.nodes.fast);
         let update = self.nodes.finalize();
         self.debug.capture(
             &update,
@@ -370,10 +374,10 @@ impl<'a> A11ySubtreeBuilder<'a> {
 
 pub(crate) struct A11yNodeBuilder {
     ids_stack: SmallVec<[NodeId; 16]>,
-    nodes_stack: SmallVec<[accesskit::Node; 16]>,
+    pub(crate) nodes_stack: SmallVec<[accesskit::Node; 16]>,
     /// This is the exact type required by accesskit, so we can't just make it a
     /// `HashMap<NodeId, Node>` to remove the need for `seen_ids`
-    all_nodes: Vec<(NodeId, accesskit::Node)>,
+    pub(crate) all_nodes: Vec<(NodeId, accesskit::Node)>,
     seen_ids: FxHashSet<NodeId>,
     /// The node that GPUI considers focused. Note that this may be different to
     /// what is reported to accesskit - see [`Self::active_descendant`]
@@ -384,7 +388,8 @@ pub(crate) struct A11yNodeBuilder {
     /// focused.
     active_descendant: Option<NodeId>,
     #[cfg(debug_assertions)]
-    node_info: FxHashMap<NodeId, debug::NodeDebugInfo>,
+    pub(crate) node_info: FxHashMap<NodeId, debug::NodeDebugInfo>,
+    pub(crate) fast: crate::fast::a11y::A11yLog,
 }
 
 impl A11yNodeBuilder {
@@ -398,6 +403,7 @@ impl A11yNodeBuilder {
             active_descendant: None,
             #[cfg(debug_assertions)]
             node_info: FxHashMap::default(),
+            fast: Default::default(),
         }
     }
 
@@ -434,6 +440,7 @@ impl A11yNodeBuilder {
         if let Some(parent) = self.nodes_stack.last_mut() {
             parent.push_child(id);
         }
+        crate::fast::a11y::A11yLog::push(&mut self.fast, id);
         self.ids_stack.push(id);
         self.nodes_stack.push(node);
         true
@@ -452,6 +459,7 @@ impl A11yNodeBuilder {
         if let Some(parent) = self.nodes_stack.last_mut() {
             parent.push_child(id);
         }
+        crate::fast::a11y::A11yLog::leaf(&mut self.fast, self.all_nodes.len());
         self.all_nodes.push((id, node));
         true
     }
@@ -466,6 +474,7 @@ impl A11yNodeBuilder {
         debug_assert!(self.ids_stack.len() > 1, "pop would remove the root node");
 
         if let (Some(id), Some(node)) = (self.ids_stack.pop(), self.nodes_stack.pop()) {
+            crate::fast::a11y::A11yLog::pop(&mut self.fast, self.all_nodes.len());
             self.all_nodes.push((id, node));
         }
     }

@@ -33,6 +33,7 @@ use std::{any::TypeId, cell::RefCell, mem, ops::Range, rc::Rc};
 #[inline(always)]
 pub(crate) fn begin_frame(window: &mut Window, cx: &App) {
     window.fast_layout.phase_times.begin();
+    crate::fast::a11y::new_frame(window);
     window.mark_changed_retained_views_dirty(cx);
 }
 
@@ -313,6 +314,7 @@ impl PrepaintStateIndex {
             line_layout_index: self
                 .line_layout_index
                 .shifted(&from.line_layout_index, &to.line_layout_index),
+            fast_a11y_index: self.fast_a11y_index - from.fast_a11y_index + to.fast_a11y_index,
         }
     }
 }
@@ -328,8 +330,10 @@ impl PartialEq for PrepaintStateIndex {
             dispatch_tree_index,
             accessed_element_states_index,
             line_layout_index,
+            fast_a11y_index,
         } = self;
-        *hitboxes_index == other.hitboxes_index
+        *fast_a11y_index == other.fast_a11y_index
+            && *hitboxes_index == other.hitboxes_index
             && *tooltips_index == other.tooltips_index
             && *deferred_draws_index == other.deferred_draws_index
             && *dispatch_tree_index == other.dispatch_tree_index
@@ -345,7 +349,7 @@ impl PartialEq for PaintIndex {
             scene_index,
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds_index,
-            fast_window_control_hitboxes_index,
+            fast,
             mouse_listeners_index,
             input_handlers_index,
             cursor_styles_index,
@@ -353,8 +357,8 @@ impl PartialEq for PaintIndex {
             tab_handle_index,
             line_layout_index,
         } = self;
-        *scene_index == other.scene_index
-            && *fast_window_control_hitboxes_index == other.fast_window_control_hitboxes_index
+        *fast == other.fast
+            && *scene_index == other.scene_index
             && *mouse_listeners_index == other.mouse_listeners_index
             && *input_handlers_index == other.input_handlers_index
             && *cursor_styles_index == other.cursor_styles_index
@@ -379,9 +383,13 @@ impl PaintIndex {
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds_index: self.debug_bounds_index - from.debug_bounds_index
                 + to.debug_bounds_index,
-            fast_window_control_hitboxes_index: self.fast_window_control_hitboxes_index
-                - from.fast_window_control_hitboxes_index
-                + to.fast_window_control_hitboxes_index,
+            fast: FastPaintIndex {
+                window_control_hitboxes: self.fast.window_control_hitboxes
+                    - from.fast.window_control_hitboxes
+                    + to.fast.window_control_hitboxes,
+                a11y_actions: self.fast.a11y_actions - from.fast.a11y_actions
+                    + to.fast.a11y_actions,
+            },
             mouse_listeners_index: self.mouse_listeners_index - from.mouse_listeners_index
                 + to.mouse_listeners_index,
             input_handlers_index: self.input_handlers_index - from.input_handlers_index
@@ -569,7 +577,7 @@ impl Window {
     fn reusable_record(&self, id: &GlobalElementId, cx: &App, cached: bool) -> Option<usize> {
         if self.refreshing
             || cx.has_active_drag()
-            || self.a11y.is_active()
+            || crate::fast::a11y::stale(&self.a11y)
             || self.is_inspector_picking(cx)
             || self.retained_state.dirty_subtrees.contains(id)
             || self.next_frame.retained.by_id.contains_key(id)
@@ -1168,18 +1176,37 @@ impl Window {
     }
 }
 
-/// Copies the window control hitboxes last frame's paint of `range`
-/// inserted, which upstream's [`Window::reuse_paint`] leaves out: a subtree
-/// drawn again from last frame would otherwise lose the window controls it
-/// painted.
+/// Where a frame's paint stands in what gpui-fast adds to the frame: the
+/// part of a [`PaintIndex`] upstream's lacks.
+#[derive(Clone, Default, PartialEq)]
+pub(crate) struct FastPaintIndex {
+    pub(crate) window_control_hitboxes: usize,
+    pub(crate) a11y_actions: usize,
+}
+
+impl FastPaintIndex {
+    #[inline(always)]
+    pub(crate) fn new(window: &Window) -> Self {
+        FastPaintIndex {
+            window_control_hitboxes: window.next_frame.window_control_hitboxes.len(),
+            a11y_actions: crate::fast::a11y::actions_index(window),
+        }
+    }
+}
+
+/// Copies what last frame's paint of `range` added that upstream's
+/// [`Window::reuse_paint`] leaves out: a subtree drawn again from last frame
+/// would otherwise lose the window controls it painted and the listeners
+/// for accessibility actions it registered.
 #[inline(always)]
-pub(crate) fn reuse_window_control_hitboxes(window: &mut Window, range: &Range<PaintIndex>) {
+pub(crate) fn reuse_paint_records(window: &mut Window, range: &Range<PaintIndex>) {
     window.next_frame.window_control_hitboxes.extend(
-        window.rendered_frame.window_control_hitboxes[range.start.fast_window_control_hitboxes_index
-            ..range.end.fast_window_control_hitboxes_index]
+        window.rendered_frame.window_control_hitboxes
+            [range.start.fast.window_control_hitboxes..range.end.fast.window_control_hitboxes]
             .iter()
             .cloned(),
     );
+    crate::fast::a11y::reuse_paint(window, range);
 }
 
 /// The retained subtrees around the element being painted, for a listener

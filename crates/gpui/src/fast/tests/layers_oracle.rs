@@ -223,6 +223,22 @@ fn render_row(
     let label = SharedString::from(format!("{container}/{}", row.id));
     div()
         .id(label.clone())
+        .role(accesskit::Role::Row)
+        .aria_label(WORDS[row.word])
+        .when(row.id.is_multiple_of(4), |this| {
+            this.on_a11y_action(accesskit::Action::ScrollIntoView, |_, _, _| {})
+        })
+        .when(row.id.is_multiple_of(5), |this| {
+            this.a11y_synthetic_children(|builder| {
+                let id = builder.synthetic_node_id("mark");
+                let mut node = accesskit::Node::new(accesskit::Role::Image);
+                // Where its row is, as an editor reports where its text runs are.
+                if let Some(bounds) = builder.parent_node().bounds() {
+                    node.set_bounds(bounds);
+                }
+                builder.push_child(id, node);
+            })
+        })
         .relative()
         .flex()
         .flex_row()
@@ -306,6 +322,7 @@ impl Render for ContentView {
         let field_bounds = self.field_bounds.clone();
         let field = div()
             .id("field")
+            .role(accesskit::Role::TextInput)
             .relative()
             .h(px(20.))
             .bg(PALETTE[1])
@@ -407,6 +424,7 @@ impl Render for LayerOracleView {
                 panel(0).child(
                     div()
                         .id("a")
+                        .role(accesskit::Role::ScrollView)
                         .size_full()
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll_a)
@@ -417,6 +435,7 @@ impl Render for LayerOracleView {
                 panel(1).child(
                     div()
                         .id("b")
+                        .role(accesskit::Role::ScrollView)
                         .size_full()
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll_b)
@@ -728,6 +747,7 @@ struct Observed {
     drawn: Vec<String>,
     hits: Vec<String>,
     log: Vec<String>,
+    a11y: Option<(String, Vec<super::a11y::A11yEntry>)>,
 }
 
 fn draw(
@@ -777,6 +797,9 @@ fn draw(
             drawn: drawn(&frame.scene),
             hits,
             log,
+            a11y: window
+                .is_a11y_active()
+                .then(|| super::a11y::a11y_snapshot(window)),
         }
     })
     .unwrap()
@@ -833,6 +856,7 @@ fn run(
     steps: usize,
     containers: Range<usize>,
     keep_turning: f64,
+    a11y: bool,
 ) -> Coverage {
     let mut cx = TestAppContext::with_text_system(Arc::new(GlyphBoxTextSystem(NoopTextSystem)));
     let layered = cx.add_window(|_, cx| LayerOracleView::new(cx));
@@ -841,6 +865,9 @@ fn run(
         cx.simulate_window_scale_factor_change(window.into(), scale_factor);
         cx.update_window(window.into(), |_, window, cx| {
             window.set_scroll_layers(layers);
+            if a11y {
+                window.set_a11y_active_for_tests(true);
+            }
             window.draw(cx).clear(cx);
             window.reset_layout_stats();
         })
@@ -897,6 +924,14 @@ fn run(
                 "hit tests differ {}",
                 first_difference(&actual.hits, &expected.hits)
             ))
+        } else if actual.a11y.is_some() != a11y || expected.a11y.is_some() != a11y {
+            Some("accessibility is not active".into())
+        } else if let (Some(actual), Some(expected)) = (&actual.a11y, &expected.a11y) {
+            // To a thousandth of a device pixel, as hitboxes: a layer's
+            // nodes are moved, which can differ in their last bits from
+            // nodes laid out where they lie now.
+            super::a11y::a11y_difference(actual, expected, 1e-3)
+                .map(|difference| format!("the accessibility trees differ:\n{difference}"))
         } else {
             None
         };
@@ -944,11 +979,18 @@ fn run(
 
 /// Runs three random histories at scale factors 1 and 1.25, as [`run`]
 /// does, and adds up what they went through.
-fn run_all(containers: Range<usize>, keep_turning: f64) -> Coverage {
+fn run_all(containers: Range<usize>, keep_turning: f64, a11y: bool) -> Coverage {
     let mut total = Coverage::default();
     for seed in 0..3 {
         for scale_factor in [1., 1.25] {
-            let coverage = run(seed, scale_factor, 300, containers.clone(), keep_turning);
+            let coverage = run(
+                seed,
+                scale_factor,
+                300,
+                containers.clone(),
+                keep_turning,
+                a11y,
+            );
             total.composited += coverage.composited;
             total.clicks += coverage.clicks;
             total.downs += coverage.downs;
@@ -963,7 +1005,7 @@ fn run_all(containers: Range<usize>, keep_turning: f64) -> Coverage {
 
 #[test]
 fn frames_drawn_through_scroll_layers_match_frames_drawn_without() {
-    let total = run_all(0..CONTAINERS, 0.7);
+    let total = run_all(0..CONTAINERS, 0.7, false);
     assert!(
         total.clicks > 0 && total.downs > 0 && total.keys > 0,
         "no listener saw a click, a mouse down and a key press, so their positions \
@@ -986,7 +1028,7 @@ fn frames_drawn_through_scroll_layers_match_frames_drawn_without() {
 /// and render again the rows whose hover changes.
 #[test]
 fn list_frames_drawn_through_scroll_layers_match_frames_drawn_without() {
-    let total = run_all(2..CONTAINERS, 0.9);
+    let total = run_all(2..CONTAINERS, 0.9, false);
     assert!(
         total.clicks > 0 && total.downs > 0,
         "no listener saw a click and a mouse down, so their positions were not compared"
@@ -998,6 +1040,21 @@ fn list_frames_drawn_through_scroll_layers_match_frames_drawn_without() {
              for its hover ({})",
             total.list_frames,
             total.rows_rendered_for_hover
+        );
+    }
+}
+
+/// The same with accessibility active: the accessibility trees must match
+/// too, a composited layer adding its content's nodes moved by the scroll.
+#[test]
+fn accessibility_trees_built_through_scroll_layers_match_trees_built_without() {
+    let total = run_all(0..CONTAINERS, 0.7, true);
+    assert!(total.scrolled > 0, "nothing ever scrolled");
+    if crate::fast::layers::COMPILED {
+        assert!(
+            total.composited > 0,
+            "no frame composited a scroll layer over {} scrolled frames",
+            total.scrolled
         );
     }
 }

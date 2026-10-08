@@ -67,6 +67,8 @@ pub(crate) struct Painting {
     pub(crate) input: crate::fast::layers::input::PaintingInput,
     /// How the views prepainted inside the content were laid out.
     pub(crate) view_layouts: FxHashMap<GlobalElementId, crate::fast::layers::reuse::KeptLayout>,
+    /// What prepainting the content added to the accessibility tree.
+    pub(crate) a11y: Option<Rc<crate::fast::a11y::A11yStretch>>,
 }
 
 /// What a container's prepaint decided, for its paint to carry out.
@@ -162,11 +164,11 @@ fn begin_scrolling_children(
     let decision = policy::decide(window, cx, id, bounds, content_size, scroll_offset);
     let mut decision = crate::fast::layers::input::decide(window, id, decision);
     if decision == Decision::Composite
-        && window
-            .fast_layers
-            .layers
-            .get(id)
-            .is_none_or(|layer| layer.record.is_none())
+        && window.fast_layers.layers.get(id).is_none_or(|layer| {
+            layer.record.as_ref().is_none_or(|record| {
+                crate::fast::a11y::layer_needs_repaint(window, record.a11y.as_deref())
+            })
+        })
     {
         decision = Decision::Repaint;
     }
@@ -203,6 +205,7 @@ fn begin_scrolling_children(
                 dependencies: RenderDependencies::default(),
                 input: Default::default(),
                 view_layouts: FxHashMap::default(),
+                a11y: None,
             });
             // Culling works in the painted region, not in the viewport and
             // whatever clips it; the composite clips to those.
@@ -248,6 +251,7 @@ fn end_repainted_children(window: &mut Window, cx: &mut App) {
         return;
     };
     painting.prepaint_range.end = window.prepaint_index();
+    painting.a11y = crate::fast::a11y::capture(window, &painting.prepaint_range);
     if let Some(recording) = painting.recording.take() {
         painting.dependencies = cx.finish_recording_dependencies(recording).all;
     }
@@ -791,6 +795,7 @@ fn repaint(
         has_paths,
         paths,
         view_layouts: Rc::new(mem::take(&mut painting.view_layouts)),
+        a11y: painting.a11y.take(),
     });
     let dirtied = layer
         .record
