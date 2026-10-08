@@ -21,6 +21,9 @@
 //!   lost device);
 //! - the scene is not numbered, or its damage is not relative to the scene
 //!   the canvas holds (`since` is not the scene drawn last);
+//! - the window's background appearance clears to another color than the
+//!   canvas was drawn with (`set_background_appearance` changes no scene, so
+//!   the damage misses it);
 //! - an atlas tile was written since the last frame (atlas content is outside
 //!   the scene: a tile freed and allocated again keeps its id);
 //! - the scene has surfaces (video frames);
@@ -58,7 +61,7 @@ use windows::core::Interface as _;
 
 use crate::DirectXRenderer;
 use crate::directx_renderer::{DirectXRenderPipelines, GlobalParams, RENDER_TARGET_FORMAT};
-use crate::fast::frame::{FrameState, Target, draw_scene, upload};
+use crate::fast::frame::{FrameState, Target, draw_scene_in, upload};
 
 /// Damage rectangles a scene carries at most (`fast::damage` merges past it).
 const MAX_RECTS: usize = 16;
@@ -95,6 +98,8 @@ pub(crate) struct PartialRedraw {
     last_drawn: u64,
     /// [`ATLAS_WRITES`] when the canvas was last drawn.
     atlas_writes: u64,
+    /// The color the canvas was cleared to ([`clear_color`]).
+    clear: [f32; 4],
     /// The device's rasterizer state with the scissor test on.
     scissor_state: Option<ID3D11RasterizerState>,
     stats: Stats,
@@ -113,6 +118,7 @@ pub(crate) enum Whole {
     NoCanvas,
     NotNumbered,
     NotComparable,
+    Appearance,
     AtlasWritten,
     Surfaces,
     LargeDamage,
@@ -120,10 +126,11 @@ pub(crate) enum Whole {
 }
 
 impl Whole {
-    const ALL: [Whole; 7] = [
+    const ALL: [Whole; 8] = [
         Whole::NoCanvas,
         Whole::NotNumbered,
         Whole::NotComparable,
+        Whole::Appearance,
         Whole::AtlasWritten,
         Whole::Surfaces,
         Whole::LargeDamage,
@@ -135,6 +142,7 @@ impl Whole {
             Whole::NoCanvas => "no_canvas",
             Whole::NotNumbered => "not_numbered",
             Whole::NotComparable => "not_comparable",
+            Whole::Appearance => "appearance",
             Whole::AtlasWritten => "atlas_written",
             Whole::Surfaces => "surfaces",
             Whole::LargeDamage => "large_damage",
@@ -161,6 +169,8 @@ pub(crate) struct Frame<'a> {
     pub(crate) number: u64,
     pub(crate) since: u64,
     pub(crate) last_drawn: u64,
+    /// Whether the frame clears to another color than the canvas was.
+    pub(crate) appearance_changed: bool,
     pub(crate) atlas_written: bool,
     pub(crate) has_surfaces: bool,
     pub(crate) capturing: bool,
@@ -177,6 +187,9 @@ pub(crate) fn plan(frame: &Frame) -> Plan {
     }
     if frame.since == 0 || frame.since != frame.last_drawn {
         return Plan::Whole(Whole::NotComparable);
+    }
+    if frame.appearance_changed {
+        return Plan::Whole(Whole::Appearance);
     }
     if frame.atlas_written {
         return Plan::Whole(Whole::AtlasWritten);
@@ -276,6 +289,7 @@ pub(crate) fn draw(
         .and_then(|devices| devices.annotation.as_ref())
         .is_some_and(|annotation| unsafe { annotation.GetStatus().as_bool() });
     let atlas_writes = ATLAS_WRITES.load(Ordering::Relaxed);
+    let clear = clear_color(background_appearance);
     let partial = &renderer.fast_partial;
     let plan = plan(&Frame {
         has_canvas: partial.canvas.is_some(),
@@ -284,6 +298,7 @@ pub(crate) fn draw(
         number: scene.damage.frame,
         since: scene.damage.since,
         last_drawn: partial.last_drawn,
+        appearance_changed: clear != partial.clear,
         atlas_written: atlas_writes != partial.atlas_writes,
         has_surfaces: !scene.surfaces.is_empty(),
         capturing,
@@ -310,6 +325,7 @@ pub(crate) fn draw(
     let partial = &mut renderer.fast_partial;
     partial.last_drawn = scene.damage.frame;
     partial.atlas_writes = atlas_writes;
+    partial.clear = clear;
     partial.stats.frame(&plan, started.elapsed());
     Ok(())
 }
@@ -467,8 +483,9 @@ pub(crate) fn clear_color(background_appearance: WindowBackgroundAppearance) -> 
 }
 
 /// Uploads `scene`'s instances and draws it into `view`, bound with its
-/// viewport and globals, inside `rects` only: each cleared to `clear`, then
-/// the scene's batches drawn with `scissor_state`, scissored to it.
+/// viewport and globals, inside `rects` only, which must not overlap: each
+/// cleared to `clear`, then the scene's batches drawn once over, each
+/// through every rectangle with `scissor_state` (`draw_scene_in`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_rects(
     target: &Target<'_>,
@@ -492,13 +509,7 @@ pub(crate) fn draw_rects(
     upload(target, pipelines, scene)?;
     let previous = unsafe { context.RSGetState() }.ok();
     unsafe { context.RSSetState(scissor_state) };
-    let drawn = (|| {
-        for rect in rects {
-            unsafe { context.RSSetScissorRects(Some(slice::from_ref(rect))) };
-            draw_scene(target, pipelines, frame, scene)?;
-        }
-        Ok(())
-    })();
+    let drawn = draw_scene_in(target, pipelines, frame, scene, rects);
     unsafe { context.RSSetState(previous.as_ref()) };
     drawn
 }

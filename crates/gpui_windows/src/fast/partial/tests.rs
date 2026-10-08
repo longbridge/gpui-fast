@@ -45,6 +45,7 @@ fn frame<'a>(damage: &'a [Bounds<DevicePixels>]) -> Frame<'a> {
         number: 8,
         since: 7,
         last_drawn: 7,
+        appearance_changed: false,
         atlas_written: false,
         has_surfaces: false,
         capturing: false,
@@ -138,6 +139,13 @@ fn frames_the_canvas_may_not_hold_draw_whole() {
         ),
         (
             Frame {
+                appearance_changed: true,
+                ..frame(&damage)
+            },
+            Whole::Appearance,
+        ),
+        (
+            Frame {
                 atlas_written: true,
                 ..frame(&damage)
             },
@@ -225,6 +233,100 @@ fn a_partial_frame_equals_the_scene_drawn_whole() {
         .expect("read back");
         assert_same_pixels(&partial, &whole, WIDTH as usize);
     }
+}
+
+/// Several rectangles over several path batches, each path crossing more
+/// than one rectangle: each batch is rasterized once and drawn through every
+/// rectangle, and the frame must still come out as the scene drawn whole.
+#[test]
+fn paths_across_several_rectangles_equal_the_scene_drawn_whole() {
+    let Some(mut rig) = Rig::new() else {
+        eprintln!("skipped: no Direct3D 11 device");
+        return;
+    };
+    let before = paths_scene(Change::Before);
+    let after = paths_scene(Change::After);
+    let damage = [
+        RECT {
+            left: 30,
+            top: 40,
+            right: 90,
+            bottom: 100,
+        },
+        RECT {
+            left: 120,
+            top: 60,
+            right: 170,
+            bottom: 140,
+        },
+        RECT {
+            left: 200,
+            top: 30,
+            right: 260,
+            bottom: 90,
+        },
+    ];
+    for clear in [[1.0f32; 4], [0.0; 4]] {
+        let mut canvas = rig.canvas().expect("canvas");
+        rig.draw_whole(&mut canvas, &before, clear).expect("drawn");
+        rig.draw_partial(&mut canvas, &after, clear, &damage)
+            .expect("drawn");
+        let partial = read_back(
+            &rig.devices.device,
+            &rig.devices.device_context,
+            &canvas.texture,
+        )
+        .expect("read back");
+
+        let mut fresh = rig.canvas().expect("canvas");
+        rig.draw_whole(&mut fresh, &after, clear).expect("drawn");
+        let whole = read_back(
+            &rig.devices.device,
+            &rig.devices.device_context,
+            &fresh.texture,
+        )
+        .expect("read back");
+        assert_same_pixels(&partial, &whole, WIDTH as usize);
+    }
+}
+
+/// Translucent paths in three batches (a quad between each two), each
+/// crossing several of the damage rectangles of
+/// `paths_across_several_rectangles_equal_the_scene_drawn_whole`, and a quad
+/// inside each rectangle that changes color.
+fn paths_scene(change: Change) -> Scene {
+    let after = change == Change::After;
+    let mut scene = Scene::default();
+    scene.insert_primitive(quad(sp(0., 0., 320., 240.), Hsla::from(rgba(0x20242aff))));
+    let band = |top: f32, bottom: f32, color: u32| {
+        let mut path = Path::new(point(px(10.), px(top)));
+        path.line_to(point(px(300.), px(top + 20.)));
+        path.curve_to(
+            point(px(310.), px(bottom)),
+            point(px(200.), px(bottom + 30.)),
+        );
+        path.line_to(point(px(10.), px(bottom)));
+        path.line_to(point(px(10.), px(top)));
+        path.color = rgba(color).into();
+        path.content_mask = ContentMask {
+            bounds: Bounds {
+                origin: point(px(-1000.), px(-1000.)),
+                size: size(px(3000.), px(3000.)),
+            },
+        };
+        path.scale(1.)
+    };
+    scene.insert_primitive(band(50., 90., 0x44cc88c0));
+    scene.insert_primitive(quad(sp(20., 45., 280., 30.), Hsla::from(rgba(0xffffff40))));
+    scene.insert_primitive(band(60., 120., 0xcc4488a0));
+    scene.insert_primitive(quad(sp(20., 70., 280., 30.), Hsla::from(rgba(0x3080ff50))));
+    scene.insert_primitive(band(40., 110., 0xeecc2280));
+    for (x, y) in [(50., 60.), (135., 100.), (220., 50.)] {
+        let color = if after { 0x3366ffff } else { 0xff3344ff };
+        scene.insert_primitive(quad(sp(x, y, 16., 16.), Hsla::from(rgba(color))));
+    }
+    scene.finish();
+    scene
 }
 
 /// Without damage the canvas keeps the frame before, pixel for pixel.

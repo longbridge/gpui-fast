@@ -8,6 +8,11 @@
 //! [`DrawState`], which skips what is already bound, and collects path
 //! vertices and sprites into buffers kept from frame to frame.
 //!
+//! [`draw_scene_in`] draws a scene inside a few scissor rectangles in one
+//! pass over its batches, for partial redraws (`fast::partial`): each batch
+//! is bound once and drawn through every rectangle, and each path batch is
+//! rasterized into the intermediate texture once, for all of them.
+//!
 //! Upstream's loop still runs while a graphics debugger such as PIX captures
 //! the frame, so that each batch keeps its labeled event.
 
@@ -15,6 +20,7 @@ use std::slice;
 
 use anyhow::{Context as _, Result};
 use gpui::{Path, PrimitiveBatch, ScaledPixels, Scene};
+use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::{
     Direct3D::{D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP},
     Direct3D11::{
@@ -128,6 +134,22 @@ pub(crate) fn draw_scene(
     frame: &mut FrameState,
     scene: &Scene,
 ) -> Result<()> {
+    draw_scene_in(target, pipelines, frame, scene, &[])
+}
+
+/// [`draw_scene`], with every draw made once per rectangle of `scissors`,
+/// scissored to it; with none, once, as the bound rasterizer state allows.
+/// A rasterizer state with the scissor test on must be bound when
+/// `scissors` is not empty. Each path batch is rasterized once, scissored to
+/// the rectangles' union. The rectangles must not overlap: a pixel two of
+/// them share would blend its translucent primitives twice.
+pub(crate) fn draw_scene_in(
+    target: &Target<'_>,
+    pipelines: &mut DirectXRenderPipelines,
+    frame: &mut FrameState,
+    scene: &Scene,
+    scissors: &[RECT],
+) -> Result<()> {
     let batch_params = target
         .globals
         .batch_params_buffer
@@ -148,6 +170,7 @@ pub(crate) fn draw_scene(
         state,
         batch_params,
         sampler: &target.globals.sampler,
+        scissors,
     };
     for batch in scene.batches() {
         match batch {
@@ -247,6 +270,9 @@ struct Draw<'a> {
     state: &'a mut DrawState,
     batch_params: &'a ID3D11Buffer,
     sampler: &'a Option<ID3D11SamplerState>,
+    /// The rectangles every draw is made through, or none for one unscissored
+    /// draw.
+    scissors: &'a [RECT],
 }
 
 impl Draw<'_> {
@@ -275,8 +301,40 @@ impl Draw<'_> {
         if let Some(texture) = texture {
             self.state.set_texture(context, texture, self.sampler);
         }
-        unsafe { context.DrawInstanced(4, instance_count as u32, 0, 0) };
+        self.through_scissors(|| unsafe { context.DrawInstanced(4, instance_count as u32, 0, 0) });
         Ok(())
+    }
+
+    /// Runs `draw` once, or once through each of the scissor rectangles.
+    fn through_scissors(&self, draw: impl Fn()) {
+        if self.scissors.is_empty() {
+            draw();
+            return;
+        }
+        for rect in self.scissors {
+            unsafe {
+                self.device_context
+                    .RSSetScissorRects(Some(slice::from_ref(rect)))
+            };
+            draw();
+        }
+    }
+
+    /// Scissors to the union of the scissor rectangles, if any.
+    fn scissor_to_union(&self) {
+        let Some((first, rest)) = self.scissors.split_first() else {
+            return;
+        };
+        let union = rest.iter().fold(*first, |a, b| RECT {
+            left: a.left.min(b.left),
+            top: a.top.min(b.top),
+            right: a.right.max(b.right),
+            bottom: a.bottom.max(b.bottom),
+        });
+        unsafe {
+            self.device_context
+                .RSSetScissorRects(Some(slice::from_ref(&union)))
+        };
     }
 }
 
@@ -315,6 +373,9 @@ fn rasterize_paths(
     pipeline.update_buffer(device, context, vertices)?;
     draw.state
         .set_pipeline(context, pipeline, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    // Once for every rectangle: the clear and the resolve span the whole
+    // texture whatever the scissor.
+    draw.scissor_to_union();
     unsafe {
         context.DrawInstanced(vertices.len() as u32, 1, 0, 0);
         context.ResolveSubresource(
@@ -365,7 +426,7 @@ fn composite_paths(
         .set_pipeline(context, pipeline, D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     draw.state
         .set_texture(context, &resources.path_intermediate_srv, draw.sampler);
-    unsafe { context.DrawInstanced(4, sprites.len() as u32, 0, 0) };
+    draw.through_scissors(|| unsafe { context.DrawInstanced(4, sprites.len() as u32, 0, 0) });
     Ok(())
 }
 
