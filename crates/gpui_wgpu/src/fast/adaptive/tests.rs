@@ -8,7 +8,8 @@ use gpui::{
 };
 
 use crate::fast::adaptive::policy::{
-    AtlasDamage, CANVAS_RELEASE_AFTER, CpuPlan, Decision, Frame, GpuReason, Policy, Target,
+    AtlasDamage, CANVAS_RELEASE_AFTER, CATCH_UP_AFTER, CpuPlan, Decision, Frame, GpuReason, Policy,
+    Target,
 };
 use crate::fast::adaptive::region::{Region, rect, whole};
 use crate::fast::adaptive::{
@@ -236,6 +237,58 @@ fn canvas_released_after_a_second_of_gpu_frames() {
         gpu(policy.decide(&frame(t0 + ms(10), 2, 1, &damage))),
         GpuReason::WholeInBurst
     );
+}
+
+/// A burst of small changes over a canvas the GPU frames left stale draws on
+/// the GPU until it lasted [`CATCH_UP_AFTER`], then catches the canvas up on
+/// the CPU once and draws only the changes after.
+#[test]
+fn long_burst_of_small_changes_catches_the_canvas_up() {
+    let t0 = Instant::now();
+    let mut policy = with_canvas(t0);
+    // A large change starts the burst on the GPU, and leaves the canvas
+    // stale over more than half the window.
+    let large = [rect(0, 0, 1000, 500)];
+    let mut now = t0 + ms(15);
+    assert_eq!(
+        gpu(policy.decide(&frame(now, 2, 1, &large))),
+        GpuReason::LargeChange
+    );
+    policy.gpu_drew(now + ms(2), 2, 1, &large, AtlasDamage::Rects(&[]));
+
+    let spinner = [rect(900, 20, 24, 24)];
+    let start = now + ms(16);
+    let mut number = 3;
+    loop {
+        now = start + ms(16 * (number - 3));
+        match policy.decide(&frame(now, number, number - 1, &spinner)) {
+            Decision::Gpu(reason) => {
+                assert_eq!(reason, GpuReason::WholeInBurst);
+                assert!(now - start < CATCH_UP_AFTER);
+                policy.gpu_drew(
+                    now + ms(2),
+                    number,
+                    number - 1,
+                    &spinner,
+                    AtlasDamage::Rects(&[]),
+                );
+            }
+            Decision::Cpu(plan) => {
+                assert!(plan.whole);
+                assert!(now - start >= CATCH_UP_AFTER);
+                policy.cpu_drew(number, TARGET, now, now + ms(8), ms(8), false);
+                break;
+            }
+        }
+        number += 1;
+    }
+    for _ in 0..30 {
+        number += 1;
+        now += ms(16);
+        let plan = cpu(policy.decide(&frame(now, number, number - 1, &spinner)));
+        assert_eq!(plan.region.rects(), &spinner);
+        policy.cpu_drew(number, TARGET, now, now + ms(1), ms(1), false);
+    }
 }
 
 #[test]

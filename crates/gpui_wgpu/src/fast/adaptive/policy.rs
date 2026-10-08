@@ -25,6 +25,13 @@ pub(crate) const BURST_GAP: Duration = Duration::from_millis(50);
 /// change as much.
 pub(crate) const BURST_CHANGE_DIVISOR: i64 = 16;
 
+/// During a burst, a frame that would draw the canvas whole draws on the GPU,
+/// unless the burst's frames have each changed at most a sixteenth of the
+/// window for this long: then the CPU catches the canvas up once, and the
+/// frames after draw only what they change. An animation that runs for long
+/// (a spinner) so leaves the GPU.
+pub(crate) const CATCH_UP_AFTER: Duration = Duration::from_millis(250);
+
 /// A frame whose CPU region is larger than this, in pixels, draws on the GPU.
 pub(crate) const MAX_CPU_PIXELS: i64 = 8 << 20;
 
@@ -220,6 +227,9 @@ pub(crate) struct Policy {
     released: bool,
     /// The GPU presented a frame of this renderer.
     gpu_presented_any: bool,
+    /// When the frames of the current burst began to change at most a
+    /// sixteenth of the window each (see [`CATCH_UP_AFTER`]).
+    small_since: Option<Instant>,
 }
 
 impl Policy {
@@ -232,6 +242,7 @@ impl Policy {
         if pause {
             self.cpu_heavy = false;
             self.load = CpuLoad::default();
+            self.small_since = None;
         }
         let burst = !pause;
 
@@ -278,11 +289,21 @@ impl Policy {
             region.set(clip);
         }
 
+        let small = changed * BURST_CHANGE_DIVISOR <= window;
+        if !small {
+            self.small_since = None;
+        } else if burst {
+            self.small_since.get_or_insert(frame.now);
+        }
+        let caught_up = self
+            .small_since
+            .is_some_and(|since| frame.now.saturating_duration_since(since) >= CATCH_UP_AFTER);
+
         if !frame.always {
-            if burst && changed * BURST_CHANGE_DIVISOR > window {
+            if burst && !small {
                 return Decision::Gpu(GpuReason::LargeChange);
             }
-            if burst && whole {
+            if burst && whole && !caught_up {
                 return Decision::Gpu(GpuReason::WholeInBurst);
             }
             if region.area() > MAX_CPU_PIXELS {
