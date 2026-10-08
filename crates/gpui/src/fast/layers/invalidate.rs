@@ -68,10 +68,6 @@ pub(crate) struct ScrollLog {
     /// How many times a wheel listener notified each view since the last
     /// frame was drawn, for having scrolled a container it painted.
     scroll_notifies: FxHashMap<EntityId, u64>,
-    /// Whether each list about to be laid out this frame, by the address of
-    /// its state's version counter, is scrolled to its end, for the reads of
-    /// only that to be judged by it. See [`note_at_end_read`].
-    list_ends: FxHashMap<usize, Option<bool>>,
     /// The views that asked for an animation frame while this frame was
     /// being drawn, and while the last one was. See [`note_animation_frame`].
     animation_frames: RefCell<FxHashSet<EntityId>>,
@@ -151,7 +147,6 @@ impl ScrollLog {
         self.scrolled.clear();
         self.scrolled_sources.clear();
         self.scroll_notifies.clear();
-        self.list_ends.clear();
         self.animation_frames_before = std::mem::take(self.animation_frames.get_mut());
         self.anchored.clear();
         self.containers
@@ -298,12 +293,24 @@ pub(crate) struct OffsetRead {
 }
 
 /// What was read of an offset.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum Read {
     /// The offset, or anything that moves with it.
     Offset,
-    /// Only whether a list is scrolled to its end, and what that was.
-    AtEnd(Option<bool>),
+    /// Only the answer to a question about it. See
+    /// [`crate::fast::layers::answers`].
+    Answer(crate::fast::layers::answers::Answer),
+}
+
+impl Read {
+    /// Whether `other` reads the same: the offset, or the same question.
+    fn reads_as(&self, other: &Read) -> bool {
+        match (self, other) {
+            (Read::Offset, Read::Offset) => true,
+            (Read::Answer(a), Read::Answer(b)) => a.asks_as(b),
+            _ => false,
+        }
+    }
 }
 
 thread_local! {
@@ -385,19 +392,25 @@ pub(crate) fn note_offset_read(version: &StateVersion) {
     note_read(version, Read::Offset);
 }
 
-/// Records, for any recording that is open, that whether the list whose
-/// state `version` counts changes of is scrolled to its end was read, and
-/// was `at_end`: what read only that is unchanged by a scroll after which
-/// the list is as much at its end as it was, as a "back to bottom" button
-/// beside a transcript is.
-#[inline]
-pub(crate) fn note_at_end_read(version: &StateVersion, at_end: Option<bool>) {
-    note_read(version, Read::AtEnd(at_end));
+/// Records, for any recording that is open, that a question about the
+/// offset of the scroll state `version` counts changes of was asked, and
+/// what it was answered: what read only that is unchanged by a scroll that
+/// leaves the answer as it was.
+pub(crate) fn note_answer_read(
+    version: &StateVersion,
+    answer: crate::fast::layers::answers::Answer,
+) {
+    note_read(version, Read::Answer(answer));
+}
+
+/// Whether a recording of offset reads is open.
+pub(crate) fn recording_offset_reads() -> bool {
+    OFFSET_READS.with_borrow(|log| log.recordings > 0)
 }
 
 #[inline]
 fn note_read(version: &StateVersion, read: Read) {
-    if !COMPILED {
+    if !COMPILED || crate::fast::layers::answers::answering() {
         return;
     }
     OFFSET_READS.with_borrow_mut(|log| {
@@ -409,17 +422,6 @@ fn note_read(version: &StateVersion, read: Read) {
             });
         }
     });
-}
-
-/// Notes whether the list whose state `version` counts changes of, about to
-/// be laid out, is scrolled to its end, for what read only that to be told
-/// apart from what read its offset while its layer is decided on.
-pub(crate) fn note_list_at_end(window: &mut Window, version: &StateVersion, at_end: Option<bool>) {
-    window
-        .fast_layers
-        .scrolls
-        .list_ends
-        .insert(version.id(), at_end);
 }
 
 /// Opens a recording of offset reads, returning where in the log it starts.
@@ -491,8 +493,8 @@ pub(crate) fn replay_offset_reads(reads: &OffsetReads) -> Range<usize> {
 /// The scroll offsets a retained subtree read, once each, at the earliest
 /// version read. Most subtrees read none, which takes no allocation.
 ///
-/// A state read more than one way counts as its offset read, unless every
-/// read only asked whether a list is at its end and got the same answer.
+/// A question asked of a state more than once and answered otherwise counts
+/// as a read of its offset.
 #[derive(Clone, Default)]
 pub(crate) struct OffsetReads(Option<Rc<[OffsetRead]>>);
 
@@ -503,10 +505,9 @@ impl OffsetReads {
         }
         let mut unique: Vec<OffsetRead> = Vec::with_capacity(reads.len());
         for read in reads {
-            match unique
-                .iter_mut()
-                .find(|other| other.version.id() == read.version.id())
-            {
+            match unique.iter_mut().find(|other| {
+                other.version.id() == read.version.id() && other.read.reads_as(&read.read)
+            }) {
                 Some(other) if other.read != read.read => other.read = Read::Offset,
                 Some(_) => {}
                 None => unique.push(read.clone()),
@@ -540,7 +541,7 @@ pub(crate) fn render_read_offset(dependencies: &RenderDependencies, source: &Scr
         ScrollSource::Handle(id) => dependencies
             .offset_reads
             .iter()
-            .any(|read| read.version.id() == *id),
+            .any(|read| read.read == Read::Offset && read.version.id() == *id),
         ScrollSource::Container(_) => false,
     }
 }
@@ -550,10 +551,8 @@ pub(crate) fn render_read_offset(dependencies: &RenderDependencies, source: &Scr
 /// A view that read an offset is built again when it scrolls, as it would
 /// be for any other state it read.
 ///
-/// A read of only whether a list is scrolled to its end changed when the
-/// list, about to be laid out, is no longer as much at its end. Where that
-/// is not known this frame — the list's layer is not being decided on — it
-/// is taken for a read of the offset.
+/// A question about an offset changed when asked again it is answered
+/// otherwise (see [`crate::fast::layers::answers`]).
 pub(crate) fn offset_read_changed(window: &Window, dependencies: &RenderDependencies) -> bool {
     if !COMPILED {
         return false;
@@ -561,10 +560,8 @@ pub(crate) fn offset_read_changed(window: &Window, dependencies: &RenderDependen
     let scrolls = &window.fast_layers.scrolls;
     let scrolled = &scrolls.scrolled_sources;
     dependencies.offset_reads.iter().any(|read| {
-        if let Read::AtEnd(at_end) = read.read
-            && let Some(now) = scrolls.list_ends.get(&read.version.id())
-        {
-            return *now != at_end;
+        if let Read::Answer(answer) = &read.read {
+            return answer.changed(&read.version);
         }
         read.version.get() != read.read_at
             || (!scrolled.is_empty() && scrolled.contains(&ScrollSource::of_state(&read.version)))

@@ -243,6 +243,7 @@ impl UniformListScrollHandle {
     /// Whether the list is scrolled to the end, or `None` if the list is
     /// not scrollable.
     pub fn is_scrolled_to_end(&self) -> Option<bool> {
+        let _answering = crate::fast::layers::answers::note_uniform_list_at_end(self);
         let state = self.0.borrow();
         let max_offset = state.base_handle.max_offset();
         if max_offset.y <= px(0.) {

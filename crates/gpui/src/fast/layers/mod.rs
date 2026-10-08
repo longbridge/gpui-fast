@@ -5,6 +5,7 @@
 //! `scene` is the contract with renderers; each other module belongs to one
 //! work stream of the plan (docs/superpowers/plans/2026-09-30-scroll-layers.md).
 
+pub(crate) mod answers;
 pub(crate) mod background;
 pub(crate) mod input;
 pub(crate) mod invalidate;
@@ -126,6 +127,7 @@ pub(crate) fn active(window: &Window, cx: &App) -> bool {
 /// layers not composited for long, or painted for another window size or
 /// scale factor, are dropped.
 pub(crate) fn finish_frame(window: &mut Window) {
+    answers::drop_quiet_scrolls_to_bottom();
     policy::drop_layers_on_resize(window);
     let layers = &mut window.fast_layers;
     let frame = layers.frame;

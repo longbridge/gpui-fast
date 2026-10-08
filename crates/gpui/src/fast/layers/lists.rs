@@ -1516,7 +1516,9 @@ pub(crate) fn begin_list(
     let viewport = window.content_mask().bounds.intersect(&bounds);
     let scroll_top = state.scroll_top(&state.logical_scroll_top());
     let scroll_offset = paint::snap_scroll_offset(window, point(px(0.), -scroll_top));
-    invalidate::note_list_at_end(window, &version, scrolled_to_end(state));
+    // What the view holding the list asked of it is asked again of the list
+    // as it is before it lays its rows out.
+    let _prepainting = crate::fast::layers::answers::ListPrepainting::begin(state);
     // A view rendering again and splicing its list moves its rows to other
     // indices: they are not only rendered again, but painted afresh.
     let item_count = state.items.summary().count;
@@ -1584,13 +1586,6 @@ pub(crate) fn begin_list(
     }
 }
 
-/// Notes that whether the `list` of `state` is scrolled to its end was read,
-/// as [`crate::ListState::is_scrolled_to_end`] reads it, and what it was (see
-/// [`invalidate::note_at_end_read`]).
-pub(crate) fn note_at_end_read(state: &crate::StateInner) {
-    invalidate::note_at_end_read(&state.version, scrolled_to_end(state));
-}
-
 /// Marks the state of a `list` changed if scrolling it to its end moves it.
 /// A view that keeps its list at its end calls
 /// [`crate::ListState::scroll_to_end`] every time it renders, which changes
@@ -1605,19 +1600,7 @@ pub(crate) fn note_scrolled_to_end(state: &crate::StateInner) {
 /// cannot scroll or the height of a row is not known yet, as
 /// [`crate::ListState::is_scrolled_to_end`] answers.
 pub(crate) fn scrolled_to_end(state: &crate::StateInner) -> Option<bool> {
-    let bounds = state.last_layout_bounds?;
-    let summary = state.items.summary();
-    if summary.has_unknown_height {
-        return None;
-    }
-    let padding = state.last_padding.unwrap_or_default();
-    let content_height = summary.height + padding.top + padding.bottom;
-    let scroll_max = (content_height - bounds.size.height).max(px(0.));
-    if scroll_max <= px(0.) {
-        return None;
-    }
-    let scroll_top = state.scroll_top(&state.logical_scroll_top());
-    Some(scroll_top >= scroll_max)
+    crate::fast::layers::answers::ListGeometry::of(state).at_end()
 }
 
 /// Whether a `list`, whose state `version` counts changes of, laying out the
