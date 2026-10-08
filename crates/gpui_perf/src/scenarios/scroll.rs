@@ -14,7 +14,10 @@
 //! - `scroll-same-view`: a scrolling `div` whose content is plain elements of
 //!   the view that owns the `div`;
 //! - `scroll-uniform-list`: a `uniform_list`;
-//! - `scroll-list`: a `list` of rows of varying height.
+//! - `scroll-list`: a `list` of rows of varying height;
+//! - `scroll-list-tables`: the same, every third row a table in a rounded
+//!   frame whose corners are paths drawn under its border, as GPUI Kit's
+//!   markdown tables are.
 //!
 //! Each runs again with a scrollbar over the content, drawn and driven as
 //! GPUI Kit's is (`scenarios::scrollbar`), as `<name>-scrollbar`, and the
@@ -342,8 +345,9 @@ enum Content {
     SameView,
     /// A `uniform_list` of this many rows.
     UniformList(usize, UniformListScrollHandle),
-    /// A `list`.
-    List(ListState),
+    /// A `list`; with `true`, every third row holds a table in a rounded
+    /// frame drawn as GPUI Kit's markdown tables are.
+    List(ListState, bool),
 }
 
 /// The gallery: a sidebar view and the scrolled content, on an opaque
@@ -371,7 +375,7 @@ impl Gallery {
         match &self.content {
             Content::ChildView(_) | Content::SameView => Scrolled::Div(self.scroll.clone()),
             Content::UniformList(_, handle) => Scrolled::UniformList(handle.clone()),
-            Content::List(state) => Scrolled::List(state.clone()),
+            Content::List(state, _) => Scrolled::List(state.clone()),
         }
     }
 }
@@ -424,6 +428,80 @@ fn row(ix: usize, variable: bool) -> AnyElement {
         .into_any_element()
 }
 
+/// A row holding a small table in a rounded frame, drawn as GPUI Kit draws
+/// a markdown table (`horizontal_scroll_area` and `RoundedFrameCover`):
+/// paths fill the frame's corner notches with the background, and the
+/// frame's border, painted after its children, draws over them.
+fn table_row(ix: usize) -> AnyElement {
+    const RADIUS: f32 = 6.;
+    let cell = |text: String, header: bool| {
+        div()
+            .flex_1()
+            .px_2()
+            .py_1()
+            .border_r_1()
+            .border_color(border())
+            .when(header, |this| this.bg(color(220., 0.1, 0.95)))
+            .text_xs()
+            .child(SharedString::from(text))
+    };
+    let line = |row: usize| {
+        div()
+            .flex()
+            .border_b_1()
+            .border_color(border())
+            .children((0..4).map(move |column| {
+                cell(
+                    if row == 0 {
+                        format!("Column {column}")
+                    } else {
+                        format!("{} · {}", ix + row, column * 7 + row)
+                    },
+                    row == 0,
+                )
+            }))
+    };
+    let notches = gpui::canvas(
+        |_, _, _| {},
+        |bounds, _, window, _| {
+            let radius = px(RADIUS);
+            for (corner, x, y) in [
+                (bounds.origin, 1., 1.),
+                (bounds.top_right(), -1., 1.),
+                (bounds.bottom_right(), -1., -1.),
+                (bounds.bottom_left(), 1., -1.),
+            ] {
+                let mut path = gpui::Path::new(corner);
+                path.line_to(corner + point(radius * x, px(0.)));
+                path.curve_to(corner + point(px(0.), radius * y), corner);
+                path.line_to(corner);
+                window.paint_path(path, background());
+            }
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full();
+    div()
+        .id(("table-row", ix))
+        .px_4()
+        .py_2()
+        .border_b_1()
+        .border_color(border())
+        .child(
+            div()
+                .relative()
+                .overflow_hidden()
+                .border_1()
+                .border_color(border())
+                .rounded(px(RADIUS))
+                .children((0..4).map(line))
+                .child(notches),
+        )
+        .into_any_element()
+}
+
 impl Render for Gallery {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let content = match &self.content {
@@ -453,9 +531,18 @@ impl Render for Gallery {
             .track_scroll(handle)
             .size_full()
             .into_any_element(),
-            Content::List(state) => list(state.clone(), |ix, _, _| row(ix, true))
+            Content::List(state, tables) => {
+                let tables = *tables;
+                list(state.clone(), move |ix, _, _| {
+                    if tables && ix % 3 == 0 {
+                        table_row(ix)
+                    } else {
+                        row(ix, true)
+                    }
+                })
                 .size_full()
-                .into_any_element(),
+                .into_any_element()
+            }
         };
         div()
             .flex()
@@ -536,7 +623,7 @@ const KINDS: [(&str, &str, fn(&mut App) -> Content); 4] = [
         Content::UniformList(10_000, UniformListScrollHandle::new())
     }),
     ("list", "A 2,000-row list of rows of varying height", |_| {
-        Content::List(ListState::new(2_000, ListAlignment::Top, px(200.)))
+        Content::List(ListState::new(2_000, ListAlignment::Top, px(200.)), false)
     }),
 ];
 
@@ -552,6 +639,15 @@ pub fn scenarios() -> Vec<Box<dyn Scenario>> {
             drive: Drive::Wheel,
         }));
     }
+    scenarios.push(Box::new(WheelScroll {
+        name: "scroll-list-tables",
+        description: "A 2,000-row list of rows of varying height, every third a table in a \
+                      rounded frame whose corners are paths under its border, scrolled by \
+                      the wheel",
+        content: |_| Content::List(ListState::new(2_000, ListAlignment::Top, px(200.)), true),
+        scrollbar: false,
+        drive: Drive::Wheel,
+    }));
     for (kind, description, content) in KINDS {
         scenarios.push(Box::new(WheelScroll {
             name: leak(format!("scroll-{kind}-scrollbar")),
