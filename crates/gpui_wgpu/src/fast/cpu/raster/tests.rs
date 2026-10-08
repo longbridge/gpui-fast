@@ -2257,7 +2257,7 @@ fn timings() {
 #[test]
 fn scenes_without_surfaces_can_be_drawn() {
     let scene = Scene::default();
-    assert_eq!(super::can_draw(&scene, &[], &PARAMS_FOR_CAN_DRAW), Ok(()));
+    assert!(super::can_draw(&scene, &[], &PARAMS_FOR_CAN_DRAW).is_ok());
 }
 
 /// The GPU converts a fragment to the target's levels by truncating it to 12
@@ -2496,3 +2496,106 @@ const PARAMS_FOR_CAN_DRAW: RasterParams = RasterParams {
     path_sample_count: 4,
     fragment_bits: 12,
 };
+
+/// A window compositing one tile of a scroll layer at (0, 0), whose content
+/// is `content`.
+fn one_tile_scene(content: Scene) -> Scene {
+    let key = LayerKey(9);
+    let tile = TileCoord { x: 0, y: 0 };
+    let mut scene = Scene::default();
+    scene.insert_primitive(PolychromeSprite {
+        order: 0,
+        pad: 0,
+        grayscale: false.into(),
+        opacity: 1.,
+        bounds: sp(0., 0., TILE as f32, TILE as f32),
+        content_mask: ContentMask {
+            bounds: sp(0., 0., TILE as f32, TILE as f32),
+        },
+        corner_radii: Corners::default(),
+        tile: AtlasTile {
+            texture_id: layer_tile_texture_id(key),
+            tile_id: layer_tile_id(tile),
+            padding: 0,
+            bounds: Bounds {
+                origin: point(DevicePixels(0), DevicePixels(0)),
+                size: size(DevicePixels(TILE as i32), DevicePixels(TILE as i32)),
+            },
+        },
+    });
+    scene.layers.frames.push(LayerFrame {
+        key,
+        generation: 1,
+        background: rgba(0xffffffff),
+        tile_size: TILE,
+        content: content.into(),
+        dirty_tiles: vec![tile],
+    });
+    scene.finish();
+    scene
+}
+
+/// The layer tiles drawn in a region are checked as the scene is: a path in
+/// a tile needs the GPU when it samples paths otherwise, where the tile is
+/// drawn.
+#[test]
+fn tile_content_is_checked_where_tiles_are_drawn() {
+    let mut content = Scene::default();
+    let mut path = Path::new(point(px(10.), px(10.)));
+    path.line_to(point(px(100.), px(10.)));
+    path.line_to(point(px(10.), px(100.)));
+    path.color = color(0xff0000ff).into();
+    path.content_mask = ContentMask {
+        bounds: Bounds {
+            origin: point(px(0.), px(0.)),
+            size: size(px(256.), px(256.)),
+        },
+    };
+    content.insert_primitive(path.scale(1.));
+    content.finish();
+    let scene = one_tile_scene(content);
+    assert!(scene.paths.is_empty());
+
+    let over_tile = [Bounds {
+        origin: point(DevicePixels(20), DevicePixels(20)),
+        size: size(DevicePixels(10), DevicePixels(10)),
+    }];
+    let beside_tile = [Bounds {
+        origin: point(DevicePixels(300), DevicePixels(20)),
+        size: size(DevicePixels(10), DevicePixels(10)),
+    }];
+    let one_sample = RasterParams {
+        path_sample_count: 1,
+        ..PARAMS_FOR_CAN_DRAW
+    };
+    assert!(super::can_draw(&scene, &over_tile, &PARAMS_FOR_CAN_DRAW).is_ok());
+    assert_eq!(
+        super::can_draw(&scene, &over_tile, &one_sample).err(),
+        Some(super::NeedsGpu::PathSampling)
+    );
+    assert!(super::can_draw(&scene, &beside_tile, &one_sample).is_ok());
+}
+
+/// A surface in a layer tile drawn in a region needs the GPU.
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+#[test]
+fn tile_surfaces_need_the_gpu() {
+    let mut content = Scene::default();
+    content.insert_primitive(gpui::PaintSurface {
+        order: 0,
+        bounds: sp(10., 10., 50., 50.),
+        content_mask: ContentMask {
+            bounds: sp(0., 0., 256., 256.),
+        },
+    });
+    content.finish();
+    let scene = one_tile_scene(content);
+    let over_tile = [Bounds {
+        origin: point(DevicePixels(20), DevicePixels(20)),
+        size: size(DevicePixels(10), DevicePixels(10)),
+    }];
+    assert_eq!(
+        super::can_draw(&scene, &over_tile, &PARAMS_FOR_CAN_DRAW).err(),
+        Some(super::NeedsGpu::Surfaces)
+    );
+}

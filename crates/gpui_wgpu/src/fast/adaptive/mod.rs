@@ -79,7 +79,7 @@ use crate::WgpuRenderer;
 use crate::fast::adaptive::policy::{AtlasDamage, Decision, Frame, GpuReason, Policy, Target};
 use crate::fast::adaptive::region::Region;
 use crate::fast::adaptive::stats::WindowStats;
-use crate::fast::cpu::atlas::AtlasMirror;
+use crate::fast::cpu::atlas::{self, AtlasMirror};
 use crate::fast::cpu::raster::{self, Canvas, RasterParams};
 use crate::fast::cpu::{CpuFrame, CpuPresenter};
 use crate::wgpu_renderer::RendererState;
@@ -211,7 +211,13 @@ pub(crate) struct Adaptive {
     /// The extents of the sprites of the frame being drawn over atlas
     /// rectangles written since the frame before.
     atlas_region: Region,
+    /// The atlas rectangles written since the last frame presented, by
+    /// either path: a frame that is not presented leaves them for the next.
     writes: Vec<(AtlasTextureId, Bounds<DevicePixels>)>,
+    /// Every sprite may have changed since the last frame presented.
+    writes_everything: bool,
+    /// The rectangles taken from the atlas for the frame being drawn.
+    new_writes: Vec<(AtlasTextureId, Bounds<DevicePixels>)>,
     writes_by_texture: FxHashMap<AtlasTextureId, Vec<Bounds<DevicePixels>>>,
     /// The scene drawn whole, with `GPUI_CPU_VERIFY=1` ([`verify`]).
     verify_canvas: Canvas,
@@ -280,6 +286,17 @@ impl Adaptive {
         };
     }
 
+    /// Takes the presenter out, to install it again in a renderer recreated
+    /// after the device was lost ([`take_presenter`]), with the memory it
+    /// kept for presenting released. What it shows stays on the window until
+    /// the new renderer's first frame, on the GPU, tells it
+    /// ([`Adaptive::install`] has it told).
+    fn take_presenter(this: &mut Self) -> Option<Box<dyn CpuPresenter>> {
+        let mut presenter = this.presenter.take()?;
+        presenter.release();
+        Some(presenter)
+    }
+
     /// Resolves how CPU frames are shown, on the first frame, and turns the
     /// atlas's CPU copy off when there are none.
     fn resolve(this: &mut Self, mirror: &mut AtlasMirror) -> Option<PresentMode> {
@@ -344,7 +361,7 @@ impl Adaptive {
         let always = Self::mode(this) == Mode::Always;
         let damage = &scene.damage;
 
-        let everything = AtlasMirror::take_writes(mirror, &mut this.writes);
+        let everything = Self::take_writes(this, mirror);
         this.atlas_region.clear();
         if !everything && this.policy.has_canvas() {
             region::add_written_sprites(
@@ -373,9 +390,9 @@ impl Adaptive {
             needs_gpu,
             always,
         });
-        let plan = match decision {
+        let (plan, tiles) = match decision {
             Decision::Cpu(plan) => match raster::can_draw(scene, plan.region.rects(), params) {
-                Ok(()) => plan,
+                Ok(tiles) => (plan, tiles),
                 Err(needs) => {
                     let reason = match needs {
                         raster::NeedsGpu::Surfaces => GpuReason::Surfaces,
@@ -409,10 +426,11 @@ impl Adaptive {
         let pixels = plan.region.area();
         let threads = threads_for(pixels);
         let drawing = Instant::now();
-        raster::draw(
+        raster::draw_tiles(
             canvas,
             scene,
             plan.region.rects(),
+            tiles,
             &*mirror,
             params,
             threads,
@@ -475,10 +493,32 @@ impl Adaptive {
         let end = now + took;
         this.policy
             .cpu_drew(damage.frame, target, now, end, cpu, always);
+        Self::writes_presented(this);
         this.pending = None;
         this.stats.cpu_frame(present_mode, pixels, took);
         this.stats.tick(end);
         Some(true)
+    }
+
+    /// Adds the atlas rectangles written since the last frame drawn to those
+    /// no frame presented since, and returns whether every sprite may have
+    /// changed instead.
+    fn take_writes(this: &mut Self, mirror: &mut AtlasMirror) -> bool {
+        this.writes_everything |= AtlasMirror::take_writes(mirror, &mut this.new_writes);
+        if !this.writes_everything {
+            this.writes.extend_from_slice(&this.new_writes);
+            this.writes_everything = this.writes.len() > atlas::MAX_LOGGED_WRITES;
+        }
+        if this.writes_everything {
+            this.writes.clear();
+        }
+        this.writes_everything
+    }
+
+    /// Notes that a frame presented the atlas writes taken for it.
+    fn writes_presented(this: &mut Self) {
+        this.writes.clear();
+        this.writes_everything = false;
     }
 
     /// Turns the CPU path off for good.
@@ -530,6 +570,7 @@ impl Adaptive {
             .pending
             .take()
             .filter(|pending| pending.number == scene.damage.frame);
+        Self::writes_presented(this);
         let atlas = match &pending {
             Some(pending) if !pending.atlas_everything => {
                 AtlasDamage::Rects(this.atlas_region.rects())
@@ -641,6 +682,25 @@ impl WgpuRenderer {
             presenter,
             &mut self.atlas.cpu_mirror(),
         );
+    }
+}
+
+/// The platform's presenter, out of `renderer` before `WgpuRenderer::recover`
+/// recreates it: the platform installs it only with the window, so it is
+/// carried over to the new renderer ([`restore_presenter`]).
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn take_presenter(renderer: &mut WgpuRenderer) -> Option<Box<dyn CpuPresenter>> {
+    Adaptive::take_presenter(&mut renderer.fast_adaptive)
+}
+
+/// Installs `presenter`, from [`take_presenter`], in the recreated `renderer`.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn restore_presenter(
+    renderer: &mut WgpuRenderer,
+    presenter: Option<Box<dyn CpuPresenter>>,
+) {
+    if let Some(presenter) = presenter {
+        renderer.set_cpu_presenter(presenter);
     }
 }
 

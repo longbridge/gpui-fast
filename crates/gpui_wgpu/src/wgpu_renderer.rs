@@ -2267,6 +2267,7 @@ impl WgpuRenderer {
         self.atlas.handle_device_lost(context);
 
         let is_bgr = self.is_bgr;
+        let cpu_presenter = crate::fast::adaptive::take_presenter(self);
         *self = Self::new_internal(
             Some(gpu_context.clone()),
             context,
@@ -2276,6 +2277,7 @@ impl WgpuRenderer {
             self.atlas.clone(),
         )?;
         self.set_subpixel_layout(is_bgr);
+        crate::fast::adaptive::restore_presenter(self, cpu_presenter);
 
         log::info!("GPU recovery complete");
         Ok(())
