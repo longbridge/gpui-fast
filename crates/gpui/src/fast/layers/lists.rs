@@ -962,17 +962,36 @@ fn reads_len() -> usize {
 /// changed for it (see [`invalidate::scroll_only`]), or in which a view
 /// drawn was notified. They are rendered again, alone, on a frame that
 /// otherwise keeps the rows the layer holds.
+///
+/// What the `render` of the view holding the list wrote this frame is not a
+/// change of a row. Its render is judged by what it read itself, as the row
+/// renderer it hands the list is (see [`invalidate::owner_rerendered_only`]):
+/// rendered again for nothing it read changing, it wrote what it wrote when
+/// the rows were rendered, as a sidebar writes the items its rows show into
+/// a model they read on every render; rendered again for a change, the rows
+/// are rendered again before they show, or painted afresh.
 fn changed_rows(window: &Window, cx: &App, id: &GlobalElementId) -> BTreeSet<usize> {
     let Some(layer) = window.fast_layers.layers.get(id) else {
         return BTreeSet::new();
     };
     let source = window.fast_layers.scrolls.source(id);
+    let owner_writes = invalidate::owner_view(window)
+        .and_then(|owner| window.retained_state.render_writes.get(&owner))
+        .filter(|writes| !writes.is_empty());
     layer
         .rows
         .rows
         .iter()
         .filter(|(_, row)| {
-            invalidate::changed(window, cx, &row.dependencies, source.as_ref())
+            let masked;
+            let dependencies = match owner_writes {
+                Some(writes) => {
+                    masked = row.dependencies.with_own_writes(writes.start, writes.end);
+                    &masked
+                }
+                None => &row.dependencies,
+            };
+            invalidate::changed(window, cx, dependencies, source.as_ref())
                 || invalidate::views_notified(window, &row.views)
         })
         .map(|(ix, _)| *ix)
@@ -2481,6 +2500,12 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
                 .count();
             let carried: BTreeSet<usize> = frame.carried.iter().copied().collect();
             rows.rows.retain(|row, _| carried.contains(row));
+            // What the list wrote as it was built again, its rows included,
+            // is part of building it, not a change of the rows it kept,
+            // which were checked as it began.
+            for row in rows.rows.values_mut() {
+                row.dependencies = row.dependencies.written_up_to_those_of(&frame.dependencies);
+            }
             if rows.rerendered {
                 for row in rows.rows.values_mut() {
                     row.suspect = true;

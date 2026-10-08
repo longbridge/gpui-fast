@@ -2107,6 +2107,140 @@ mod list {
         // The row in the overscan shows as it was tinted.
         compare_with_layers_off(cx, with_layers, without_layers, &[-25.; 12], "scroll down");
     }
+
+    /// What a [`SharedWritePage`] and its rows write, and its rows read.
+    struct Recent {
+        tint: usize,
+        writes: usize,
+    }
+
+    /// A page whose view writes what its rows show into a model as it
+    /// renders, before building its list, and whose rows each write the
+    /// model too as they render, as a sidebar hands its rows the recent
+    /// items and each row notes it was drawn.
+    struct SharedWritePage {
+        state: ListState,
+        recent: Entity<Recent>,
+        tint: usize,
+        rendered: Rc<RefCell<Vec<usize>>>,
+    }
+
+    impl Render for SharedWritePage {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let tint = self.tint;
+            self.recent.update(cx, |recent, _| recent.tint = tint);
+            let rendered = self.rendered.clone();
+            let recent = self.recent.clone();
+            div().size_full().bg(rgb(0xffffff)).child(
+                crate::list(self.state.clone(), move |row, _, cx| {
+                    rendered.borrow_mut().push(row);
+                    let tint = recent.update(cx, |recent, _| {
+                        recent.writes += 1;
+                        recent.tint
+                    });
+                    div()
+                        .w(px(VIEWPORT_WIDTH))
+                        .h(px(row_height(row)))
+                        .bg(row_color(row + tint))
+                        .into_any_element()
+                })
+                .w(px(VIEWPORT_WIDTH))
+                .h(px(VIEWPORT_HEIGHT)),
+            )
+        }
+    }
+
+    fn shared_write_page(
+        cx: &mut TestAppContext,
+    ) -> (WindowHandle<SharedWritePage>, Rc<RefCell<Vec<usize>>>) {
+        let rendered = Rc::new(RefCell::new(Vec::new()));
+        let log = rendered.clone();
+        let window = cx.add_window(move |_, cx| SharedWritePage {
+            state: ListState::new(1000, ListAlignment::Top, px(0.)).measure_all(),
+            recent: cx.new(|_| Recent { tint: 0, writes: 0 }),
+            tint: 0,
+            rendered: log,
+        });
+        open_at(cx, window.into(), 1.);
+        (window, rendered)
+    }
+
+    /// Notifies the page of `handle`, tinting its rows anew if `retint`, and
+    /// draws the frame that follows.
+    fn notify_shared_write(
+        cx: &mut TestAppContext,
+        handle: WindowHandle<SharedWritePage>,
+        retint: bool,
+    ) {
+        let window: AnyWindowHandle = handle.into();
+        let frame = with_window(cx, window, |window, _| window.fast_layers.frame);
+        handle
+            .update(cx, |page, _, cx| {
+                if retint {
+                    page.tint += 1;
+                }
+                cx.notify();
+            })
+            .unwrap();
+        if with_window(cx, window, |window, _| window.fast_layers.frame) == frame {
+            draw(cx, window);
+        }
+    }
+
+    /// A view that writes what its rows read as it renders, and rows that
+    /// write it too as they render, write it as part of building the list:
+    /// the rows the layer holds are not all rendered again for it on every
+    /// frame. The view rendering again renders the rows it shows again, and
+    /// the others as they come to show, and the list keeps its layer, drawing
+    /// as it does without layers, tinted anew or not.
+    #[crate::test]
+    fn a_view_and_rows_writing_what_the_rows_read_keep_the_layer(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let (handle, log) = shared_write_page(cx);
+        let (without, _) = shared_write_page(cx);
+        let window: AnyWindowHandle = handle.into();
+        compare_with_layers_off(cx, window, without.into(), &[-20., -20., -15.], "promote");
+        assert_eq!(decision(cx, window), Some(Decision::Composite));
+        let held: BTreeSet<usize> = held_rows(cx, window).into_iter().collect();
+        assert!(
+            held.len() > 8,
+            "the layer holds rows past the viewport: {held:?}"
+        );
+
+        let extended = extended_frames();
+        for frame in 0..40 {
+            let retint = frame % 10 == 5;
+            rendered(&log);
+            notify_shared_write(cx, handle, retint);
+            notify_shared_write(cx, without, retint);
+            assert_eq!(
+                decision(cx, window),
+                Some(Decision::Composite),
+                "frame {frame}: the view rendering again composites"
+            );
+            let rendered_now = rendered(&log);
+            assert!(
+                rendered_now.len() <= 6,
+                "frame {frame}: only the rows shown render: {rendered_now:?}"
+            );
+            let composited = compare_with_layers_off(cx, window, without.into(), &[-7.], "scroll");
+            assert_eq!(composited, 1, "frame {frame}");
+            let rendered_now = rendered(&log);
+            assert!(
+                rendered_now.len() <= 2,
+                "frame {frame}: a scroll renders the rows it brings: {rendered_now:?}"
+            );
+        }
+        assert!(extended_frames() - extended >= 40);
+        assert_eq!(
+            with_window(cx, window, |window, _| window.layout_stats().layers_demoted),
+            0
+        );
+        compare_with_layers_off(cx, window, without.into(), &[-25.; 12], "scroll down");
+        compare_with_layers_off(cx, window, without.into(), &[25.; 24], "scroll up");
+    }
 }
 
 /// Lists whose rows hand the frame more than what they draw: hitboxes,
