@@ -66,8 +66,9 @@ pub(crate) struct ScrollLog {
     /// The scroll containers painted lately, by id.
     containers: FxHashMap<GlobalElementId, PaintedContainer>,
     /// How many times a wheel listener notified each view since the last
-    /// frame was drawn, for having scrolled a container it painted.
-    scroll_notifies: FxHashMap<EntityId, u64>,
+    /// frame was drawn, for having scrolled a container it painted. See also
+    /// [`crate::fast::layers::wheel`].
+    pub(crate) scroll_notifies: FxHashMap<EntityId, u64>,
     /// Whether each list about to be laid out this frame, by the address of
     /// its state's version counter, is scrolled to its end, for the reads of
     /// only that to be judged by it. See [`note_at_end_read`].
@@ -787,6 +788,17 @@ impl Drop for OwnerWatch {
             }
         });
     }
+}
+
+/// How often each watched view has been notified since any watch of it
+/// began.
+pub(crate) fn watched_notifies() -> FxHashMap<EntityId, u64> {
+    OWNER_NOTIFIES.with_borrow(|watched| {
+        watched
+            .iter()
+            .map(|(view, notifies)| (*view, notifies.notifies))
+            .collect()
+    })
 }
 
 /// Counts a notification of `entity`, if it is a watched view. See

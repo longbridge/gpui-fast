@@ -123,6 +123,14 @@ pub(crate) fn global_changed(cx: &mut App, global_type: TypeId) {
     cx.dependencies.global_changed(global_type);
 }
 
+/// A count that grows with every entity updated, written or changed and
+/// every global changed: equal counts taken at two moments saw none of
+/// those between them.
+pub(crate) fn change_count(cx: &App) -> u64 {
+    let log = &cx.entities.access_log;
+    log.update_generation + log.write_generation + cx.dependencies.global_generation
+}
+
 /// Stands for whether a global of type `G` is set, which a subtree that
 /// only asked [`App::has_global`] depends on rather than on the global.
 struct GlobalPresence<G>(std::marker::PhantomData<G>);

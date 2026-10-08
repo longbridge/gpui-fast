@@ -17,6 +17,7 @@ pub mod scene;
 pub(crate) mod tiles;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod verify;
+pub(crate) mod wheel;
 pub(crate) mod work;
 
 use crate::{App, GlobalElementId, Window};
@@ -55,6 +56,8 @@ pub(crate) struct WindowLayers {
     pub(crate) frame: u64,
     /// The window's size and scale factor the layers were painted at.
     pub(crate) window_size: Option<(crate::Size<crate::Pixels>, f32)>,
+    /// The wheel event being dispatched, if any.
+    pub(crate) wheel: wheel::WheelDispatch,
 }
 
 impl Default for WindowLayers {
@@ -70,6 +73,7 @@ impl Default for WindowLayers {
             forced_decision: None,
             frame: 0,
             window_size: None,
+            wheel: wheel::WheelDispatch::default(),
         }
     }
 }
