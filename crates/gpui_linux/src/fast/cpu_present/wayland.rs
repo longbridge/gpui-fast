@@ -17,6 +17,14 @@
 //! damage of the frames presented since it was last attached), so a frame
 //! copies only those and its own damage into the buffer it attaches.
 //!
+//! Where the compositor makes the window translucent (a window-opacity rule),
+//! the window surface's last GPU frame would show through the subsurface, and
+//! the two would make the window more opaque than the rule: a CPU frame
+//! therefore makes the window surface fully transparent with
+//! `wp_alpha_modifier_v1`, in the same commit, and the GPU frame after it
+//! makes it opaque again in its own. Without that protocol there is no
+//! presenter, and the renderer shows CPU frames by blit.
+//!
 //! The subsurface is scaled the way the window surface is: to the window's
 //! logical size through a viewport, or by the buffer scale without
 //! viewporter, so a buffer of the frame's size in device pixels shows the
@@ -34,9 +42,13 @@ use collections::HashMap;
 use gpui::{Bounds, DevicePixels, Size};
 use gpui_wgpu::{CpuFrame, CpuPresenter, WgpuRenderer};
 use wayland_backend::client::ObjectId;
+use wayland_client::delegate_noop;
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle,
     protocol::{wl_buffer, wl_shm, wl_subsurface, wl_surface},
+};
+use wayland_protocols::wp::alpha_modifier::v1::client::{
+    wp_alpha_modifier_surface_v1, wp_alpha_modifier_v1,
 };
 use wayland_protocols::wp::viewporter::client::wp_viewport;
 
@@ -49,6 +61,12 @@ use crate::linux::{Globals, WaylandClientStatePtr};
 const MAX_BUFFERS: usize = 4;
 
 type WindowScale = Option<(Size<DevicePixels>, f32)>;
+
+/// `wp_alpha_modifier_v1`, when the compositor has it.
+pub(crate) type AlphaModifier = Option<wp_alpha_modifier_v1::WpAlphaModifierV1>;
+
+delegate_noop!(WaylandClientStatePtr: ignore wp_alpha_modifier_v1::WpAlphaModifierV1);
+delegate_noop!(WaylandClientStatePtr: ignore wp_alpha_modifier_surface_v1::WpAlphaModifierSurfaceV1);
 
 thread_local! {
     /// The size, in device pixels, and scale of each window surface with a
@@ -68,11 +86,16 @@ pub(crate) fn with_presenter(
         log::info!("CPU frames are not presented: no wl_subcompositor");
         return renderer;
     }
+    if globals.fast_alpha_modifier.is_none() {
+        log::info!("CPU frames are not presented: no wp_alpha_modifier_v1");
+        return renderer;
+    }
     WINDOW_SCALES.with_borrow_mut(|scales| scales.insert(surface.id(), None));
     renderer.set_cpu_presenter(Box::new(ShmPresenter {
         window_surface: surface.clone(),
         globals: globals.clone(),
         subsurface: None,
+        window_alpha: None,
         shown: false,
         window_has_buffer: false,
         scaled_for: None,
@@ -99,6 +122,8 @@ struct ShmPresenter {
     window_surface: wl_surface::WlSurface,
     globals: Globals,
     subsurface: Option<Subsurface>,
+    /// The window surface's alpha multiplier, made with the subsurface.
+    window_alpha: Option<wp_alpha_modifier_surface_v1::WpAlphaModifierSurfaceV1>,
     /// Whether the subsurface shows a buffer, or will once the window surface
     /// is committed.
     shown: bool,
@@ -228,6 +253,10 @@ impl CpuPresenter for ShmPresenter {
 
         if self.subsurface.is_none() {
             self.subsurface = Some(Subsurface::new(&self.globals, &self.window_surface)?);
+            self.window_alpha =
+                self.globals.fast_alpha_modifier.as_ref().map(|modifier| {
+                    modifier.get_surface(&self.window_surface, &self.globals.qh, ())
+                });
         }
         self.scale_subsurface();
         let Some(subsurface) = &self.subsurface else {
@@ -253,6 +282,13 @@ impl CpuPresenter for ShmPresenter {
             }
         }
         surface.commit();
+        if !self.shown
+            && let Some(window_alpha) = &self.window_alpha
+        {
+            // The subsurface covers the window: nothing of the window
+            // surface's last GPU frame is to show through it.
+            window_alpha.set_multiplier(0);
+        }
         // The subsurface is synchronized: the window surface's commit applies
         // its state, with the frame callback the window requested.
         self.window_surface.commit();
@@ -276,6 +312,9 @@ impl CpuPresenter for ShmPresenter {
                 subsurface.surface.attach(None, 0, 0);
                 subsurface.surface.commit();
             }
+            if let Some(window_alpha) = &self.window_alpha {
+                window_alpha.set_multiplier(u32::MAX);
+            }
             self.shown = false;
         }
     }
@@ -289,6 +328,10 @@ impl Drop for ShmPresenter {
     fn drop(&mut self) {
         WINDOW_SCALES.with_borrow_mut(|scales| scales.remove(&self.window_surface.id()));
         self.buffers.clear();
+        if let Some(window_alpha) = self.window_alpha.take() {
+            // Destroying it resets the multiplier with the next commit.
+            window_alpha.destroy();
+        }
         self.subsurface.take();
     }
 }

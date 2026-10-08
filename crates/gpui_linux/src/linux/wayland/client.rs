@@ -242,6 +242,7 @@ pub struct Globals {
     pub activation: Option<xdg_activation_v1::XdgActivationV1>,
     pub compositor: wl_compositor::WlCompositor,
     pub fast_subcompositor: Option<wayland_client::protocol::wl_subcompositor::WlSubcompositor>,
+    pub fast_alpha_modifier: crate::fast::cpu_present::wayland::AlphaModifier,
     pub cursor_shape_manager: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
     pub data_device_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
     pub primary_selection_manager:
@@ -302,6 +303,7 @@ impl Globals {
                 .context("Wayland compositor does not provide xdg_wm_base")?,
             viewporter: globals.bind(&qh, 1..=1, ()).ok(),
             fast_subcompositor: globals.bind(&qh, 1..=1, ()).ok(),
+            fast_alpha_modifier: globals.bind(&qh, 1..=1, ()).ok(),
             fractional_scale_manager: globals.bind(&qh, 1..=1, ()).ok(),
             decoration_manager: globals.bind(&qh, 1..=1, ()).ok(),
             layer_shell: globals.bind(&qh, 1..=5, ()).ok(),
