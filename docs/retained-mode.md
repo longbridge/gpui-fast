@@ -42,7 +42,10 @@ nodes and primitives are copied from the last frame. A view depends on:
   it cares about the event or not — counts as changed only for views drawn
   inside a view notified since the last frame. Upstream builds those again
   with everything under them, and a view often changes a model it renders and
-  notifies only itself.
+  notifies only itself. An entity updated while the window draws — a
+  component writing what it was given into the state of a view it renders,
+  as GPUI Kit's `Tree` does — counts as changed for the views that read it,
+  unless they wrote it themselves as they were built.
 - **Where it is drawn.** Its bounds, content mask, text style and opacity. A
   view that moved is built again, at the layout nodes it kept, and laid out at
   the size its parent gave it.
@@ -104,8 +107,14 @@ therefore does not build everything nested in it.
 
 `Entity::cached(style)` and `AnyView::cached(style)` are upstream's API and
 work as upstream documents them. They are retained subtrees like any other
-view, so they are also built again when an entity or global they read changed,
-and keep their layout nodes while they are reused. A notified cached view is
+view, so they are also built again when an entity they read was notified, or
+a global they read changed, and keep their layout nodes while they are
+reused. An entity a cached view, or a view drawn in it, read that was updated
+without being notified — outside drawing, or while the window draws, as a
+window writing into the panes it holds whether they show does on every render
+— does not draw it again: upstream draws a cached view again only when it, or
+a view in it, is notified, so it never shows what such an update wrote
+either. A notified cached view is
 built again on its own, at the layout node it kept, inside the views around
 it drawn from the last frame, as any nested view is.
 
