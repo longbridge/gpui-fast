@@ -7,9 +7,50 @@
 //!
 //! When the GPU presents through the Present extension the window shows the
 //! presented pixmap, which holds a whole frame; uploading the damage of the
-//! next frame on top of it is what the CPU path needs.
+//! next frame on top of it is what the CPU path needs, once that pixmap is
+//! in the window.
+//!
+//! It may not be yet. The swapchain presents in FIFO mode: Mesa's Vulkan
+//! WSI sends `PresentPixmap` for a coming vblank, or later still from its
+//! queue thread, and the server copies (or flips) the pixmap into the window
+//! then. A CPU frame shown in between is uploaded at once and the GPU frame
+//! lands over it; later CPU frames upload only their own damage, so what the
+//! earlier ones uploaded would stay stale. The presenter therefore selects
+//! `CompleteNotify` on the window with an event context of its own (Mesa
+//! reads its own through a special event queue). A GPU present that
+//! completes after CPU frames were shown since the GPU last presented means
+//! the window shows a GPU frame again: the client refreshes the window
+//! ([`on_event`]), which presents the scene again, and that CPU frame
+//! uploads, besides its damage, every rectangle the CPU frames since the GPU
+//! presented uploaded. They cover everything that differs from the GPU's
+//! last frame, and no GPU present lands after the last one completes, so the
+//! window ends right without waiting for another frame: stale pixels last
+//! from a completion until the client's next turn of its event loop. How
+//! many GPU presents are still queued is not known, so every completion is
+//! answered, not only the first.
+//!
+//! The alternatives were worse. Re-uploading for a while after each GPU
+//! present leaves a CPU frame stale when the GPU's present lands after the
+//! last upload, with nothing to call the presenter then. Presenting CPU
+//! frames through the Present extension too would order them with the GPU's,
+//! but needs a whole-window pixmap kept up to date and has the compositor
+//! take the whole window for every frame.
+//!
+//! Without a compositing manager the server discards what is covered, and
+//! `Expose` events name the rectangles to draw again. The client refreshes
+//! the window, which presents the same scene again, a CPU frame without
+//! damage; the exposed rectangles are uploaded with it.
+//!
+//! Neither applies when the server has no Present extension: Mesa then puts
+//! GPU frames into the window with requests ordered with ours. A driver
+//! that presents some other way is not followed.
 
-use std::{os::fd::AsFd as _, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    os::fd::AsFd as _,
+    rc::Rc,
+};
 
 use anyhow::Context as _;
 use gpui::{Bounds, DevicePixels, point, size};
@@ -17,6 +58,8 @@ use gpui_wgpu::{CpuFrame, CpuPresenter, WgpuRenderer};
 use x11rb::{
     connection::{Connection as _, DiscardMode, RequestConnection as _, RequestKind},
     protocol::{
+        Event,
+        present::{self, ConnectionExt as _},
         shm::{self, ConnectionExt as _},
         xproto::{self, ConnectionExt as _},
     },
@@ -30,6 +73,120 @@ use super::region::Region;
 const PUT_IMAGE_HEADER_BYTES: usize = 64;
 /// Rectangles of more pixels than this go through MIT-SHM, when available.
 const SHM_MIN_PIXELS: usize = 64 * 64;
+
+thread_local! {
+    /// The windows with a presenter: its Present event context, if any, and
+    /// what it owes the window.
+    static WINDOWS: RefCell<HashMap<xproto::Window, (Option<present::Event>, Rc<RefCell<Owed>>)>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Notes what `event`, which the X11 client is about to handle, means for
+/// the CPU frames of its window, and adds the window to `windows_to_refresh`
+/// when it has to be presented again.
+pub(crate) fn on_event(event: &Event, windows_to_refresh: &mut HashSet<xproto::Window>) {
+    match event {
+        Event::Expose(event) => {
+            let rect = Bounds {
+                origin: point(DevicePixels(event.x.into()), DevicePixels(event.y.into())),
+                size: size(
+                    DevicePixels(event.width.into()),
+                    DevicePixels(event.height.into()),
+                ),
+            };
+            with_owed(event.window, None, |owed| owed.exposed(rect));
+        }
+        Event::PresentCompleteNotify(event) if event.kind == present::CompleteKind::PIXMAP => {
+            if with_owed(event.window, Some(event.event), Owed::gpu_landed) == Some(true) {
+                windows_to_refresh.insert(event.window);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Calls `f` with what the presenter of `window` owes it, if `window` has
+/// one (whose Present event context is `eid`, when given).
+fn with_owed<R>(
+    window: xproto::Window,
+    eid: Option<present::Event>,
+    f: impl FnOnce(&mut Owed) -> R,
+) -> Option<R> {
+    let owed = WINDOWS.with_borrow(|windows| {
+        windows
+            .get(&window)
+            .filter(|(selected, _)| eid.is_none() || *selected == eid)
+            .map(|(_, owed)| owed.clone())
+    })?;
+    let mut owed = owed.borrow_mut();
+    Some(f(&mut owed))
+}
+
+/// What the window shows wrong, besides what the next frame changes: what
+/// the CPU frames uploaded since the GPU last presented, once a GPU present
+/// landed over them, and exposed rectangles.
+#[derive(Default)]
+struct Owed {
+    /// The rectangles the CPU frames shown since the GPU last presented
+    /// uploaded.
+    since_gpu: Region,
+    /// A GPU present completed over CPU frames: `since_gpu` is to be
+    /// uploaded again.
+    landed: bool,
+    exposed: Vec<Bounds<DevicePixels>>,
+}
+
+impl Owed {
+    fn exposed(&mut self, rect: Bounds<DevicePixels>) {
+        self.exposed.push(rect);
+    }
+
+    /// Notes that a GPU present completed, and returns whether the window
+    /// is to be presented again: whether CPU frames uploaded anything since
+    /// the GPU presented.
+    fn gpu_landed(&mut self) -> bool {
+        if self.since_gpu.rects().is_empty() {
+            return false;
+        }
+        self.landed = true;
+        true
+    }
+
+    /// The GPU is about to present a whole frame.
+    fn gpu_presented(&mut self) {
+        self.since_gpu.clear();
+        self.landed = false;
+        self.exposed.clear();
+    }
+
+    /// The rectangles to upload for a frame of `width` × `height` with
+    /// `damage`.
+    fn upload(&mut self, damage: &[Bounds<DevicePixels>], width: u32, height: u32) -> Region {
+        let damage = Region::from_rects(damage, width, height);
+        let mut upload = damage.clone();
+        if std::mem::take(&mut self.landed) {
+            upload.add(&Region::from_rects(self.since_gpu.rects(), width, height));
+        }
+        upload.add(&Region::from_rects(&self.exposed, width, height));
+        self.exposed.clear();
+        self.since_gpu.add(&damage);
+        // Exposures repeat, and what is uploaded again often holds the
+        // damage: upload each pixel once where a rectangle holds another.
+        let rects = upload.rects();
+        let kept = rects
+            .iter()
+            .enumerate()
+            .filter(|&(i, rect)| {
+                !rects
+                    .iter()
+                    .enumerate()
+                    .any(|(j, other)| other.intersect(rect) == *rect && (other != rect || j < i))
+            })
+            .map(|(_, rect)| *rect)
+            .collect::<Vec<_>>();
+        Region::from_rects(&kept, width, height)
+    }
+}
 
 /// Lets `renderer` present the frames it draws on the CPU in `window`, of
 /// `depth` bits per pixel.
@@ -53,6 +210,7 @@ struct PutImagePresenter {
     big_endian: bool,
     gc: Option<xproto::Gcontext>,
     shm: Shm,
+    owed: Rc<RefCell<Owed>>,
 }
 
 enum Shm {
@@ -111,6 +269,14 @@ impl PutImagePresenter {
             visual_type.blue_mask,
         );
 
+        let eid = select_present_events(xcb, window)
+            .inspect_err(|err| {
+                log::info!("GPU presents are not followed on this X11 window: {err:#}")
+            })
+            .ok()
+            .flatten();
+        let owed = Rc::new(RefCell::new(Owed::default()));
+        WINDOWS.with_borrow_mut(|windows| windows.insert(window, (eid, owed.clone())));
         Ok(Self {
             xcb: xcb.clone(),
             window,
@@ -118,6 +284,7 @@ impl PutImagePresenter {
             big_endian: setup.image_byte_order == xproto::ImageOrder::MSB_FIRST,
             gc: None,
             shm: Shm::Unknown,
+            owed,
         })
     }
 
@@ -327,7 +494,7 @@ impl CpuPresenter for PutImagePresenter {
             0
         };
         let gc = self.gc()?;
-        let damage = Region::from_rects(frame.damage, width, height);
+        let damage = self.owed.borrow_mut().upload(frame.damage, width, height);
         let (large, small): (Vec<_>, Vec<_>) = damage.rects().iter().partition(|rect| {
             rect.size.width.0 as usize * rect.size.height.0 as usize >= SHM_MIN_PIXELS
         });
@@ -356,6 +523,10 @@ impl CpuPresenter for PutImagePresenter {
         Ok(())
     }
 
+    fn gpu_presented(&mut self) {
+        self.owed.borrow_mut().gpu_presented();
+    }
+
     fn release(&mut self) {
         if let Shm::Available(segment) = &mut self.shm {
             if let Some(segment) = segment.take() {
@@ -373,8 +544,41 @@ impl CpuPresenter for PutImagePresenter {
 
 impl Drop for PutImagePresenter {
     fn drop(&mut self) {
+        let eid = WINDOWS
+            .with_borrow_mut(|windows| windows.remove(&self.window))
+            .and_then(|(eid, _)| eid);
+        if let Some(eid) = eid
+            && let Ok(cookie) =
+                self.xcb
+                    .present_select_input(eid, self.window, present::EventMask::NO_EVENT)
+        {
+            // An empty mask frees the event context.
+            cookie.ignore_error();
+        }
         CpuPresenter::release(self);
     }
+}
+
+/// Selects `CompleteNotify` on `window` with a new event context and
+/// returns it, or `None` when the server has no Present extension.
+fn select_present_events(
+    xcb: &XCBConnection,
+    window: xproto::Window,
+) -> anyhow::Result<Option<present::Event>> {
+    if xcb
+        .extension_information(present::X11_EXTENSION_NAME)?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    xcb.present_query_version(1, 0)?
+        .reply()
+        .context("PresentQueryVersion")?;
+    let eid = xcb.generate_id()?;
+    xcb.present_select_input(eid, window, present::EventMask::COMPLETE_NOTIFY)?
+        .check()
+        .context("PresentSelectInput")?;
+    Ok(Some(eid))
 }
 
 impl Segment {
@@ -426,7 +630,7 @@ fn split_rect(
 mod tests {
     use gpui::{Bounds, DevicePixels, point, size};
 
-    use super::split_rect;
+    use super::{Owed, split_rect};
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> Bounds<DevicePixels> {
         Bounds {
@@ -496,5 +700,83 @@ mod tests {
     fn an_empty_rect_is_no_request() {
         assert_eq!(split_rect(rect(0, 0, 0, 10), 100).count(), 0);
         assert_eq!(split_rect(rect(0, 0, 10, 0), 100).count(), 0);
+    }
+
+    #[test]
+    fn a_frame_uploads_its_damage() {
+        let mut owed = Owed::default();
+        let upload = owed.upload(&[rect(1, 2, 3, 4), rect(90, 90, 20, 20)], 100, 100);
+        assert_eq!(upload.rects(), &[rect(1, 2, 3, 4), rect(90, 90, 10, 10)]);
+        let upload = owed.upload(&[], 100, 100);
+        assert!(upload.rects().is_empty());
+    }
+
+    #[test]
+    fn a_gpu_present_landing_after_cpu_frames_has_them_uploaded_again() {
+        let mut owed = Owed::default();
+        owed.gpu_presented();
+        // The GPU's present landed before any CPU frame: nothing to redo.
+        assert!(!owed.gpu_landed());
+        owed.upload(&[rect(0, 0, 5, 5)], 100, 100);
+        owed.upload(&[rect(10, 10, 5, 5)], 100, 100);
+        // The GPU's present lands over them: the window is presented again,
+        // and that frame, without damage, uploads both.
+        assert!(owed.gpu_landed());
+        let upload = owed.upload(&[], 100, 100);
+        assert_eq!(upload.rects(), &[rect(0, 0, 5, 5), rect(10, 10, 5, 5)]);
+        // Once.
+        assert!(owed.upload(&[], 100, 100).rects().is_empty());
+        // Another queued GPU present lands later: again.
+        assert!(owed.gpu_landed());
+        let upload = owed.upload(&[rect(50, 50, 1, 1)], 100, 100);
+        assert_eq!(
+            upload.rects(),
+            &[rect(50, 50, 1, 1), rect(0, 0, 5, 5), rect(10, 10, 5, 5)]
+        );
+    }
+
+    #[test]
+    fn a_gpu_present_forgets_what_cpu_frames_uploaded() {
+        let mut owed = Owed::default();
+        owed.upload(&[rect(0, 0, 5, 5)], 100, 100);
+        owed.exposed(rect(20, 20, 5, 5));
+        owed.gpu_presented();
+        assert!(!owed.gpu_landed());
+        assert!(owed.upload(&[], 100, 100).rects().is_empty());
+    }
+
+    #[test]
+    fn exposed_rects_are_uploaded_with_the_next_frame() {
+        let mut owed = Owed::default();
+        owed.exposed(rect(0, 0, 50, 20));
+        owed.exposed(rect(80, 0, 40, 20));
+        // Exposure alone is no reason to present: the client refreshes
+        // exposed windows itself.
+        assert!(!owed.gpu_landed());
+        let upload = owed.upload(&[], 100, 100);
+        assert_eq!(upload.rects(), &[rect(0, 0, 50, 20), rect(80, 0, 20, 20)]);
+        assert!(owed.upload(&[], 100, 100).rects().is_empty());
+        // Exposed rectangles are not what CPU frames uploaded.
+        assert!(!owed.gpu_landed());
+    }
+
+    #[test]
+    fn a_rect_inside_another_is_uploaded_once() {
+        let mut owed = Owed::default();
+        owed.upload(&[rect(10, 10, 5, 5)], 100, 100);
+        assert!(owed.gpu_landed());
+        owed.exposed(rect(0, 0, 100, 100));
+        owed.exposed(rect(0, 0, 100, 100));
+        let upload = owed.upload(&[rect(10, 10, 5, 5), rect(20, 20, 1, 1)], 100, 100);
+        assert_eq!(upload.rects(), &[rect(0, 0, 100, 100)]);
+    }
+
+    #[test]
+    fn rects_uploaded_before_a_resize_are_clipped_to_the_new_size() {
+        let mut owed = Owed::default();
+        owed.upload(&[rect(60, 60, 30, 30)], 100, 100);
+        assert!(owed.gpu_landed());
+        let upload = owed.upload(&[], 70, 70);
+        assert_eq!(upload.rects(), &[rect(60, 60, 10, 10)]);
     }
 }

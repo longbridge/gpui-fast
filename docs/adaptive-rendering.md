@@ -162,7 +162,14 @@ Two ways (`GPUI_CPU_PRESENT`):
     that protocol no presenter is installed, and CPU frames are shown by
     blit.
   - **X11** (`x11.rs`): the damage uploaded into the window with
-    `PutImage`, through MIT-SHM for large rectangles.
+    `PutImage`, through MIT-SHM for large rectangles. The GPU's presents
+    (FIFO, through the Present extension) land at a later vblank, possibly
+    over CPU frames uploaded since: the presenter selects `CompleteNotify`
+    on the window, and when a GPU present completes after CPU frames were
+    shown, the window is refreshed and that frame uploads again everything
+    the CPU frames since the GPU presented uploaded. Without a compositing
+    manager, `Expose` rectangles are uploaded with the frame the client's
+    refresh presents (the same scene, without damage).
 - **blit**: the region is uploaded to a texture that a tiny pipeline copies to
   the swapchain image (`fast::adaptive::blit`). It still presents through the
   GPU, but records no scene: one upload of the damage and one full-screen

@@ -666,6 +666,7 @@ impl X11Client {
             loop {
                 match xcb_connection.poll_for_event() {
                     Ok(Some(event)) => {
+                        crate::fast::cpu_present::x11::on_event(&event, &mut windows_to_refresh);
                         match event {
                             Event::Expose(expose_event) => {
                                 windows_to_refresh.insert(expose_event.window);
