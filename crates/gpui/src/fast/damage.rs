@@ -268,6 +268,16 @@ impl Diff<'_> {
     fn damage_primitive<T: Drawn>(&mut self, primitive: &T) {
         self.damage(primitive.pixels());
     }
+
+    /// Counts `primitive` as changed and damages it, until the damage covers
+    /// the whole window.
+    fn damage_changed<T: Drawn>(&mut self, primitive: &T) {
+        if self.full {
+            return;
+        }
+        self.changed += 1;
+        self.damage_primitive(primitive);
+    }
 }
 
 fn diff_primitives(prev: &Scene, next: &Scene, cx: &mut Diff) {
@@ -314,7 +324,7 @@ fn damage_regrouped_paths(prev: &Scene, next: &Scene, cx: &mut Diff) {
     }
     if prev_batches.len() > MAX_BATCHES || next_batches.len() > MAX_BATCHES {
         for path in prev.paths.iter().chain(&next.paths) {
-            cx.damage_primitive(path);
+            cx.damage_changed(path);
         }
         return;
     }
@@ -326,7 +336,7 @@ fn damage_regrouped_paths(prev: &Scene, next: &Scene, cx: &mut Diff) {
         });
         match found {
             Some((index, _)) => matched[index] = true,
-            None if batch.len() > 1 => paths.iter().for_each(|path| cx.damage_primitive(path)),
+            None if batch.len() > 1 => paths.iter().for_each(|path| cx.damage_changed(path)),
             None => {}
         }
     }
@@ -334,7 +344,7 @@ fn damage_regrouped_paths(prev: &Scene, next: &Scene, cx: &mut Diff) {
         if !matched && batch.len() > 1 {
             prev.paths[batch.clone()]
                 .iter()
-                .for_each(|path| cx.damage_primitive(path));
+                .for_each(|path| cx.damage_changed(path));
         }
     }
 }

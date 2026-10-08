@@ -256,6 +256,8 @@ fn overlapping_paths_split_into_two_batches_are_damaged() {
         })
     };
     assert!(covers(25, 20), "the paths' overlap is damaged: {rects:?}");
+    // The quad, and the two paths of the batch it splits.
+    assert_eq!(next.damage.changed_primitives, 3);
 
     // Without the split, the quad alone is damaged.
     let mut far = paths.to_vec();
