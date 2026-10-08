@@ -206,6 +206,9 @@ A frame is drawn whole when:
 - there is no canvas of the window's size: the first frame, a resize, a lost
   device (Windows), a canvas drawn for the other alpha mode after the
   window's transparency changed (macOS);
+- on Windows, the window's background appearance clears to another color
+  than the canvas was drawn with (opaque white against transparent black,
+  after `set_background_appearance`, which changes no scene);
 - the scene is not numbered, or its damage is not relative to the scene the
   canvas holds (`since` is not the scene drawn last): a frame dropped for
   want of a drawable, a composed window's replayed scenes, frames drawn
@@ -231,8 +234,12 @@ every batch of the scene, scissored to it. Primitives outside a rectangle
 cost vertex work only.
 
 - **Windows**: the rectangles are cleared with `ClearView` and drawn with a
-  copy of the renderer's rasterizer state that has the scissor test on
-  (`RSSetScissorRects` per rectangle). The canvas is lent to the renderer as
+  copy of the renderer's rasterizer state that has the scissor test on. The
+  batches are walked once (`fast::frame::draw_scene_in`): each is bound once
+  and drawn through every rectangle (`RSSetScissorRects` per draw), and each
+  path batch is rasterized into its 4× MSAA intermediate once, scissored to
+  the rectangles' union, so a frame costs one full-texture clear and resolve
+  per path batch, as a whole frame does, however many rectangles. The canvas is lent to the renderer as
   its render target view, so paths, which bind it again after their
   intermediate pass, draw into it too. The whole canvas is then copied into
   the back buffer and presented with `Present1` and the damage as dirty
@@ -243,8 +250,9 @@ cost vertex work only.
   rectangle, scissored to it: a small fill pipeline clears the rectangle,
   then the batches draw. Paths are rasterized into their intermediate
   texture whole and composited through the scissor. A full-screen triangle
-  that reads the canvas texel for texel copies it into the drawable (a
-  `CAMetalLayer`'s drawables are framebuffer-only, so a blit cannot), and the
+  that reads the canvas texel for texel copies it into the drawable (the
+  layer's drawables are framebuffer-only, so a blit cannot write them; only
+  debug builds with `test-support` turn that off, for screenshots), and the
   drawable is presented as before. Core Animation has no partial present:
   the compositor takes the whole drawable.
 
@@ -256,8 +264,15 @@ their own targets.
 - The GPU still wakes for every frame. A partial frame saves fragment work
   outside the damage and, on Windows, DWM's recomposition of the rest of the
   window.
-- Every frame, whole or partial, pays for the canvas (one window-sized
-  texture) and its copy into the drawable or back buffer.
+- Every window keeps one more window-sized BGRA8 texture, the canvas: 4
+  bytes a pixel, about 33 MB at 4K (3840×2160). It is kept while the window
+  is minimized or occluded, and freed only with the renderer (or, on
+  Windows, a lost device).
+- Every frame, whole or partial, copies the whole canvas into the drawable
+  or back buffer, so a whole frame costs slightly more than upstream's,
+  which draws straight into it.
+- `GPUI_PARTIAL_REDRAW=0` turns all of it off: every frame is drawn whole,
+  straight into the drawable or back buffer, and no canvas is created.
 - On Apple's tile-based GPUs a render pass that loads the canvas reads and
   writes the whole attachment, which can cost as much as the fragment work it
   saves; each path group starts another pass.

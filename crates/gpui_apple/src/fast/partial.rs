@@ -7,8 +7,10 @@
 //! upstream draws into the drawable, or, when the canvas holds the scene the
 //! damage compares with, only inside the damage. The canvas is then copied
 //! into the drawable by a full-screen triangle that reads it texel for texel
-//! (a blit cannot write a drawable: a `CAMetalLayer`'s drawables are
-//! framebuffer-only), and presented as before.
+//! (a blit cannot write a drawable: `MetalRenderer::configure_layer` leaves
+//! the layer's drawables framebuffer-only, except in debug builds with
+//! `test-support`, which turn that off for screenshots), and presented as
+//! before.
 //!
 //! A partial frame loads the canvas in one render pass (one more per later
 //! group of path batches, as a whole frame) and, in each, scissors to every
