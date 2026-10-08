@@ -140,6 +140,8 @@ changed = area(damage)
 GPU when: no presenter | GPUI_CPU_RENDER=0 | scene needs the GPU (surfaces)
           | area(region) > 8 Mpx
           | burst and changed > window / 16
+          | burst and the canvas would be drawn whole, unless the burst's
+            frames each changed at most window / 16 for 250 ms
           | the burst's CPU frames cost more than a quarter of its time,
             once it lasted 250 ms (the rest of the burst draws on the GPU)
           | composition (native surfaces) is active
@@ -165,7 +167,9 @@ took.
   buffer (the buffer is brought up to date with the regions changed since it
   was last attached), attaches it, `damage_buffer`s the region and commits.
   The frame callback `WaylandWindow::draw` requested before drawing is
-  committed with it.
+  committed with it. (As built, the frames go on a synchronized subsurface,
+  and the window surface is made transparent under it with
+  `wp_alpha_modifier_v1`; see `adaptive-rendering.md`.)
 - **X11** (`x11.rs`): `PutImage` of each region (MIT-SHM when available) into
   the window with the window's depth.
 
