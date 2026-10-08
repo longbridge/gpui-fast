@@ -644,12 +644,7 @@ impl ChatApp {
             .when(selected, |this| this.bg(code_background()))
             .hover(|style| style.bg(border()))
             .child(div().text_sm().text_color(text_color()).child(title))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(muted())
-                    .child(sentence(ix, 5)),
-            )
+            .child(div().text_xs().text_color(muted()).child(sentence(ix, 5)))
             .into_any_element()
     }
 }

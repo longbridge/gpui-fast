@@ -2866,9 +2866,12 @@ mod policies {
         // Asks for an animation frame from its prepaint, inside the scroll
         // container, without a view of its own.
         with_extra(cx, handle, || {
-            canvas(|_, window, _| window.request_animation_frame(), |_, _, _, _| {})
-                .h(px(10.))
-                .into_any_element()
+            canvas(
+                |_, window, _| window.request_animation_frame(),
+                |_, _, _, _| {},
+            )
+            .h(px(10.))
+            .into_any_element()
         });
         promote(cx, window);
         for _ in 0..4 {
