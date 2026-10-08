@@ -83,6 +83,8 @@ pub(crate) struct RasterParams {
 /// fragment's channels to before rounding them to 8-bit levels: 12 on
 /// NVIDIA, 16 on Intel (both measured, see `shade::fragment_level`). Others
 /// are taken as 16, the nearer of the two to rounding exactly.
+// The web never draws on the CPU.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 pub(crate) fn fragment_bits(vendor: u32) -> u32 {
     const NVIDIA: u32 = 0x10de;
     if vendor == NVIDIA { 12 } else { 16 }
