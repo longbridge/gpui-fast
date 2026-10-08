@@ -1766,7 +1766,9 @@ mod footprints {
 /// Tests of telling scrolls apart from other changes and of deciding what a
 /// scroll container's layer does each frame (M4).
 mod invalidation {
-    use crate::fast::layers::invalidate::{ScrollSource, render_read_offset, scrolled};
+    use crate::fast::layers::invalidate::{
+        ScrollSource, offset_read_changed, render_read_offset, scrolled,
+    };
     use crate::{
         AnyWindowHandle, App, AppContext as _, Context, Entity, GlobalElementId,
         InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollDelta,
@@ -2032,13 +2034,13 @@ mod invalidation {
     }
 
     #[crate::test]
-    fn a_render_that_asks_whether_a_list_is_scrolled_to_its_end_depends_on_its_offset(
+    fn a_render_that_asks_whether_a_list_is_scrolled_to_its_end_depends_on_the_answer(
         cx: &mut TestAppContext,
     ) {
         if !crate::fast::layers::COMPILED {
             return;
         }
-        let state = crate::ListState::new(40, crate::ListAlignment::Top, px(100.));
+        let state = crate::ListState::new(40, crate::ListAlignment::Top, px(100.)).measure_all();
         let window: AnyWindowHandle = cx
             .add_window({
                 let state = state.clone();
@@ -2047,17 +2049,33 @@ mod invalidation {
             .into();
         draw(cx, window);
         draw(cx, window);
-        let read = with_window(cx, window, |window, _| {
-            let record = window
-                .rendered_frame
-                .retained
-                .records
-                .first()
-                .expect("the root view is retained");
-            let source = ScrollSource::of_state(&state.0.borrow().version);
-            render_read_offset(&record.own_dependencies, &source)
+        let read = |cx: &mut TestAppContext| {
+            with_window(cx, window, |window, _| {
+                let record = window
+                    .rendered_frame
+                    .retained
+                    .records
+                    .first()
+                    .expect("the root view is retained");
+                let source = ScrollSource::of_state(&state.0.borrow().version);
+                (
+                    render_read_offset(&record.own_dependencies, &source),
+                    offset_read_changed(window, &record.own_dependencies),
+                )
+            })
+        };
+        assert_eq!(
+            read(cx),
+            (false, false),
+            "it read the answer, not the offset"
+        );
+        state.scroll_to(crate::ListOffset {
+            item_ix: 2,
+            offset_in_item: px(0.),
         });
-        assert!(read);
+        assert_eq!(read(cx), (false, false), "the answer is the same");
+        state.scroll_to_end();
+        assert_eq!(read(cx), (false, true), "the answer changed");
     }
 }
 

@@ -49,15 +49,23 @@ drawing as it does without layers, and how to verify and measure layers.
     each side. A view holding the list that is notified now and then, as a chat
     transcript is when it reaches its end, does not rebuild five viewports of
     rows each time.
-  - A view holding a `list` that asks only whether the list is scrolled to its
-    end (`ListState::is_scrolled_to_end`) as it renders, as a chat transcript
-    does to show a "back to bottom" button, is taken to have read only that:
-    a scroll that leaves the answer as it was does not change what the view
-    renders, and the layer is composited. Reading the list's offset itself
-    (`logical_scroll_top`, `scroll_px_offset_for_scrollbar`, ...) as it renders
-    keeps the list off its layer. `ListState::scroll_to_end` on a list already
-    at its end, as a view keeping its list there calls on every render,
-    changes nothing.
+  - A view that asks a coarse question of where a container is scrolled as
+    it renders is taken to have read only the answer
+    (`fast::layers::answers`): `ListState::is_scrolled_to_end` (a chat
+    transcript's "back to bottom" button), `ListState::item_is_above_viewport`
+    and `item_is_below_viewport` (an outline lighting the turns in view),
+    `ScrollHandle::top_item` and `bottom_item`, and
+    `UniformListScrollHandle::is_scrolled_to_end`. When the view's record is
+    judged the question is asked again of the state as it is then (of a
+    `list` being prepainted, as its prepaint began), and only another
+    answer is a change: a scroll that leaves every answer as it was neither
+    builds the view again nor keeps the container off its layer. Reading the
+    offset itself (`logical_scroll_top`, `bounds_for_item`,
+    `scroll_px_offset_for_scrollbar`, `ScrollHandle::offset`, ...) as it
+    renders still depends on the offset, as what is done with a pixel value
+    cannot be told. `ListState::scroll_to_end` on a list already at its end,
+    and `ScrollHandle::scroll_to_bottom` on a handle already at its bottom,
+    as a view keeping either there calls on every render, change nothing.
 - `GPUI_SCROLL_LAYERS=0` turns layers off for a process.
   `Window::set_scroll_layers` does the same for one window in tests.
 

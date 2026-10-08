@@ -4263,12 +4263,12 @@ impl ScrollAnchor {
 
 #[derive(Default, Debug)]
 pub(crate) struct ScrollHandleState {
-    offset: Rc<RefCell<Point<Pixels>>>,
+    pub(crate) offset: Rc<RefCell<Point<Pixels>>>,
     ongoing_scroll: Rc<RefCell<OngoingScroll>>,
-    bounds: Bounds<Pixels>,
-    max_offset: Point<Pixels>,
-    child_bounds: Vec<Bounds<Pixels>>,
-    scroll_to_bottom: bool,
+    pub(crate) bounds: Bounds<Pixels>,
+    pub(crate) max_offset: Point<Pixels>,
+    pub(crate) child_bounds: Vec<Bounds<Pixels>>,
+    pub(crate) scroll_to_bottom: bool,
     overflow: Point<Overflow>,
     active_item: Option<ScrollActiveItem>,
     pub(crate) version: crate::fast::dependencies::StateVersion,
@@ -4320,7 +4320,7 @@ impl ScrollHandle {
     /// Get the top child that's scrolled into view.
     pub fn top_item(&self) -> usize {
         let state = self.0.borrow();
-        crate::fast::layers::invalidate::note_offset_read(&state.version);
+        crate::fast::layers::answers::note_top_item(self);
         let top = state.bounds.top() - state.offset.borrow().y;
 
         match state.child_bounds.binary_search_by(|bounds| {
@@ -4340,7 +4340,7 @@ impl ScrollHandle {
     /// Get the bottom child that's scrolled into view.
     pub fn bottom_item(&self) -> usize {
         let state = self.0.borrow();
-        crate::fast::layers::invalidate::note_offset_read(&state.version);
+        crate::fast::layers::answers::note_bottom_item(self);
         let bottom = state.bounds.bottom() - state.offset.borrow().y;
 
         match state.child_bounds.binary_search_by(|bounds| {
@@ -4443,7 +4443,7 @@ impl ScrollHandle {
     /// Scrolls to the bottom.
     pub fn scroll_to_bottom(&self) {
         let mut state = self.0.borrow_mut();
-        crate::fast::dependencies::StateVersion::bump(&state.version);
+        crate::fast::layers::answers::note_scroll_to_bottom(self, &state);
         state.scroll_to_bottom = true;
     }
 
@@ -4461,6 +4461,7 @@ impl ScrollHandle {
 
     /// Get the logical scroll top, based on a child index and a pixel offset.
     pub fn logical_scroll_top(&self) -> (usize, Pixels) {
+        crate::fast::layers::invalidate::note_offset_read(&self.0.borrow().version);
         let ix = self.top_item();
         let state = self.0.borrow();
 
@@ -4476,6 +4477,7 @@ impl ScrollHandle {
 
     /// Get the logical scroll bottom, based on a child index and a pixel offset.
     pub fn logical_scroll_bottom(&self) -> (usize, Pixels) {
+        crate::fast::layers::invalidate::note_offset_read(&self.0.borrow().version);
         let ix = self.bottom_item();
         let state = self.0.borrow();
 
