@@ -425,7 +425,7 @@ fn rasterize_and_assemble(harness: &mut Harness, content: Scene, tiles: &[(i32, 
     image
 }
 
-fn assert_same_pixels(actual: &[u8], expected: &[u8], width: usize) {
+pub(crate) fn assert_same_pixels(actual: &[u8], expected: &[u8], width: usize) {
     assert_eq!(actual.len(), expected.len());
     let differing: Vec<(usize, usize)> = (0..actual.len() / 4)
         .filter(|i| actual[i * 4..i * 4 + 4] != expected[i * 4..i * 4 + 4])
@@ -622,7 +622,7 @@ fn image_tile(harness: &Harness) -> AtlasTile {
 
 // --- helpers --- //
 
-fn sp(x: f32, y: f32, w: f32, h: f32) -> Bounds<ScaledPixels> {
+pub(crate) fn sp(x: f32, y: f32, w: f32, h: f32) -> Bounds<ScaledPixels> {
     Bounds {
         origin: point(ScaledPixels(x), ScaledPixels(y)),
         size: size(ScaledPixels(w), ScaledPixels(h)),
@@ -630,13 +630,13 @@ fn sp(x: f32, y: f32, w: f32, h: f32) -> Bounds<ScaledPixels> {
 }
 
 /// A content mask that clips nothing the tests draw.
-fn no_mask() -> ContentMask<ScaledPixels> {
+pub(crate) fn no_mask() -> ContentMask<ScaledPixels> {
     ContentMask {
         bounds: sp(-10_000., -10_000., 20_000., 20_000.),
     }
 }
 
-fn quad(bounds: Bounds<ScaledPixels>, color: Hsla) -> Quad {
+pub(crate) fn quad(bounds: Bounds<ScaledPixels>, color: Hsla) -> Quad {
     Quad {
         bounds,
         content_mask: no_mask(),
@@ -645,7 +645,7 @@ fn quad(bounds: Bounds<ScaledPixels>, color: Hsla) -> Quad {
     }
 }
 
-fn device_size(width: i32, height: i32) -> Size<DevicePixels> {
+pub(crate) fn device_size(width: i32, height: i32) -> Size<DevicePixels> {
     size(DevicePixels(width), DevicePixels(height))
 }
 
@@ -834,7 +834,7 @@ fn create_target_texture(
 /// The pixels of `texture`, a BGRA texture, as RGBA bytes, row by row: copied
 /// into a staging texture and mapped, as `DirectXRenderer::render_to_image`
 /// reads the window back.
-fn read_back(
+pub(crate) fn read_back(
     device: &ID3D11Device,
     context: &ID3D11DeviceContext,
     texture: &ID3D11Texture2D,

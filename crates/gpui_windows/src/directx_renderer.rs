@@ -44,7 +44,7 @@ pub(crate) struct DirectXRenderer {
     pub(crate) globals: DirectXGlobalElements,
     pub(crate) pipelines: DirectXRenderPipelines,
     pub(crate) direct_composition: Option<DirectComposition>,
-    font_info: &'static FontInfo,
+    pub(crate) font_info: &'static FontInfo,
 
     pub(crate) width: u32,
     pub(crate) height: u32,
@@ -56,6 +56,7 @@ pub(crate) struct DirectXRenderer {
     pub(crate) skip_draws: bool,
     pub(crate) fast_frame: crate::fast::frame::FrameState,
     pub(crate) fast_composition: crate::fast::composition::DirectXComposition,
+    pub(crate) fast_partial: crate::fast::partial::PartialRedraw,
 }
 
 /// Direct3D objects
@@ -71,8 +72,8 @@ pub(crate) struct DirectXRendererDevices {
 
 pub(crate) struct DirectXResources {
     // Direct3D rendering objects
-    swap_chain: IDXGISwapChain1,
-    render_target: Option<ID3D11Texture2D>,
+    pub(crate) swap_chain: IDXGISwapChain1,
+    pub(crate) render_target: Option<ID3D11Texture2D>,
     pub(crate) render_target_view: Option<ID3D11RenderTargetView>,
 
     // Path intermediate textures (with MSAA)
@@ -82,7 +83,7 @@ pub(crate) struct DirectXResources {
     pub(crate) path_intermediate_msaa_view: Option<ID3D11RenderTargetView>,
 
     // Cached viewport
-    viewport: D3D11_VIEWPORT,
+    pub(crate) viewport: D3D11_VIEWPORT,
 }
 
 pub(crate) struct DirectXRenderPipelines {
@@ -198,6 +199,7 @@ impl DirectXRenderer {
             skip_draws: false,
             fast_frame: crate::fast::frame::FrameState::default(),
             fast_composition: crate::fast::composition::DirectXComposition::default(),
+            fast_partial: crate::fast::partial::PartialRedraw::default(),
         })
     }
 
@@ -268,6 +270,7 @@ impl DirectXRenderer {
     fn handle_device_lost_impl(&mut self, directx_devices: &DirectXDevices) -> Result<()> {
         crate::fast::layers::release_tiles(self);
         crate::fast::composition::release(self);
+        crate::fast::partial::release(self);
         let disable_direct_composition = self.direct_composition.is_none();
 
         unsafe {
@@ -345,8 +348,7 @@ impl DirectXRenderer {
             // and so likely do not have the textures anymore that are required for drawing
             return Ok(());
         }
-        self.render(scene, background_appearance)?;
-        self.present()
+        crate::fast::partial::draw(self, scene, background_appearance)
     }
 
     /// Clear the render target for `background_appearance` and encode every

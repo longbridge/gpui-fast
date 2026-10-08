@@ -20,4 +20,4 @@ pub(crate) fn release_tiles(renderer: &mut DirectXRenderer) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -59,6 +59,10 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test -p gpui_windows --features test-support fast::layers -- --nocapture
 
+      - name: Test partial redraws on Direct3D
+        if: runner.os == 'Windows'
+        run: cargo test -p gpui_windows --features test-support fast::partial -- --nocapture
+
       - name: Check gpui_perf
         run: cargo check -p gpui_perf --all-targets
 
