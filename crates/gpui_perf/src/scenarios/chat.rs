@@ -26,6 +26,9 @@
 //!   to its end, to show a "back to bottom" button, which it fades in and
 //!   out a step a frame; `chat-scroll-no-button` has no button, to tell what
 //!   it costs.
+//!
+//! `scenarios::chat_patterns` builds transcripts mirroring real chat views
+//! from this one's message bodies.
 
 use gpui::{
     AnyElement, AnyView, App, Context, Entity, FontWeight, Hsla, ListAlignment, ListState,
@@ -47,27 +50,27 @@ const FRAMES_PER_SWEEP: usize = 120;
 /// else, in frames: every two seconds at 60 frames a second.
 const NOTIFY_EVERY_FRAMES: usize = 120;
 
-fn color(hue: f32, saturation: f32, lightness: f32) -> Hsla {
+pub(crate) fn color(hue: f32, saturation: f32, lightness: f32) -> Hsla {
     hsla(hue / 360., saturation, lightness, 1.)
 }
 
-fn text_color() -> Hsla {
+pub(crate) fn text_color() -> Hsla {
     color(220., 0.2, 0.15)
 }
 
-fn muted() -> Hsla {
+pub(crate) fn muted() -> Hsla {
     color(220., 0.1, 0.45)
 }
 
-fn border() -> Hsla {
+pub(crate) fn border() -> Hsla {
     color(220., 0.13, 0.88)
 }
 
-fn code_background() -> Hsla {
+pub(crate) fn code_background() -> Hsla {
     color(220., 0.2, 0.95)
 }
 
-fn link() -> Hsla {
+pub(crate) fn link() -> Hsla {
     color(215., 0.8, 0.45)
 }
 
@@ -195,8 +198,19 @@ fn blocks(ix: usize) -> Vec<Block> {
 pub struct MessageBody {
     blocks: Vec<Block>,
     /// Whether the body rendered, and whether it was parsed since.
-    rendered: bool,
-    parsed: bool,
+    pub(crate) rendered: bool,
+    pub(crate) parsed: bool,
+}
+
+impl MessageBody {
+    /// The body of message `ix`, not rendered yet.
+    pub(crate) fn new(ix: usize) -> Self {
+        Self {
+            blocks: blocks(ix),
+            rendered: false,
+            parsed: false,
+        }
+    }
 }
 
 fn styled_paragraph(text: &SharedString, runs: &[(std::ops::Range<usize>, Style)]) -> StyledText {
@@ -310,8 +324,8 @@ pub struct Transcript {
 /// What an input component keeps of the options it is rendered with.
 #[derive(Default)]
 pub struct ComposerInput {
-    placeholder: SharedString,
-    disabled: bool,
+    pub(crate) placeholder: SharedString,
+    pub(crate) disabled: bool,
 }
 
 /// How much the "back to bottom" button fades in or out per frame.
