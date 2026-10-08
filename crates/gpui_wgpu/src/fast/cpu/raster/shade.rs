@@ -3,6 +3,8 @@
 //! applied to 8-bit pixels as the GPU applies them to its `Bgra8Unorm`
 //! target.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use gpui::{Background, Bounds, Corners, Hsla, LinearColorStop, ScaledPixels};
 
 /// A color or a premultiplied color: red, green, blue, alpha.
@@ -428,6 +430,13 @@ fn raw_background(background: &Background) -> RawBackground {
     unsafe { std::mem::transmute_copy::<Background, RawBackground>(background) }
 }
 
+/// The color of a checkerboard background, for tests.
+#[cfg(test)]
+pub(super) fn checkerboard_color(background: &Background) -> Option<Hsla> {
+    let raw = raw_background(background);
+    (raw.tag == 3).then_some(raw.solid)
+}
+
 /// A background ready to shade: `prepare_gradient_color`'s results, and
 /// what `gradient_color` works out from the background alone.
 #[derive(Clone, Copy)]
@@ -555,31 +564,52 @@ pub(super) static UNORM8: [f32; 256] = {
     table
 };
 
+/// Whether [`fragment_level`] truncates to 16 bits rather than 12: the
+/// `RasterParams::fragment_bits` of the scene being drawn (one GPU per
+/// process).
+static FRAGMENT_BITS_16: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn set_fragment_bits(bits: u32) {
+    FRAGMENT_BITS_16.store(bits >= 16, Ordering::Relaxed);
+}
+
 /// The level of the 8-bit target a fragment's channel is blended at.
 ///
 /// The GPU does not blend into an 8-bit target in `f32`: it converts each
-/// channel of the fragment to 12 bits of fixed point, truncating, and that to
-/// an 8-bit level, rounding; it then blends levels as integers, rounding the
-/// sum to the nearest level. Measured on NVIDIA, this reproduces 16382 of
+/// channel of the fragment to fixed point, truncating, and that to an 8-bit
+/// level, rounding; it then blends levels as integers, rounding the sum to
+/// the nearest level. NVIDIA truncates to 12 bits: this reproduces 16382 of
 /// 16384 blended channels exactly (and the other two a level apart), where
-/// blending in `f32` misses one in nine.
+/// blending in `f32` misses one in nine. Intel (Mesa) truncates to 16 bits,
+/// reproduced exactly.
+#[inline]
+pub(super) fn fragment_level(x: f32) -> u32 {
+    level_of(x, FRAGMENT_BITS_16.load(Ordering::Relaxed))
+}
+
 #[inline]
 #[allow(clippy::manual_clamp)]
-pub(super) fn fragment_level(x: f32) -> u32 {
+fn level_of(x: f32, bits_16: bool) -> u32 {
     // NaN, which `max` drops, ends as 0.
     let x = x.max(0.).min(1.);
-    let fixed = (x * 4096.0) as u32;
-    ((fixed * 255 + 2048) >> 12).min(255)
+    if bits_16 {
+        let fixed = (x * 65536.0) as u32;
+        ((fixed * 255 + 32768) >> 16).min(255)
+    } else {
+        let fixed = (x * 4096.0) as u32;
+        ((fixed * 255 + 2048) >> 12).min(255)
+    }
 }
 
 /// A fragment's channels as levels: red, green, blue, alpha.
 #[inline]
 pub(super) fn fragment_levels(src: V4) -> [u32; 4] {
+    let bits_16 = FRAGMENT_BITS_16.load(Ordering::Relaxed);
     [
-        fragment_level(src[0]),
-        fragment_level(src[1]),
-        fragment_level(src[2]),
-        fragment_level(src[3]),
+        level_of(src[0], bits_16),
+        level_of(src[1], bits_16),
+        level_of(src[2], bits_16),
+        level_of(src[3], bits_16),
     ]
 }
 

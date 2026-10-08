@@ -381,6 +381,7 @@ const PARAMS: RasterParams = RasterParams {
     premultiplied_alpha: false,
     dual_source_blending: true,
     path_sample_count: 4,
+    fragment_bits: 12,
 };
 
 fn scene(number: u64, since: u64, damage: &[Bounds<DevicePixels>]) -> Scene {

@@ -222,7 +222,7 @@ pub(crate) struct WgpuRendererCore {
     pub(crate) rendering_params: RenderingParameters,
     pub(crate) is_bgr: bool,
     pub(crate) dual_source_blending: bool,
-    adapter_info: wgpu::AdapterInfo,
+    pub(crate) adapter_info: wgpu::AdapterInfo,
     pub(crate) target_format: wgpu::TextureFormat,
     max_texture_size: u32,
     pub(crate) fast_frame: crate::fast::frame::FrameState,

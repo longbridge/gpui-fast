@@ -74,6 +74,18 @@ pub(crate) struct RasterParams {
     /// The samples per pixel paths are rasterized with. Only 4 is
     /// reproduced; other counts make scenes with paths need the GPU.
     pub(crate) path_sample_count: u32,
+    /// The bits of fixed point the GPU truncates a fragment's channels to
+    /// before rounding them to the target's levels ([`fragment_bits`]).
+    pub(crate) fragment_bits: u32,
+}
+
+/// The bits of fixed point a GPU of PCI vendor `vendor` truncates a
+/// fragment's channels to before rounding them to 8-bit levels: 12 on
+/// NVIDIA, 16 on Intel (both measured, see `shade::fragment_level`). Others
+/// are taken as 16, the nearer of the two to rounding exactly.
+pub(crate) fn fragment_bits(vendor: u32) -> u32 {
+    const NVIDIA: u32 = 0x10de;
+    if vendor == NVIDIA { 12 } else { 16 }
 }
 
 /// The pixels of an atlas texture, as they were uploaded.
@@ -147,6 +159,7 @@ pub(crate) fn draw(
     if regions.is_empty() {
         return;
     }
+    shade::set_fragment_bits(params.fragment_bits);
 
     let tile_scenes = plan::tile_scenes(scene, &regions);
     let tiles = plan::tile_plans(scene, &tile_scenes);

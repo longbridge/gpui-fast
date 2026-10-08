@@ -658,6 +658,7 @@ pub(crate) fn draw(renderer: &mut WgpuRenderer, scene: &Scene) -> Option<bool> {
                 == wgpu::CompositeAlphaMode::PreMultiplied,
             dual_source_blending: core.dual_source_blending,
             path_sample_count: core.rendering_params.path_sample_count,
+            fragment_bits: raster::fragment_bits(core.adapter_info.vendor),
         };
         let now = Instant::now();
         match present_mode {
