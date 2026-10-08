@@ -9,7 +9,7 @@ use metal::Device;
 use parking_lot::Mutex;
 use std::borrow::Cow;
 
-pub struct MetalAtlas(Mutex<AtlasState<MetalAtlasTextures>>);
+pub struct MetalAtlas(pub(crate) Mutex<AtlasState<MetalAtlasTextures>>);
 
 impl MetalAtlas {
     pub(crate) fn new(device: Device, supports_shared_storage: bool) -> Self {
@@ -18,6 +18,7 @@ impl MetalAtlas {
             supports_shared_storage,
             monochrome_textures: Default::default(),
             polychrome_textures: Default::default(),
+            fast_writes: crate::fast::partial::AtlasWrites::default(),
         })))
     }
 
@@ -30,11 +31,12 @@ impl MetalAtlas {
     }
 }
 
-struct MetalAtlasTextures {
+pub(crate) struct MetalAtlasTextures {
     device: AssertSend<Device>,
     supports_shared_storage: bool,
     monochrome_textures: AtlasTextureList<MetalAtlasTexture>,
     polychrome_textures: AtlasTextureList<MetalAtlasTexture>,
+    pub(crate) fast_writes: crate::fast::partial::AtlasWrites,
 }
 
 impl PlatformAtlas for MetalAtlas {
@@ -63,6 +65,7 @@ impl AtlasBackend for MetalAtlasTextures {
             .texture(tile.texture_id)
             .context("allocated tile refers to a missing texture")?;
         texture.upload(tile.bounds, bytes);
+        crate::fast::partial::AtlasWrites::note(&mut self.fast_writes);
         Ok(tile)
     }
 

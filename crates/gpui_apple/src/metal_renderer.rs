@@ -140,6 +140,7 @@ pub struct MetalRenderer {
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     headless_render_target: Option<metal::Texture>,
     pub(crate) fast_layers: crate::fast::layers::TileCache,
+    pub(crate) fast_partial: crate::fast::partial::PartialRedraw,
 }
 
 #[repr(C)]
@@ -396,6 +397,7 @@ impl MetalRenderer {
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
             fast_layers: crate::fast::layers::TileCache::default(),
+            fast_partial: crate::fast::partial::PartialRedraw::default(),
         }
     }
 
@@ -503,7 +505,7 @@ impl MetalRenderer {
             return;
         };
 
-        let command_buffer = match self.render_frame(scene, drawable.texture(), viewport_size) {
+        let command_buffer = match crate::fast::partial::render_frame(self, scene, drawable.texture(), viewport_size) {
             Ok(command_buffer) => command_buffer,
             Err(error) => {
                 log::error!("failed to render: {error:#}");
@@ -521,7 +523,7 @@ impl MetalRenderer {
         }
     }
 
-    fn render_frame(
+    pub(crate) fn render_frame(
         &mut self,
         scene: &Scene,
         texture: &metal::TextureRef,
@@ -1312,7 +1314,7 @@ pub(crate) fn new_command_encoder_for_texture<'a>(
 }
 
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
-fn read_texture_to_image(texture: &metal::TextureRef) -> Result<RgbaImage> {
+pub(crate) fn read_texture_to_image(texture: &metal::TextureRef) -> Result<RgbaImage> {
     let width = texture.width() as u32;
     let height = texture.height() as u32;
     let bytes_per_row = width as usize * 4;
