@@ -7,7 +7,8 @@ A performance-focused fork of [Zed's GPUI](https://gpui.rs) with incremental ren
 - **[Retained Mode](#retained-mode)** reuses unchanged views, layout nodes and text measurements. Scroll layers reuse cached GPU tiles and list rows while scrolling, on macOS, Linux and Windows.
 - **[Window Composition](#window-composition)** embeds native content, such as web views, while keeping GPUI menus, popovers and dialogs above it, on macOS, Windows and Linux.
 - **[Adaptive rendering](#adaptive-rendering)** draws frames that change little on the CPU, only where they change, without waking the GPU (Linux).
-- **[Scene damage](docs/adaptive-rendering.md#scene-damage)** works out, for every frame, exactly which pixels it can change from the frame before, on every platform. Adaptive rendering is built on it.
+- **[Partial redraws](docs/adaptive-rendering.md#partial-redraws-on-macos-and-windows)** redraw only the changed rectangles of a frame on the GPU, and on Windows present only those to DWM (macOS, Windows).
+- **[Scene damage](docs/adaptive-rendering.md#scene-damage)** works out, for every frame, exactly which pixels it can change from the frame before, on every platform. It drives adaptive rendering on Linux and partial redraws on macOS and Windows.
 
 ## Retained Mode
 
@@ -53,7 +54,11 @@ At the same or lower CPU cost, the application stops using the GPU for small upd
 
 CPU use goes down too: drawing a few hundred pixels on the CPU costs less than recording and submitting a whole-window GPU frame.
 
-The benefit is keeping the GPU idle, which mainly saves power and heat. It is largest on laptops and discrete GPUs, where every wake-up raises the GPU's clocks. Adaptive rendering does not make an application faster. Frame rate, latency and scrolling are unchanged. The compositor still composites the window, so its GPU time drops only for animations. Power savings have not been measured yet. See [Adaptive rendering](docs/adaptive-rendering.md) for the full measurements, including X11, and for the environment variables.
+The benefit is keeping the GPU idle, which mainly saves power and heat. It is largest on laptops and discrete GPUs, where every wake-up raises the GPU's clocks. Adaptive rendering does not make an application faster. Frame rate, latency and scrolling are unchanged. The compositor still composites the window, so its GPU time drops only for animations. Power savings have not been measured yet.
+
+On macOS and Windows, GPUI Fast uses the same damage on the GPU instead: each frame redraws only its changed rectangles into a frame it keeps, and on Windows presents only those rectangles to DWM. The GPU still wakes for every frame, so the saving is smaller and has not been measured yet; CI checks that the pixels match whole frames exactly.
+
+See [Adaptive rendering](docs/adaptive-rendering.md) for the full measurements, including X11, and for the environment variables.
 
 ## Using it
 

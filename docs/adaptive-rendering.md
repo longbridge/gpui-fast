@@ -1,4 +1,4 @@
-# Scene damage and adaptive CPU rendering
+# Scene damage, adaptive CPU rendering and partial redraws
 
 Retained views, retained layout and scroll layers make the *logical* work of
 a frame proportional to what changed. The *physical* work was not: every
@@ -7,7 +7,7 @@ render pass over the whole window and presented it on the GPU. A blinking
 caret, a hover, a ticking clock or one quote changing in a table woke the GPU
 for a whole-window frame.
 
-Two mechanisms change that:
+Three mechanisms change that:
 
 1. **Scene damage** (`crates/gpui/src/fast/damage.rs`, every platform). Each
    finished scene carries the rectangles, in device pixels, where it can draw
@@ -18,6 +18,10 @@ Two mechanisms change that:
    shown without drawing the scene on the GPU. Frames that change much of the
    window, and bursts of frames whose CPU drawing costs too much, are drawn on
    the GPU as before.
+3. **Partial redraws** (`crates/gpui_apple/src/fast/partial.rs`,
+   `crates/gpui_windows/src/fast/partial.rs`: Metal on macOS, Direct3D 11 on
+   Windows). The GPU still draws every frame, but only inside its damage,
+   into a frame it keeps; Windows also tells DWM which rectangles changed.
 
 The design is in
 [`superpowers/specs/2026-10-08-damage-and-adaptive-cpu-design.md`](superpowers/specs/2026-10-08-damage-and-adaptive-cpu-design.md).
@@ -186,6 +190,82 @@ opacity 0.5 in the `Hover` scenario, native frames match blit ones (36
 pixels apart by more than 4 levels in a 2388×1488 window, against 54,095
 without the multiplier).
 
+## Partial redraws on macOS and Windows
+
+The Metal and Direct3D 11 renderers use the damage on the GPU. Each keeps a
+**canvas**: a texture of the window's size, drawn into every frame and
+holding the last frame drawn, with the number of its scene. A frame is
+drawn whole (cleared, every batch drawn, as upstream draws it) or
+**partially**: only inside its damage rectangles, over what the canvas
+holds. The canvas is then copied into what the window presents.
+
+### When a frame is partial
+
+A frame is drawn whole when:
+
+- there is no canvas of the window's size: the first frame, a resize, a lost
+  device (Windows), a canvas drawn for the other alpha mode after the
+  window's transparency changed (macOS);
+- the scene is not numbered, or its damage is not relative to the scene the
+  canvas holds (`since` is not the scene drawn last): a frame dropped for
+  want of a drawable, a composed window's replayed scenes, frames drawn
+  through `fast::composition`, which do not touch the canvas;
+- an atlas tile was written since the last frame, as atlas content is
+  outside the scene. macOS counts the writes per atlas
+  (`fast::partial::AtlasWrites`), Windows across the process (so a write in
+  any window draws every window whole once);
+- the scene has surfaces (video frames);
+- its damage covers more than half the window;
+- on Windows, a graphics debugger is capturing (upstream's labeled loop then
+  draws the frame).
+
+On macOS a scene drawn again (its number is the one the canvas holds) is
+shown as the canvas holds it; on either platform a frame whose damage is
+empty draws nothing and shows the canvas.
+
+### Drawing and presenting
+
+A partial frame keeps the canvas's content and, for each damage rectangle,
+clears the rectangle to the color a whole frame is cleared to and draws
+every batch of the scene, scissored to it. Primitives outside a rectangle
+cost vertex work only.
+
+- **Windows**: the rectangles are cleared with `ClearView` and drawn with a
+  copy of the renderer's rasterizer state that has the scissor test on
+  (`RSSetScissorRects` per rectangle). The canvas is lent to the renderer as
+  its render target view, so paths, which bind it again after their
+  intermediate pass, draw into it too. The whole canvas is then copied into
+  the back buffer and presented with `Present1` and the damage as dirty
+  rectangles, so DWM recomposes only those. (A flip-sequential back buffer
+  holds a frame several presents old; the copy keeps every back buffer
+  right whatever DXGI does with them.)
+- **macOS**: each render pass loads the canvas and draws every damage
+  rectangle, scissored to it: a small fill pipeline clears the rectangle,
+  then the batches draw. Paths are rasterized into their intermediate
+  texture whole and composited through the scissor. A full-screen triangle
+  that reads the canvas texel for texel copies it into the drawable (a
+  `CAMetalLayer`'s drawables are framebuffer-only, so a blit cannot), and the
+  drawable is presented as before. Core Animation has no partial present:
+  the compositor takes the whole drawable.
+
+`render_to_image` and the other headless paths draw as upstream does, into
+their own targets.
+
+### What it saves, and what it costs
+
+- The GPU still wakes for every frame. A partial frame saves fragment work
+  outside the damage and, on Windows, DWM's recomposition of the rest of the
+  window.
+- Every frame, whole or partial, pays for the canvas (one window-sized
+  texture) and its copy into the drawable or back buffer.
+- On Apple's tile-based GPUs a render pass that loads the canvas reads and
+  writes the whole attachment, which can cost as much as the fragment work it
+  saves; each path group starts another pass.
+- Neither has been measured on real hardware yet. CI checks their pixels
+  (see Verifying). Measure with `GPUI_RENDER_STATS=1`, which prints how many
+  frames were partial and why the others were not, and with the platform's
+  GPU tools (Instruments, PIX or GPUView).
+
 ## Controls
 
 - `GPUI_CPU_RENDER=0`: never draw on the CPU (no presenter kept, no atlas
@@ -204,6 +284,11 @@ without the multiplier).
   atlas writes); it is logged with the frame's damage and region and
   counted in the render stats (`verify_n`, `verify_bad`, `verify_bad_px`).
   It costs a whole CPU frame per frame: for checking real applications.
+- `GPUI_PARTIAL_REDRAW=0` (macOS, Windows): draw every frame whole, as
+  upstream does, without the canvas.
+- On macOS and Windows, `GPUI_RENDER_STATS=1` prints, every second, each
+  window's `partial_frames`, `full_frames`, `partial_px` (the pixels the
+  partial frames drew) and `why_<reason>` counts of whole frames.
 
 ## Verifying
 
@@ -218,6 +303,21 @@ without the multiplier).
 - `cargo test -p gpui_wgpu fast::adaptive`: the policy with a fake clock,
   presenter call order, refusals, the blit path read back exactly.
 - `cargo test -p gpui_linux cpu_present`: the presenters' bookkeeping.
+- `cargo test -p gpui_apple fast::partial` (Metal; CI runs it on macOS):
+  a scene drawn partially over the canvas of the scene before it equals the
+  scene drawn whole on a fresh renderer, pixel for pixel, opaque and
+  transparent (a quad, a moving glyph, a growing shadow, an image, a path
+  across the damage's edges, two rectangles); several partial frames in a
+  row stay exact; empty damage leaves the canvas as it was; frames that are
+  not comparable, follow an atlas write, a resize or a transparency change
+  draw whole, and partial frames resume after them; the rules on their own.
+- `cargo test -p gpui_windows --features test-support fast::partial`
+  (Direct3D 11; CI runs it on Windows, on the runner's device): the
+  renderer's devices, pipelines and resources, on a composition swap chain
+  that needs no window, draw a scene of every primitive kind, paths included,
+  into the damage of a canvas holding the scene before, and it equals the
+  scene drawn whole, pixel for pixel, opaque and transparent; empty damage
+  leaves the canvas as it was; the rules on their own.
 - In a real application: `GPUI_CPU_VERIFY=1 GPUI_RENDER_STATS=1`, and look
   for `verify_bad=` other than 0. Every `gpui_perf --idle` scenario, in a
   tiled and in a 1600×1000 window, natively and by blit, checks clean
