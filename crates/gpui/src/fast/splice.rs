@@ -328,6 +328,19 @@ impl Window {
                 {
                     return None;
                 }
+                // A splice skips the ancestor's prepaint. If that prepaint
+                // places a separate layout root, rebuilding a gap under it
+                // would leave its new measurements outside the layout pass.
+                // Fall back before claiming nodes or building any gaps so
+                // the ancestor can lay out and place that root itself.
+                if !self
+                    .layout_engine
+                    .as_ref()
+                    .unwrap()
+                    .layout_reaches(layout.root, nested.layout.as_ref().unwrap().root)
+                {
+                    return None;
+                }
                 gaps.push(index);
             }
             index += nested.nested + 1;

@@ -454,6 +454,23 @@ impl TaffyLayoutEngine {
             .collect()
     }
 
+    /// Whether computing layout at `root` reaches `id`. Element ancestry
+    /// does not imply layout ancestry: list items and other children placed
+    /// with `prepaint_as_root` belong to separate Taffy trees.
+    pub(crate) fn layout_reaches(&self, root: LayoutId, id: LayoutId) -> bool {
+        let root = root.into();
+        let mut node = id.into();
+        loop {
+            if node == root {
+                return true;
+            }
+            let Some(parent) = self.taffy.parent(node) else {
+                return false;
+            };
+            node = parent;
+        }
+    }
+
     /// Whether the nodes [`Self::retained_layouts`] returned still have the
     /// layouts they had then.
     pub(crate) fn layouts_unchanged(&self, layouts: &[(LayoutId, taffy::Layout)]) -> bool {

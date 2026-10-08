@@ -1900,3 +1900,162 @@ fn a_view_around_a_notified_nested_view_is_drawn_around_it() {
         assert_eq!(last, draw(&mut cx), "cached: {cached}");
     }
 }
+
+/// A child outside its parent's Taffy tree, laid out during prepaint like
+/// a uniform_list item. Keeping its parent must still run this placement.
+struct RootPlacer(crate::AnyElement);
+
+impl IntoElement for RootPlacer {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl crate::Element for RootPlacer {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+    fn id(&self) -> Option<crate::ElementId> {
+        None
+    }
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+    fn request_layout(
+        &mut self,
+        _: Option<&crate::GlobalElementId>,
+        _: Option<&crate::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut crate::App,
+    ) -> (crate::LayoutId, ()) {
+        let mut style = crate::Style::default();
+        style.size.width = crate::relative(1.).into();
+        style.size.height = crate::relative(1.).into();
+        (window.request_layout(style, None, cx), ())
+    }
+    fn prepaint(
+        &mut self,
+        _: Option<&crate::GlobalElementId>,
+        _: Option<&crate::InspectorElementId>,
+        bounds: crate::Bounds<crate::Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut crate::App,
+    ) {
+        self.0
+            .prepaint_as_root(bounds.origin, bounds.size.into(), window, cx);
+    }
+    fn paint(
+        &mut self,
+        _: Option<&crate::GlobalElementId>,
+        _: Option<&crate::InspectorElementId>,
+        _: crate::Bounds<crate::Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut crate::App,
+    ) {
+        self.0.paint(window, cx);
+    }
+}
+
+struct RootPlacedStatus(crate::SharedString);
+impl Render for RootPlacedStatus {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(self.0.clone())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StatusPlacement {
+    Flow,
+    Root,
+    List,
+}
+
+struct StatusHost {
+    status: Entity<RootPlacedStatus>,
+    placement: StatusPlacement,
+}
+impl Render for StatusHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let child = div()
+            .size_full()
+            .child(self.status.clone())
+            .into_any_element();
+        let body = match self.placement {
+            StatusPlacement::Flow => child,
+            StatusPlacement::Root => RootPlacer(child).into_any_element(),
+            StatusPlacement::List => {
+                let status = self.status.clone();
+                crate::uniform_list("status-list", 1, move |_, _, _| {
+                    vec![div().h(px(40.)).child(status.clone()).into_any_element()]
+                })
+                .size_full()
+                .into_any_element()
+            }
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child("header")
+            .child(div().flex_1().child(body))
+    }
+}
+
+fn status_change_at_placement(placement: StatusPlacement) {
+    let mut cx = TestAppContext::single();
+    let status = cx.new(|_| RootPlacedStatus("Starting…".into()));
+    // The shell exercises a splice around another splice, as in the real
+    // application's WindowBorder / WorkspaceView / editor hierarchy.
+    let (window, _) = shell(&mut cx, {
+        let status = status.clone();
+        move |cx| cx.new(|_| StatusHost { status, placement }).into()
+    });
+    let before = draw_shell(&mut cx, window);
+    for text in [
+        "Session unavailable: a longer status",
+        "Ready",
+        "Another longer status",
+    ] {
+        status.update(&mut cx, |status, cx| {
+            status.0 = text.into();
+            cx.notify();
+        });
+        let changed = draw_shell(&mut cx, window);
+        assert_ne!(before, changed);
+        cx.update_window(window.into(), |_, window, _| {
+            window.set_view_retention(false)
+        })
+        .unwrap();
+        assert_eq!(
+            changed,
+            draw_shell(&mut cx, window),
+            "retained output must match a full render"
+        );
+        cx.update_window(window.into(), |_, window, _| {
+            window.set_view_retention(true)
+        })
+        .unwrap();
+        draw_shell(&mut cx, window);
+    }
+}
+
+#[test]
+fn status_change_in_normal_flow_is_measured() {
+    status_change_at_placement(StatusPlacement::Flow);
+}
+#[test]
+fn status_change_under_prepaint_as_root_is_measured() {
+    status_change_at_placement(StatusPlacement::Root);
+}
+#[test]
+fn status_change_in_uniform_list_is_measured() {
+    status_change_at_placement(StatusPlacement::List);
+}
