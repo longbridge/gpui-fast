@@ -10,12 +10,14 @@
 //! (a blit cannot write a drawable: a `CAMetalLayer`'s drawables are
 //! framebuffer-only), and presented as before.
 //!
-//! A partial frame draws, for each damage rectangle, a render pass that loads
-//! the canvas, scissors every main encoder to the rectangle, fills it with the
-//! clear color a whole frame starts from, and draws every batch of the scene
-//! (`fast::paths::encode_pass`). Paths are rasterized into their intermediate
+//! A partial frame loads the canvas in one render pass (one more per later
+//! group of path batches, as a whole frame) and, in each, scissors to every
+//! damage rectangle in turn, fills it with the clear color a whole frame
+//! starts from in the first pass, and draws the pass's batches of the scene
+//! (`fast::paths::encode_pass`). Overlapping rectangles are merged first, so
+//! no pixel is drawn twice. Paths are rasterized into their intermediate
 //! texture whole, as in a whole frame, and composited through the scissor, so
-//! a pixel inside the rectangle comes out as a whole frame draws it.
+//! a pixel inside a rectangle comes out as a whole frame draws it.
 //!
 //! A scene drawn again (the number the canvas holds) is shown as the canvas
 //! holds it.
@@ -214,17 +216,42 @@ pub(crate) fn decide(frame: &Frame) -> Plan {
         origin: point(DevicePixels(0), DevicePixels(0)),
         size: frame.size,
     };
-    let rects: Vec<_> = frame
-        .damage
-        .iter()
-        .map(|rect| rect.intersect(&window))
-        .filter(|rect| rect.size.width.0 > 0 && rect.size.height.0 > 0)
-        .collect();
+    let rects = disjoint(
+        frame
+            .damage
+            .iter()
+            .map(|rect| rect.intersect(&window))
+            .filter(|rect| rect.size.width.0 > 0 && rect.size.height.0 > 0)
+            .collect(),
+    );
     let damaged: i64 = rects.iter().map(area).sum();
     if damaged * 2 > area(&window) {
         return Plan::Full(FullReason::LargeDamage);
     }
     Plan::Partial(rects)
+}
+
+/// `rects` with every two that overlap replaced by their union, until none
+/// overlap: a partial frame draws each rectangle once through the scene, and
+/// a pixel in two would be drawn twice. Scene damage merges rectangles that
+/// come near each other, so this rarely merges anything.
+fn disjoint(mut rects: Vec<Bounds<DevicePixels>>) -> Vec<Bounds<DevicePixels>> {
+    let overlap = |a: &Bounds<DevicePixels>, b: &Bounds<DevicePixels>| {
+        let i = a.intersect(b);
+        i.size.width.0 > 0 && i.size.height.0 > 0
+    };
+    'merge: loop {
+        for i in 0..rects.len() {
+            for j in i + 1..rects.len() {
+                if overlap(&rects[i], &rects[j]) {
+                    let other = rects.swap_remove(j);
+                    rects[i] = rects[i].union(&other);
+                    continue 'merge;
+                }
+            }
+        }
+        return rects;
+    }
 }
 
 fn area(rect: &Bounds<DevicePixels>) -> i64 {
@@ -262,6 +289,9 @@ pub(crate) struct PartialRedraw {
     /// The last frame's plan, for tests.
     #[cfg(test)]
     pub(crate) last_plan: Option<Plan>,
+    /// The main passes over the canvas the last frame encoded, for tests.
+    #[cfg(test)]
+    pub(crate) main_passes: usize,
 }
 
 /// Forwarded to by `MetalRenderer::draw`: draws `scene` into the canvas, as
@@ -324,6 +354,10 @@ pub(crate) fn render_frame(
     };
     // Until the frame is drawn, the canvas holds no known scene.
     this.last_drawn = 0;
+    #[cfg(test)]
+    {
+        this.main_passes = 0;
+    }
 
     let result = renderer.render_frame(scene, &canvas, viewport_size);
     let this = &mut renderer.fast_partial;
@@ -378,7 +412,7 @@ pub(crate) fn draw_pending(
         );
         encoder.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 3);
     };
-    for rect in pending.rects {
+    if !pending.rects.is_empty() {
         encode_pass(
             renderer,
             scene,
@@ -388,7 +422,10 @@ pub(crate) fn draw_pending(
             texture,
             viewport_size,
             command_buffer,
-            PassStart::Scissor { rect, fill: &fill },
+            PassStart::Scissor {
+                rects: &pending.rects,
+                fill: &fill,
+            },
         )?;
     }
     Ok(Some(command_buffer.to_owned()))

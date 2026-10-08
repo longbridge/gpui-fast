@@ -96,10 +96,11 @@ pub(crate) fn draw_primitives_to_texture(
 pub(crate) enum PassStart<'a> {
     /// The whole texture cleared to this color.
     Clear(metal::MTLClearColor),
-    /// The texture loaded, every main encoder scissored to `rect`, and `rect`
-    /// filled first by `fill` (see `fast::partial`).
+    /// The texture loaded, and only `rects` drawn: each filled first by
+    /// `fill`, then drawn through, scissored to it (see `fast::partial`).
+    /// The rectangles must not overlap.
     Scissor {
-        rect: metal::MTLScissorRect,
+        rects: &'a [metal::MTLScissorRect],
         fill: &'a dyn Fn(&metal::RenderCommandEncoderRef),
     },
 }
@@ -119,8 +120,8 @@ impl PathPlan {
     }
 }
 
-/// A main render pass encoder on `texture`, as `start` begins it: cleared,
-/// or loaded and scissored.
+/// A main render pass encoder on `texture`: cleared on the frame's first
+/// pass when `start` clears, loaded otherwise.
 fn begin_main<'a>(
     command_buffer: &'a metal::CommandBufferRef,
     texture: &'a metal::TextureRef,
@@ -128,29 +129,88 @@ fn begin_main<'a>(
     start: &PassStart,
     first: bool,
 ) -> &'a metal::RenderCommandEncoderRef {
-    match start {
-        PassStart::Clear(color) => new_command_encoder_for_texture(
-            command_buffer,
-            texture,
-            viewport_size,
-            first.then_some(*color),
-        ),
-        PassStart::Scissor { rect, fill } => {
-            let encoder =
-                new_command_encoder_for_texture(command_buffer, texture, viewport_size, None);
-            encoder.set_scissor_rect(*rect);
-            if first {
-                fill(encoder);
+    let clear = match start {
+        PassStart::Clear(color) => first.then_some(*color),
+        PassStart::Scissor { .. } => None,
+    };
+    new_command_encoder_for_texture(command_buffer, texture, viewport_size, clear)
+}
+
+/// A scene's batch, and for a path batch, its plan.
+struct Item<'a> {
+    batch: PrimitiveBatch,
+    path: Option<&'a PathBatch>,
+}
+
+/// `batch` again: `PrimitiveBatch` is not `Clone`.
+fn copy_batch(batch: &PrimitiveBatch) -> PrimitiveBatch {
+    match batch {
+        PrimitiveBatch::Shadows(range) => PrimitiveBatch::Shadows(range.clone()),
+        PrimitiveBatch::Quads(range) => PrimitiveBatch::Quads(range.clone()),
+        PrimitiveBatch::Paths(range) => PrimitiveBatch::Paths(range.clone()),
+        PrimitiveBatch::Underlines(range) => PrimitiveBatch::Underlines(range.clone()),
+        PrimitiveBatch::MonochromeSprites { texture_id, range } => {
+            PrimitiveBatch::MonochromeSprites {
+                texture_id: *texture_id,
+                range: range.clone(),
             }
-            encoder
+        }
+        PrimitiveBatch::SubpixelSprites { texture_id, range } => PrimitiveBatch::SubpixelSprites {
+            texture_id: *texture_id,
+            range: range.clone(),
+        },
+        PrimitiveBatch::PolychromeSprites { texture_id, range } => {
+            PrimitiveBatch::PolychromeSprites {
+                texture_id: *texture_id,
+                range: range.clone(),
+            }
+        }
+        PrimitiveBatch::Surfaces(range) => PrimitiveBatch::Surfaces(range.clone()),
+    }
+}
+
+/// The scene's batches, cut into segments that each draw in one main pass:
+/// a new segment begins at every path batch that begins a group past the
+/// first, whose group is rasterized while no main pass is open.
+fn segments<'a>(scene: &Scene, path_batches: &'a [PathBatch]) -> Vec<Vec<Item<'a>>> {
+    let mut segments = vec![Vec::new()];
+    let mut path_batches = path_batches.iter().enumerate();
+    for batch in scene.batches() {
+        let path = match &batch {
+            PrimitiveBatch::Paths(range) if range.is_empty() => continue,
+            PrimitiveBatch::Paths(_) => {
+                let Some((index, path)) = path_batches.next() else {
+                    continue;
+                };
+                if index > 0 && path.group.is_some() {
+                    segments.push(Vec::new());
+                }
+                Some(path)
+            }
+            _ => None,
+        };
+        if let Some(segment) = segments.last_mut() {
+            segment.push(Item { batch, path });
         }
     }
+    segments
 }
 
 /// Encodes every batch of `scene` into `texture` in `command_buffer`,
 /// beginning as `start` says. Paths are rasterized whole into the
-/// intermediate texture and composited through the main encoders, which
-/// `start` may scissor.
+/// intermediate texture and composited through the main passes.
+///
+/// Each main pass, one per segment of batches between path groups, draws
+/// every rectangle of a partial frame: on Apple's GPUs, which render in
+/// tiles, every pass loads and stores the whole texture, so a pass per
+/// rectangle would cost that again for each rectangle. Within a pass the
+/// rectangles are the outer loop: each is scissored, filled in the first
+/// pass, and drawn through the segment's batches in the scene's order. The
+/// rectangles do not overlap, so every pixel inside one is drawn by the same
+/// primitives in the same order as in a whole frame, and none twice; the
+/// batch order, all that blending depends on, is kept within each rectangle.
+/// (With the batches outer and the rectangles inner the pixels would be the
+/// same, at a scissor change per batch and rectangle.)
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_pass(
     renderer: &mut MetalRenderer,
@@ -164,11 +224,17 @@ pub(crate) fn encode_pass(
     start: PassStart,
 ) -> Result<()> {
     let vertices = paths.vertices.as_ref();
-    let path_batches = &paths.batches;
+    let segments = segments(scene, &paths.batches);
+    let (rects, fill): (Vec<Option<metal::MTLScissorRect>>, _) = match &start {
+        PassStart::Clear(_) => (vec![None], None),
+        PassStart::Scissor { rects, fill } => {
+            (rects.iter().copied().map(Some).collect(), Some(*fill))
+        }
+    };
 
     // The first group is rasterized before the main pass, which saves ending
     // the main pass for it.
-    let mut rasterized = match path_batches.first() {
+    let mut rasterized = match paths.batches.first() {
         Some(first) => rasterize_group(
             renderer,
             vertices,
@@ -179,44 +245,37 @@ pub(crate) fn encode_pass(
         None => false,
     };
 
-    let mut command_encoder = begin_main(command_buffer, texture, viewport_size, &start, true);
-    let mut path_batches = path_batches.iter().enumerate();
-
-    for batch in scene.batches() {
-        match batch {
-            PrimitiveBatch::Shadows(range) => {
-                renderer.draw_shadows(range, instance_bindings, viewport_size, command_encoder)
+    for (index, segment) in segments.iter().enumerate() {
+        if index > 0 {
+            let group = segment
+                .first()
+                .and_then(|item| item.path)
+                .and_then(|path| path.group.clone());
+            rasterized = rasterize_group(renderer, vertices, group, viewport_size, command_buffer)?;
+        }
+        let command_encoder =
+            begin_main(command_buffer, texture, viewport_size, &start, index == 0);
+        #[cfg(test)]
+        {
+            renderer.fast_partial.main_passes += 1;
+        }
+        for rect in &rects {
+            if let Some(rect) = rect {
+                command_encoder.set_scissor_rect(*rect);
+                if index == 0
+                    && let Some(fill) = fill
+                {
+                    fill(command_encoder);
+                }
             }
-            PrimitiveBatch::Quads(range) => {
-                renderer.draw_quads(range, instance_bindings, viewport_size, command_encoder)
-            }
-            PrimitiveBatch::Paths(range) => {
-                if range.is_empty() {
-                    continue;
-                }
-                let Some((index, path_batch)) = path_batches.next() else {
-                    continue;
-                };
-                if index > 0 && path_batch.group.is_some() {
-                    command_encoder.end_encoding();
-                    rasterized = rasterize_group(
-                        renderer,
-                        vertices,
-                        path_batch.group.clone(),
-                        viewport_size,
-                        command_buffer,
-                    )?;
-                    command_encoder =
-                        begin_main(command_buffer, texture, viewport_size, &start, false);
-                }
-                // A batch without vertices left its bounds in the cleared
-                // texture transparent: compositing them draws nothing.
-                if !rasterized || path_batch.vertices.is_empty() {
-                    continue;
-                }
-                if let Err(error) = renderer.draw_paths_from_intermediate(
-                    &scene.paths[range],
+            for item in segment {
+                if let Err(error) = draw_item(
+                    renderer,
+                    scene,
+                    instance_bindings,
                     writer,
+                    item,
+                    rasterized,
                     viewport_size,
                     command_encoder,
                 ) {
@@ -224,37 +283,72 @@ pub(crate) fn encode_pass(
                     return Err(error);
                 }
             }
-            PrimitiveBatch::Underlines(range) => {
-                renderer.draw_underlines(range, instance_bindings, viewport_size, command_encoder)
+        }
+        command_encoder.end_encoding();
+    }
+    Ok(())
+}
+
+/// Draws one batch of a segment through `command_encoder`.
+#[allow(clippy::too_many_arguments)]
+fn draw_item(
+    renderer: &mut MetalRenderer,
+    scene: &Scene,
+    instance_bindings: &InstanceBindings,
+    writer: &mut InstanceBufferWriter,
+    item: &Item,
+    rasterized: bool,
+    viewport_size: Size<DevicePixels>,
+    command_encoder: &metal::RenderCommandEncoderRef,
+) -> Result<()> {
+    match copy_batch(&item.batch) {
+        PrimitiveBatch::Shadows(range) => {
+            renderer.draw_shadows(range, instance_bindings, viewport_size, command_encoder)
+        }
+        PrimitiveBatch::Quads(range) => {
+            renderer.draw_quads(range, instance_bindings, viewport_size, command_encoder)
+        }
+        PrimitiveBatch::Paths(range) => {
+            // A batch without vertices left its bounds in the cleared
+            // texture transparent: compositing them draws nothing.
+            if !rasterized || item.path.is_none_or(|path| path.vertices.is_empty()) {
+                return Ok(());
             }
-            PrimitiveBatch::MonochromeSprites { texture_id, range } => renderer
-                .draw_monochrome_sprites(
-                    texture_id,
-                    range,
-                    instance_bindings,
-                    viewport_size,
-                    command_encoder,
-                ),
-            PrimitiveBatch::PolychromeSprites { texture_id, range } => renderer
-                .draw_polychrome_sprites(
-                    texture_id,
-                    range,
-                    instance_bindings,
-                    viewport_size,
-                    command_encoder,
-                ),
-            PrimitiveBatch::Surfaces(range) => renderer.draw_surfaces(
-                &scene.surfaces[range.clone()],
-                range.start,
+            renderer.draw_paths_from_intermediate(
+                &scene.paths[range],
+                writer,
+                viewport_size,
+                command_encoder,
+            )?;
+        }
+        PrimitiveBatch::Underlines(range) => {
+            renderer.draw_underlines(range, instance_bindings, viewport_size, command_encoder)
+        }
+        PrimitiveBatch::MonochromeSprites { texture_id, range } => renderer
+            .draw_monochrome_sprites(
+                texture_id,
+                range,
                 instance_bindings,
                 viewport_size,
                 command_encoder,
             ),
-            PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
-        }
+        PrimitiveBatch::PolychromeSprites { texture_id, range } => renderer
+            .draw_polychrome_sprites(
+                texture_id,
+                range,
+                instance_bindings,
+                viewport_size,
+                command_encoder,
+            ),
+        PrimitiveBatch::Surfaces(range) => renderer.draw_surfaces(
+            &scene.surfaces[range.clone()],
+            range.start,
+            instance_bindings,
+            viewport_size,
+            command_encoder,
+        ),
+        PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
     }
-
-    command_encoder.end_encoding();
     Ok(())
 }
 
