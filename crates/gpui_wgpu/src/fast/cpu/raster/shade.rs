@@ -3,8 +3,6 @@
 //! applied to 8-bit pixels as the GPU applies them to its `Bgra8Unorm`
 //! target.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use gpui::{Background, Bounds, Corners, Hsla, LinearColorStop, ScaledPixels};
 
 /// A color or a premultiplied color: red, green, blue, alpha.
@@ -564,16 +562,9 @@ pub(super) static UNORM8: [f32; 256] = {
     table
 };
 
-/// Whether [`fragment_level`] truncates to 16 bits rather than 12: the
-/// `RasterParams::fragment_bits` of the scene being drawn (one GPU per
-/// process).
-static FRAGMENT_BITS_16: AtomicBool = AtomicBool::new(false);
-
-pub(super) fn set_fragment_bits(bits: u32) {
-    FRAGMENT_BITS_16.store(bits >= 16, Ordering::Relaxed);
-}
-
-/// The level of the 8-bit target a fragment's channel is blended at.
+/// The bits of fixed point the GPU truncates a fragment's channels to
+/// (`RasterParams::fragment_bits`), and so the level of the 8-bit target a
+/// fragment's channel is blended at.
 ///
 /// The GPU does not blend into an 8-bit target in `f32`: it converts each
 /// channel of the fragment to fixed point, truncating, and that to an 8-bit
@@ -582,35 +573,52 @@ pub(super) fn set_fragment_bits(bits: u32) {
 /// 16384 blended channels exactly (and the other two a level apart), where
 /// blending in `f32` misses one in nine. Intel (Mesa) truncates to 16 bits,
 /// reproduced exactly.
-#[inline]
-pub(super) fn fragment_level(x: f32) -> u32 {
-    level_of(x, FRAGMENT_BITS_16.load(Ordering::Relaxed))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FragmentBits {
+    Twelve,
+    Sixteen,
+}
+
+impl FragmentBits {
+    pub(super) fn new(bits: u32) -> Self {
+        if bits >= 16 {
+            FragmentBits::Sixteen
+        } else {
+            FragmentBits::Twelve
+        }
+    }
+
+    /// The level of a fragment's channel.
+    #[inline]
+    pub(super) fn level(self, x: f32) -> u32 {
+        match self {
+            FragmentBits::Twelve => level_of::<false>(x),
+            FragmentBits::Sixteen => level_of::<true>(x),
+        }
+    }
+
+    /// A fragment's channels as levels: red, green, blue, alpha.
+    #[inline]
+    pub(super) fn levels(self, src: V4) -> [u32; 4] {
+        match self {
+            FragmentBits::Twelve => src.map(level_of::<false>),
+            FragmentBits::Sixteen => src.map(level_of::<true>),
+        }
+    }
 }
 
 #[inline]
 #[allow(clippy::manual_clamp)]
-fn level_of(x: f32, bits_16: bool) -> u32 {
+fn level_of<const BITS_16: bool>(x: f32) -> u32 {
     // NaN, which `max` drops, ends as 0.
     let x = x.max(0.).min(1.);
-    if bits_16 {
+    if BITS_16 {
         let fixed = (x * 65536.0) as u32;
         ((fixed * 255 + 32768) >> 16).min(255)
     } else {
         let fixed = (x * 4096.0) as u32;
         ((fixed * 255 + 2048) >> 12).min(255)
     }
-}
-
-/// A fragment's channels as levels: red, green, blue, alpha.
-#[inline]
-pub(super) fn fragment_levels(src: V4) -> [u32; 4] {
-    let bits_16 = FRAGMENT_BITS_16.load(Ordering::Relaxed);
-    [
-        level_of(src[0], bits_16),
-        level_of(src[1], bits_16),
-        level_of(src[2], bits_16),
-        level_of(src[3], bits_16),
-    ]
 }
 
 /// A pixel's channels as levels: red, green, blue, alpha.
@@ -682,8 +690,8 @@ impl Blend {
 
     /// Blends the fragment `src` over the pixel `dst`.
     #[inline]
-    pub(super) fn apply(self, dst: u32, src: V4) -> u32 {
-        self.apply_levels(dst, fragment_levels(src))
+    pub(super) fn apply(self, dst: u32, src: V4, bits: FragmentBits) -> u32 {
+        self.apply_levels(dst, bits.levels(src))
     }
 
     /// Blends a fragment of levels `s` over the pixel `dst`.
@@ -717,8 +725,8 @@ impl Blend {
 
     /// Blends the fragment `src` into `pixel`.
     #[inline]
-    pub(super) fn blend(self, pixel: &mut u32, src: V4) {
-        let levels = fragment_levels(src);
+    pub(super) fn blend(self, pixel: &mut u32, src: V4, bits: FragmentBits) {
+        let levels = bits.levels(src);
         if !self.is_noop_levels(levels) {
             *pixel = self.apply_levels(*pixel, levels);
         }
@@ -726,8 +734,8 @@ impl Blend {
 
     /// Whether blending `src` leaves every pixel as it was.
     #[inline]
-    pub(super) fn is_noop(self, src: V4) -> bool {
-        self.is_noop_levels(fragment_levels(src))
+    pub(super) fn is_noop(self, src: V4, bits: FragmentBits) -> bool {
+        self.is_noop_levels(bits.levels(src))
     }
 
     #[inline]
@@ -744,11 +752,16 @@ impl Blend {
 /// color `Src1`/`OneMinusSrc1` per channel, and alpha not at all: the
 /// pipeline writes color only.
 #[inline]
-pub(super) fn blend_subpixel(dst: u32, foreground: [f32; 3], alpha: [f32; 3]) -> u32 {
+pub(super) fn blend_subpixel(
+    dst: u32,
+    foreground: [f32; 3],
+    alpha: [f32; 3],
+    bits: FragmentBits,
+) -> u32 {
     let mut out = levels(dst);
     for i in 0..3 {
-        let f = fragment_level(foreground[i]);
-        let a = fragment_level(alpha[i]);
+        let f = bits.level(foreground[i]);
+        let a = bits.level(alpha[i]);
         out[i] = div255(f * a + out[i] * (255 - a));
     }
     pack_levels(out)

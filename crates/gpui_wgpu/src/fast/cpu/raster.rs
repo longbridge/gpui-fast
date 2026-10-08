@@ -81,7 +81,7 @@ pub(crate) struct RasterParams {
 
 /// The bits of fixed point a GPU of PCI vendor `vendor` truncates a
 /// fragment's channels to before rounding them to 8-bit levels: 12 on
-/// NVIDIA, 16 on Intel (both measured, see `shade::fragment_level`). Others
+/// NVIDIA, 16 on Intel (both measured, see `shade::FragmentBits`). Others
 /// are taken as 16, the nearer of the two to rounding exactly.
 // The web never draws on the CPU.
 #[cfg_attr(target_family = "wasm", allow(dead_code))]
@@ -161,13 +161,12 @@ pub(crate) fn draw(
     if regions.is_empty() {
         return;
     }
-    shade::set_fragment_bits(params.fragment_bits);
-
     let tile_scenes = plan::tile_scenes(scene, &regions);
     let tiles = plan::tile_plans(scene, &tile_scenes);
     let plan = plan::Plan::new(scene, &tiles);
     let ctx = Ctx {
         params,
+        bits: shade::FragmentBits::new(params.fragment_bits),
         sprites,
         tiles: &tiles,
     };
@@ -252,6 +251,8 @@ fn draw_region(
 /// What every primitive is drawn with besides the scene.
 struct Ctx<'a> {
     params: &'a RasterParams,
+    /// `params.fragment_bits`.
+    bits: shade::FragmentBits,
     sprites: &'a dyn SpritePixels,
     /// The scroll layer tiles the scene composites that reach the regions.
     tiles: &'a [plan::TilePlan<'a>],

@@ -19,7 +19,7 @@ const SAMPLES: [(i64, i64); 4] = [(96, 32), (224, 96), (32, 160), (160, 224)];
 pub(super) fn draw_batch(
     paths: &[Path<ScaledPixels>],
     sprites: &[Bounds<ScaledPixels>],
-    _ctx: &Ctx,
+    ctx: &Ctx,
     target: &mut Target,
 ) {
     // The pixels each sprite covers: the only ones the intermediate texture
@@ -79,14 +79,14 @@ pub(super) fn draw_batch(
                         color[2] * color[3] * alpha,
                         color[3] * alpha,
                     ];
-                    if Blend::Premultiplied.is_noop(src) {
+                    if Blend::Premultiplied.is_noop(src, ctx.bits) {
                         continue;
                     }
                     touched = true;
                     let pixel = &mut samples[row + (x - area.x0) as usize];
                     for (value, covered) in pixel.iter_mut().zip(covered) {
                         if covered {
-                            *value = Blend::Premultiplied.apply(*value, src);
+                            *value = Blend::Premultiplied.apply(*value, src, ctx.bits);
                         }
                     }
                 }

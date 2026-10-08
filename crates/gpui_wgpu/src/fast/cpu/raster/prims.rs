@@ -10,8 +10,8 @@ use gpui::{
 
 use super::plan::{TilePlan, draw_plan};
 use super::shade::{
-    Blend, FBounds, GrayscaleCorrection, M_PI_F, Paint, Radii, SubpixelCorrection, UNORM8, V4,
-    blend_color, blend_subpixel, blur_curve, clear_pixel, erf, fmod, fragment_levels, gaussian,
+    Blend, FBounds, FragmentBits, GrayscaleCorrection, M_PI_F, Paint, Radii, SubpixelCorrection,
+    UNORM8, V4, blend_color, blend_subpixel, blur_curve, clear_pixel, erf, fmod, gaussian,
     grayscale, hsla_to_rgba, over, pick_corner_radius, quad_sdf, quad_sdf_impl,
     quarter_ellipse_sdf, saturate, unpack,
 };
@@ -156,8 +156,8 @@ enum Fill {
 }
 
 impl Fill {
-    fn new(blend: Blend, src: V4) -> Self {
-        let levels = fragment_levels(src);
+    fn new(blend: Blend, src: V4, bits: FragmentBits) -> Self {
+        let levels = bits.levels(src);
         if blend.is_noop_levels(levels) {
             Fill::Nothing
         } else if levels[3] == 255 && blend != Blend::Paths {
@@ -495,10 +495,13 @@ pub(super) fn quad(quad: &Quad, ctx: &Ctx, target: &mut Target) {
     let premultiplied = ctx.params.premultiplied_alpha;
     let blend = Blend::for_target(premultiplied);
     let shader = QuadShader::new(quad, premultiplied);
-    let solid = shader
-        .paint
-        .is_solid()
-        .then(|| Fill::new(blend, blend_color(shader.paint.solid(), 1.0, premultiplied)));
+    let solid = shader.paint.is_solid().then(|| {
+        Fill::new(
+            blend,
+            blend_color(shader.paint.solid(), 1.0, premultiplied),
+            ctx.bits,
+        )
+    });
 
     if shader.plain
         && let Some(fill) = &solid
@@ -520,11 +523,11 @@ pub(super) fn quad(quad: &Quad, ctx: &Ctx, target: &mut Target) {
                     None => {
                         let color = shader.paint.color_at(px, py, &shader.bounds);
                         let src = blend_color(color, 1.0, premultiplied);
-                        blend.blend(pixel, src);
+                        blend.blend(pixel, src, ctx.bits);
                     }
                 },
                 QuadFragment::Color(src) => {
-                    blend.blend(pixel, src);
+                    blend.blend(pixel, src, ctx.bits);
                 }
             }
         }
@@ -623,7 +626,7 @@ pub(super) fn shadow(shadow: &Shadow, ctx: &Ctx, target: &mut Target) {
                 alpha *= saturate(0.5 - element_distance);
             }
             let src = blend_color(color, alpha, premultiplied);
-            blend.blend(pixel, src);
+            blend.blend(pixel, src, ctx.bits);
         }
     }
 }
@@ -648,7 +651,7 @@ pub(super) fn underline(underline: &Underline, ctx: &Ctx, target: &mut Target) {
     let color = hsla_to_rgba(underline.color);
 
     if underline.wavy == false.into() {
-        let fill = Fill::new(blend, blend_color(color, color[3], premultiplied));
+        let fill = Fill::new(blend, blend_color(color, color[3], premultiplied), ctx.bits);
         for y in rect.y0..rect.y1 {
             fill.row(target.row(y, rect.x0, rect.x1));
         }
@@ -677,7 +680,7 @@ pub(super) fn underline(underline: &Underline, ctx: &Ctx, target: &mut Target) {
             let alpha =
                 saturate(0.5 - (-distance_from_bottom_border).max(distance_from_top_border));
             let src = blend_color(color, alpha * color[3], premultiplied);
-            blend.blend(pixel, src);
+            blend.blend(pixel, src, ctx.bits);
         }
     }
 }
@@ -1141,7 +1144,7 @@ pub(super) fn monochrome(
                     continue;
                 }
                 if !glyphs.known[level] {
-                    let levels = fragment_levels(fragment(UNORM8[level]));
+                    let levels = ctx.bits.levels(fragment(UNORM8[level]));
                     glyphs.fragments[level] = if blend.is_noop_levels(levels) {
                         [0; 4]
                     } else {
@@ -1162,7 +1165,7 @@ pub(super) fn monochrome(
     geometry.for_each(target, |pixel, _, _, u, v| {
         let sample = sampler.bilinear(u, v)[0];
         let src = fragment(sample);
-        blend.blend(pixel, src);
+        blend.blend(pixel, src, ctx.bits);
     });
 }
 
@@ -1203,7 +1206,7 @@ pub(super) fn subpixel(sprite: &SubpixelSprite, texture: &Texture, ctx: &Ctx, ta
             let row = target.row(y, rect.x0, rect.x1);
             for (x, pixel) in (rect.x0..).zip(row.iter_mut()) {
                 let sample = texture.texel((x + dx) as u32, ty);
-                *pixel = blend_subpixel(*pixel, foreground, shade(sample));
+                *pixel = blend_subpixel(*pixel, foreground, shade(sample), ctx.bits);
             }
         }
         return;
@@ -1212,7 +1215,7 @@ pub(super) fn subpixel(sprite: &SubpixelSprite, texture: &Texture, ctx: &Ctx, ta
     let sampler = Sampler::Atlas(texture);
     geometry.for_each(target, |pixel, _, _, u, v| {
         let sample = sampler.bilinear(u, v);
-        *pixel = blend_subpixel(*pixel, foreground, shade(sample));
+        *pixel = blend_subpixel(*pixel, foreground, shade(sample), ctx.bits);
     });
 }
 
@@ -1258,7 +1261,7 @@ pub(super) fn polychrome(
             for (x, pixel) in (rect.x0..).zip(row.iter_mut()) {
                 let sample = sampler.texel((x + dx) as u32, ty);
                 let src = shade(sample, x as f32 + 0.5, py);
-                blend.blend(pixel, src);
+                blend.blend(pixel, src, ctx.bits);
             }
         }
         return;
@@ -1266,7 +1269,7 @@ pub(super) fn polychrome(
 
     geometry.for_each(target, |pixel, px, py, u, v| {
         let src = shade(sampler.bilinear(u, v), px, py);
-        blend.blend(pixel, src);
+        blend.blend(pixel, src, ctx.bits);
     });
 }
 
@@ -1347,6 +1350,7 @@ pub(super) fn layer_tile(
         };
         let tile_ctx = Ctx {
             params: ctx.params,
+            bits: ctx.bits,
             sprites: ctx.sprites,
             tiles: &[],
         };
