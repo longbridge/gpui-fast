@@ -102,7 +102,7 @@ impl AtlasBackend for DirectXAtlasTextures {
             .texture(tile.texture_id)
             .ok_or_else(|| anyhow::anyhow!("allocated tile refers to a missing texture"))?;
         texture.upload(&self.device_context, tile.bounds, bytes);
-        crate::fast::partial::atlas_written();
+        crate::fast::partial::atlas_written(&tile);
         Ok(tile)
     }
 

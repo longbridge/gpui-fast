@@ -13,8 +13,13 @@
 //!
 //! The canvas, rather than the back buffer, holds the frame drawn last: with
 //! `DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL` a back buffer holds the frame presented
-//! several presents ago, and a copy of the whole canvas keeps every back
-//! buffer right whatever DXGI does with them.
+//! `BUFFER_COUNT` presents ago. A frame copies into it only what changed
+//! since then, the damage of the frames presented in between and its own
+//! ([`back_buffers`]), and the whole canvas whenever it cannot know.
+//!
+//! An atlas write does not draw the frame whole: the sprites of the scene
+//! whose tile it overlaps join the damage ([`atlas_writes`]), unless more
+//! writes happened since the canvas was drawn than the log keeps.
 //!
 //! A frame is drawn whole when:
 //! - there is no canvas of the window's size (the first frame, a resize, a
@@ -24,8 +29,8 @@
 //! - the window's background appearance clears to another color than the
 //!   canvas was drawn with (`set_background_appearance` changes no scene, so
 //!   the damage misses it);
-//! - an atlas tile was written since the last frame (atlas content is outside
-//!   the scene: a tile freed and allocated again keeps its id);
+//! - more atlas tiles were written since the canvas was drawn than
+//!   [`atlas_writes`] logs;
 //! - the scene has surfaces (video frames);
 //! - its damage covers more than half the window (overlapping rectangles
 //!   merged first: each draws the whole scene into itself);
@@ -49,21 +54,20 @@
 
 use std::slice;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
-use gpui::{Bounds, DevicePixels, Scene, WindowBackgroundAppearance};
-use windows::Win32::Foundation::RECT;
+use gpui::{AtlasTile, Bounds, DevicePixels, Scene, WindowBackgroundAppearance};
+use windows::Win32::Foundation::{E_FAIL, RECT, S_OK};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BIND_RENDER_TARGET, D3D11_RASTERIZER_DESC, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_BIND_RENDER_TARGET, D3D11_BOX, D3D11_RASTERIZER_DESC, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
     ID3D11Device, ID3D11DeviceContext, ID3D11DeviceContext1, ID3D11RasterizerState,
     ID3D11RenderTargetView, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::{
-    Common::DXGI_SAMPLE_DESC, DXGI_PRESENT, DXGI_PRESENT_PARAMETERS,
+    Common::DXGI_SAMPLE_DESC, DXGI_PRESENT, DXGI_PRESENT_PARAMETERS, IDXGISwapChain1,
 };
-use windows::core::Interface as _;
+use windows::core::{HRESULT, Interface as _};
 
 use crate::DirectXRenderer;
 use crate::directx_renderer::{DirectXRenderPipelines, GlobalParams, RENDER_TARGET_FORMAT};
@@ -75,13 +79,13 @@ const MAX_RECTS: usize = 16;
 /// How often a window's statistics are printed.
 const STATS_PERIOD: Duration = Duration::from_secs(1);
 
-/// Atlas tiles written by every atlas of the process, ever.
-static ATLAS_WRITES: AtomicU64 = AtomicU64::new(0);
+mod atlas_writes;
+mod back_buffers;
 
-/// Notes that an atlas tile was written: the next frame of every window is
-/// drawn whole.
-pub(crate) fn atlas_written() {
-    ATLAS_WRITES.fetch_add(1, Ordering::Relaxed);
+/// Notes that an atlas tile was written: the next frame of every window
+/// redraws the sprites that show it ([`atlas_writes`]).
+pub(crate) fn atlas_written(tile: &AtlasTile) {
+    atlas_writes::note(tile);
 }
 
 /// Whether partial frames are on (`GPUI_PARTIAL_REDRAW` is not `0`).
@@ -102,8 +106,11 @@ pub(crate) struct PartialRedraw {
     canvas: Option<Canvas>,
     /// The number of the scene the canvas holds, 0 for none.
     last_drawn: u64,
-    /// [`ATLAS_WRITES`] when the canvas was last drawn.
+    /// The atlas writes logged when the canvas was last drawn
+    /// ([`atlas_writes::count`]).
     atlas_writes: u64,
+    /// What the swap chain's back buffers hold of the canvas.
+    back_buffers: back_buffers::BackBuffers,
     /// The color the canvas was cleared to ([`clear_color`]).
     clear: [f32; 4],
     /// The device's rasterizer state with the scissor test on.
@@ -177,6 +184,8 @@ pub(crate) struct Frame<'a> {
     pub(crate) last_drawn: u64,
     /// Whether the frame clears to another color than the canvas was.
     pub(crate) appearance_changed: bool,
+    /// Whether atlas tiles were written since the canvas was drawn that the
+    /// log no longer holds (the ones it holds are in `damage`).
     pub(crate) atlas_written: bool,
     pub(crate) has_surfaces: bool,
     pub(crate) capturing: bool,
@@ -275,6 +284,7 @@ pub(crate) fn release(renderer: &mut DirectXRenderer) {
     partial.canvas = None;
     partial.scissor_state = None;
     partial.last_drawn = 0;
+    back_buffers::BackBuffers::reset(&mut partial.back_buffers);
 }
 
 /// Draws `scene` and presents it, in place of `DirectXRenderer::draw`.
@@ -294,9 +304,17 @@ pub(crate) fn draw(
         .as_ref()
         .and_then(|devices| devices.annotation.as_ref())
         .is_some_and(|annotation| unsafe { annotation.GetStatus().as_bool() });
-    let atlas_writes = ATLAS_WRITES.load(Ordering::Relaxed);
+    let atlas_writes = atlas_writes::count();
     let clear = clear_color(background_appearance);
     let partial = &renderer.fast_partial;
+    let written = atlas_writes::since(partial.atlas_writes);
+    let damage = match &written {
+        Some(writes) if !writes.is_empty() => with_written(
+            &scene.damage.rects,
+            atlas_writes::written_sprites(scene, writes),
+        ),
+        _ => scene.damage.rects.clone(),
+    };
     let plan = plan(&Frame {
         has_canvas: partial.canvas.is_some(),
         width: renderer.width,
@@ -305,10 +323,10 @@ pub(crate) fn draw(
         since: scene.damage.since,
         last_drawn: partial.last_drawn,
         appearance_changed: clear != partial.clear,
-        atlas_written: atlas_writes != partial.atlas_writes,
+        atlas_written: written.is_none(),
         has_surfaces: !scene.surfaces.is_empty(),
         capturing,
-        damage: &scene.damage.rects,
+        damage: &damage,
     });
 
     if plan == Plan::Partial(Vec::new()) {
@@ -317,10 +335,14 @@ pub(crate) fn draw(
         crate::fast::layers::raster::rasterize_tiles(renderer, scene)?;
         let partial = &mut renderer.fast_partial;
         partial.last_drawn = scene.damage.frame;
+        partial.atlas_writes = atlas_writes;
         partial.stats.frame(&plan, started.elapsed());
         return Ok(());
     }
 
+    // Until the frame is presented the canvas holds no scene the damage of
+    // the next can refer to.
+    renderer.fast_partial.last_drawn = 0;
     // `render` and the batches draw into the window's render target view,
     // which paths also bind again after their intermediate pass: lend it the
     // canvas's for the draw.
@@ -332,11 +354,29 @@ pub(crate) fn draw(
     swap_render_target(renderer);
     drawn?;
 
-    copy_canvas_to_back_buffer(renderer)?;
-    match &plan {
-        Plan::Partial(rects) => present_dirty(renderer, rects)?,
-        Plan::Whole(_) => renderer.present()?,
-    }
+    let changed = match &plan {
+        Plan::Partial(rects) => Some(rects.as_slice()),
+        Plan::Whole(_) => None,
+    };
+    let count_before = present_count(renderer);
+    let to_copy = back_buffers::BackBuffers::to_copy(
+        &mut renderer.fast_partial.back_buffers,
+        changed,
+        count_before,
+        renderer.width,
+        renderer.height,
+    );
+    copy_canvas_to_back_buffer(renderer, to_copy.as_deref())?;
+    let presented = present(renderer, changed);
+    let count_after = present_count(renderer);
+    back_buffers::BackBuffers::presented(
+        &mut renderer.fast_partial.back_buffers,
+        changed.map(<[RECT]>::to_vec),
+        presented == S_OK,
+        count_before,
+        count_after,
+    );
+    presented.ok().context("Presenting swap chain failed")?;
 
     let partial = &mut renderer.fast_partial;
     partial.last_drawn = scene.damage.frame;
@@ -359,6 +399,7 @@ fn ensure_canvas(renderer: &mut DirectXRenderer) -> Result<()> {
     }
     renderer.fast_partial.canvas = None;
     renderer.fast_partial.last_drawn = 0;
+    back_buffers::BackBuffers::reset(&mut renderer.fast_partial.back_buffers);
     let device = &renderer.devices.as_ref().context("devices missing")?.device;
     let texture = create_canvas_texture(device, width, height)?;
     let mut view = None;
@@ -545,8 +586,9 @@ pub(crate) fn create_scissor_state(
     state.context("creating the scissor rasterizer state")
 }
 
-/// Copies the whole canvas into the swap chain's back buffer.
-fn copy_canvas_to_back_buffer(renderer: &DirectXRenderer) -> Result<()> {
+/// Copies `rects` of the canvas (all of it for `None`) into the swap chain's
+/// back buffer.
+fn copy_canvas_to_back_buffer(renderer: &DirectXRenderer, rects: Option<&[RECT]>) -> Result<()> {
     let devices = renderer.devices.as_ref().context("devices missing")?;
     let resources = renderer.resources.as_ref().context("resources missing")?;
     let canvas = renderer
@@ -558,20 +600,74 @@ fn copy_canvas_to_back_buffer(renderer: &DirectXRenderer) -> Result<()> {
         .render_target
         .as_ref()
         .context("render target missing")?;
-    unsafe {
-        devices
-            .device_context
-            .CopyResource(back_buffer, &canvas.texture)
-    };
+    copy_rects(&devices.device_context, back_buffer, &canvas.texture, rects);
     Ok(())
 }
 
-/// Presents the back buffer, telling DXGI that only `rects` changed since
-/// the frame presented before (a pixel when nothing changed).
-fn present_dirty(renderer: &DirectXRenderer, rects: &[RECT]) -> Result<()> {
-    let resources = renderer.resources.as_ref().context("resources missing")?;
-    // Never empty: a frame with nothing to draw is not presented, and no
-    // dirty rectangle would mean the whole frame to DXGI.
+/// Copies `rects` of `source` (all of it for `None`) to the same place in
+/// `target`, of the same size and format.
+fn copy_rects(
+    context: &ID3D11DeviceContext,
+    target: &ID3D11Texture2D,
+    source: &ID3D11Texture2D,
+    rects: Option<&[RECT]>,
+) {
+    let Some(rects) = rects else {
+        unsafe { context.CopyResource(target, source) };
+        return;
+    };
+    for rect in rects {
+        let region = D3D11_BOX {
+            left: rect.left as u32,
+            top: rect.top as u32,
+            front: 0,
+            right: rect.right as u32,
+            bottom: rect.bottom as u32,
+            back: 1,
+        };
+        unsafe {
+            context.CopySubresourceRegion(
+                target,
+                0,
+                rect.left as u32,
+                rect.top as u32,
+                0,
+                source,
+                0,
+                Some(&region),
+            )
+        };
+    }
+}
+
+/// The swap chain's present count, or `u32::MAX` (which a count right
+/// after a present here never is, before `u32::MAX` presents) when DXGI does
+/// not say.
+fn present_count(renderer: &DirectXRenderer) -> u32 {
+    renderer
+        .resources
+        .as_ref()
+        .and_then(|resources| unsafe { resources.swap_chain.GetLastPresentCount() }.ok())
+        .unwrap_or(u32::MAX)
+}
+
+/// Presents the back buffer: with `changed` as its dirty rectangles, or
+/// wholly. Returns the present's `HRESULT`, which can be a success other
+/// than `S_OK` (such as `DXGI_STATUS_OCCLUDED`).
+fn present(renderer: &DirectXRenderer, changed: Option<&[RECT]>) -> HRESULT {
+    let Some(resources) = renderer.resources.as_ref() else {
+        return E_FAIL;
+    };
+    match changed {
+        Some(rects) => present_dirty(&resources.swap_chain, rects),
+        None => unsafe { resources.swap_chain.Present(0, DXGI_PRESENT(0)) },
+    }
+}
+
+/// Presents with `rects` as the dirty rectangles: what changed since the
+/// frame presented before. Never empty: a frame with nothing to draw is not
+/// presented, and no dirty rectangle would mean the whole frame to DXGI.
+fn present_dirty(swap_chain: &IDXGISwapChain1, rects: &[RECT]) -> HRESULT {
     let mut dirty: Vec<RECT> = rects.to_vec();
     let parameters = DXGI_PRESENT_PARAMETERS {
         DirtyRectsCount: dirty.len() as u32,
@@ -579,13 +675,29 @@ fn present_dirty(renderer: &DirectXRenderer, rects: &[RECT]) -> Result<()> {
         pScrollRect: std::ptr::null_mut(),
         pScrollOffset: std::ptr::null_mut(),
     };
-    unsafe {
-        resources
-            .swap_chain
-            .Present1(0, DXGI_PRESENT(0), &parameters)
+    unsafe { swap_chain.Present1(0, DXGI_PRESENT(0), &parameters) }
+}
+
+/// `damage` with the rectangles of `written` sprites outside it: one
+/// rectangle around all of them when they would make too many.
+fn with_written(
+    damage: &[Bounds<DevicePixels>],
+    mut written: Vec<Bounds<DevicePixels>>,
+) -> Vec<Bounds<DevicePixels>> {
+    let contains = |outer: &Bounds<DevicePixels>, inner: &Bounds<DevicePixels>| {
+        outer.origin.x <= inner.origin.x
+            && outer.origin.y <= inner.origin.y
+            && outer.bottom_right().x >= inner.bottom_right().x
+            && outer.bottom_right().y >= inner.bottom_right().y
+    };
+    written.retain(|rect| !damage.iter().any(|outer| contains(outer, rect)));
+    if damage.len() + written.len() > MAX_RECTS
+        && let Some(first) = written.first().copied()
+    {
+        let around = written.iter().fold(first, |around, rect| around.union(rect));
+        written = vec![around];
     }
-    .ok()
-    .context("Presenting swap chain failed")
+    damage.iter().copied().chain(written).collect()
 }
 
 /// A window's frames since its statistics were last printed.

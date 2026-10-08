@@ -596,3 +596,237 @@ impl Rig {
         })
     }
 }
+
+// --- the back buffers --- //
+
+fn r(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+    RECT {
+        left,
+        top,
+        right,
+        bottom,
+    }
+}
+
+/// A back buffer copies the changes of the frames presented since it was
+/// last presented, and the whole canvas until every buffer was presented
+/// once, after another present of the swap chain, or a failed one.
+#[test]
+fn back_buffers_copy_what_changed_since_they_were_presented() {
+    use super::back_buffers::BackBuffers;
+    /// A swap chain's present count and what our frames presented.
+    struct Chain {
+        buffers: BackBuffers,
+        count: u32,
+    }
+    impl Chain {
+        fn present(&mut self, changed: Option<RECT>, succeeded: bool) -> Option<Vec<RECT>> {
+            let changed = changed.map(|rect| vec![rect]);
+            let copy = BackBuffers::to_copy(
+                &mut self.buffers,
+                changed.as_deref(),
+                self.count,
+                WIDTH,
+                HEIGHT,
+            );
+            BackBuffers::presented(
+                &mut self.buffers,
+                changed,
+                succeeded,
+                self.count,
+                self.count + 1,
+            );
+            self.count += 1;
+            copy.map(|mut rects| {
+                rects.sort_by_key(|rect| rect.left);
+                rects
+            })
+        }
+
+        fn frame(&mut self, rect: RECT) -> Option<Vec<RECT>> {
+            self.present(Some(rect), true)
+        }
+    }
+    let mut chain = Chain {
+        buffers: BackBuffers::default(),
+        count: 10,
+    };
+    let rects = [
+        r(0, 0, 10, 10),
+        r(20, 0, 30, 10),
+        r(40, 0, 50, 10),
+        r(60, 0, 70, 10),
+        r(80, 0, 90, 10),
+    ];
+    // Every buffer is presented once before any is trusted.
+    for rect in &rects[..3] {
+        assert_eq!(chain.frame(*rect), None);
+    }
+    // The fourth frame's buffer holds the first: the two frames between
+    // and its own change.
+    assert_eq!(chain.frame(rects[3]), Some(vec![rects[1], rects[2], rects[3]]));
+    assert_eq!(chain.frame(rects[4]), Some(vec![rects[2], rects[3], rects[4]]));
+
+    // A whole frame, presented: the next two copy everything.
+    assert_eq!(chain.present(None, true), None);
+    assert_eq!(chain.frame(rects[0]), None);
+    assert_eq!(chain.frame(rects[1]), None);
+    assert!(chain.frame(rects[2]).is_some());
+
+    // Someone else presented: start over.
+    chain.count += 1;
+    for rect in &rects[..3] {
+        assert_eq!(chain.frame(*rect), None);
+    }
+    assert!(chain.frame(rects[3]).is_some());
+
+    // A present that did not return S_OK: start over.
+    chain.present(Some(rects[0]), false);
+    assert_eq!(chain.frame(rects[1]), None);
+
+    // Changes covering more than half the window: copy everything.
+    let mut chain = Chain {
+        buffers: BackBuffers::default(),
+        count: 0,
+    };
+    for _ in 0..3 {
+        chain.frame(rects[0]);
+    }
+    assert_eq!(chain.frame(r(0, 0, WIDTH as i32, HEIGHT as i32 / 2 + 10)), None);
+}
+
+/// Copied as `BackBuffers` says, frame after frame on a real flip-sequential
+/// swap chain, the back buffer always comes out as the canvas: DXGI hands
+/// the buffers out in turn, keeping what they held.
+#[test]
+fn back_buffers_copied_partially_hold_the_canvas() {
+    use super::back_buffers::BackBuffers;
+    let Some(mut rig) = Rig::new() else {
+        eprintln!("skipped: no Direct3D 11 device");
+        return;
+    };
+    let slot = |i: usize| r(10 + 30 * i as i32, 20, 30 + 30 * i as i32, 40);
+    let scene = |frame: usize| {
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad(sp(0., 0., 320., 240.), Hsla::from(rgba(0x20242aff))));
+        for i in 0..9 {
+            let color = if i < frame { 0x3366ffff } else { 0xff3344ff };
+            let rect = slot(i);
+            scene.insert_primitive(quad(
+                sp(rect.left as f32, rect.top as f32, 20., 20.),
+                Hsla::from(rgba(color)),
+            ));
+        }
+        scene.finish();
+        scene
+    };
+    let clear = [1.0f32; 4];
+    let mut canvas = rig.canvas().expect("canvas");
+    let mut buffers = BackBuffers::default();
+    let swap_chain = rig.resources.swap_chain.clone();
+    let back_buffer = rig.resources.render_target.clone().expect("back buffer");
+    let mut partial_copies = 0;
+    for frame in 0..9 {
+        let changed = if frame == 0 {
+            rig.draw_whole(&mut canvas, &scene(0), clear).expect("drawn");
+            None
+        } else {
+            let rects = vec![slot(frame - 1)];
+            rig.draw_partial(&mut canvas, &scene(frame), clear, &rects)
+                .expect("drawn");
+            Some(rects)
+        };
+        let count = unsafe { swap_chain.GetLastPresentCount() }.expect("present count");
+        let copy = BackBuffers::to_copy(&mut buffers, changed.as_deref(), count, WIDTH, HEIGHT);
+        partial_copies += usize::from(copy.is_some());
+        super::copy_rects(
+            &rig.devices.device_context,
+            &back_buffer,
+            &canvas.texture,
+            copy.as_deref(),
+        );
+        let read = |texture| {
+            read_back(&rig.devices.device, &rig.devices.device_context, texture)
+                .expect("read back")
+        };
+        assert_same_pixels(&read(&back_buffer), &read(&canvas.texture), WIDTH as usize);
+        let result = match &changed {
+            Some(rects) => super::present_dirty(&swap_chain, rects),
+            None => unsafe {
+                swap_chain.Present(0, windows::Win32::Graphics::Dxgi::DXGI_PRESENT(0))
+            },
+        };
+        let after = unsafe { swap_chain.GetLastPresentCount() }.expect("present count");
+        BackBuffers::presented(
+            &mut buffers,
+            changed,
+            result == windows::Win32::Foundation::S_OK,
+            count,
+            after,
+        );
+    }
+    assert!(partial_copies >= 4, "{partial_copies} partial copies");
+}
+
+// --- atlas writes --- //
+
+/// Only the sprites whose tile overlaps a write join the damage, and a write
+/// inside the damage adds nothing.
+#[test]
+fn atlas_writes_damage_the_sprites_that_show_them() {
+    use gpui::{AtlasTextureId, AtlasTextureKind, TileId};
+
+    use super::atlas_writes::{count, note, since, written_sprites};
+    use super::with_written;
+
+    let tile = |index: u32, x: i32| AtlasTile {
+        texture_id: AtlasTextureId {
+            index,
+            kind: AtlasTextureKind::Monochrome,
+        },
+        tile_id: TileId(x as u32),
+        padding: 0,
+        bounds: rect(x, 0, 16, 16),
+    };
+    let sprite = |tile: AtlasTile, x: f32| MonochromeSprite {
+        order: 0,
+        pad: 0,
+        bounds: sp(x, 10., 16., 16.),
+        content_mask: no_mask(),
+        color: Hsla::from(rgba(0x000000ff)),
+        tile,
+        transformation: TransformationMatrix::unit(),
+    };
+    let mut scene = Scene::default();
+    scene.insert_primitive(sprite(tile(70, 0), 10.));
+    scene.insert_primitive(sprite(tile(70, 32), 100.));
+    scene.insert_primitive(sprite(tile(71, 0), 200.));
+    scene.finish();
+
+    let seen = count();
+    note(&tile(70, 32));
+    // Other tests write to atlases too: keep only this test's texture.
+    let writes: Vec<_> = since(seen)
+        .expect("logged")
+        .into_iter()
+        .filter(|(id, _)| id.index == 70)
+        .collect();
+    assert_eq!(written_sprites(&scene, &writes), [rect(99, 9, 18, 18)]);
+    // More writes than the log keeps: the frame cannot know them all.
+    let before = count();
+    for _ in 0..300 {
+        note(&tile(72, 0));
+    }
+    assert!(since(before).is_none());
+
+    let damage = [rect(0, 0, 50, 50)];
+    assert_eq!(
+        with_written(&damage, vec![rect(5, 5, 10, 10), rect(99, 9, 18, 18)]),
+        [rect(0, 0, 50, 50), rect(99, 9, 18, 18)]
+    );
+    let many: Vec<_> = (0..20).map(|i| rect(100 + 20 * i, 100, 10, 10)).collect();
+    assert_eq!(
+        with_written(&damage, many),
+        [rect(0, 0, 50, 50), rect(100, 100, 390, 10)]
+    );
+}

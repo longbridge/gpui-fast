@@ -221,9 +221,12 @@ A frame is drawn whole when:
   want of a drawable, a composed window's replayed scenes, frames drawn
   through `fast::composition`, which do not touch the canvas;
 - an atlas tile was written since the last frame, as atlas content is
-  outside the scene. macOS counts the writes per atlas
-  (`fast::partial::AtlasWrites`), Windows across the process (so a write in
-  any window draws every window whole once);
+  outside the scene (a tile freed and allocated again can keep its place).
+  macOS counts the writes per atlas (`fast::partial::AtlasWrites`) and draws
+  whole after any. Windows logs the writes of the process with their tile
+  bounds (`fast::partial::atlas_writes`) and adds to the damage the sprites
+  whose tile overlaps one; it draws whole only when more than 256 writes
+  happened since the canvas was drawn;
 - the scene has surfaces (video frames);
 - its damage covers more than half the window;
 - on Windows, a graphics debugger is capturing (upstream's labeled loop then
@@ -252,12 +255,19 @@ cost vertex work only.
   path batch is rasterized into its 4× MSAA intermediate once, scissored to
   the rectangles' union, so a frame costs one full-texture clear and resolve
   per path batch, as a whole frame does, however many rectangles. The
-  canvas is lent to the renderer as its render target view, so paths, which bind it again after their
-  intermediate pass, draw into it too. The whole canvas is then copied into
-  the back buffer and presented with `Present1` and the damage as dirty
-  rectangles, so DWM recomposes only those. (A flip-sequential back buffer
-  holds a frame several presents old; the copy keeps every back buffer
-  right whatever DXGI does with them.)
+  canvas is lent to the renderer as its render target view, so paths, which
+  bind it again after their intermediate pass, draw into it too. The canvas
+  is then copied into the back buffer and presented with `Present1` and the
+  damage as dirty rectangles, so DWM recomposes only those. A flip-sequential
+  swap chain hands its three buffers out in turn, each keeping the frame it
+  was last presented with, three presents ago; so only the damage of this
+  frame and the two before it is copied (`fast::partial::back_buffers`).
+  The whole canvas is copied until every buffer holds a frame presented
+  here, after a present elsewhere (`GetLastPresentCount` does not match,
+  such as after `fast::composition` drew), after a present that did not
+  return `S_OK`, after a whole frame, and when the rectangles cover more
+  than half the window. CI checks on a real swap chain that the back buffer
+  comes out as the canvas frame after frame.
 - **macOS**: each render pass loads the canvas and draws every damage
   rectangle, scissored to it: a small fill pipeline clears the rectangle,
   then the batches draw. Paths are rasterized into their intermediate
@@ -280,9 +290,10 @@ their own targets.
   bytes a pixel, about 33 MB at 4K (3840×2160). It is kept while the window
   is minimized or occluded, and freed only with the renderer (or, on
   Windows, a lost device).
-- Every frame, whole or partial, copies the whole canvas into the drawable
-  or back buffer, so a whole frame costs slightly more than upstream's,
-  which draws straight into it.
+- On macOS every frame copies the whole canvas into the drawable, and on
+  Windows every whole frame and the first after a reset copies it into the
+  back buffer, so a whole frame costs slightly more than upstream's, which
+  draws straight into it.
 - `GPUI_PARTIAL_REDRAW=0` turns all of it off: every frame is drawn whole,
   straight into the drawable or back buffer, and no canvas is created.
 - On Apple's tile-based GPUs a render pass that loads the canvas reads and
@@ -312,9 +323,36 @@ not change (the GPU does the saving), and the window server, which
 composites every presented drawable whole, saves nothing. Quotes saves
 most, as many of its frames have empty damage; those frames are now
 skipped rather than drawn and presented, which also spares the window
-server. Windows has not been measured on real hardware. CI checks the
-pixels of both (see Verifying); measure with `GPUI_RENDER_STATS=1` and the
-platform's GPU tools (Instruments, PIX or GPUView).
+server.
+
+Measured on Windows 11 (i9-12900K, RTX 4080, a 1536×816 window at 2.5×,
+3840×2040 device pixels, 45 s per scenario, 2 rounds, `GPUI_PARTIAL_REDRAW`
+1 against 0, process CPU from outside), when every frame still copied the
+whole canvas and every atlas write drew the frame whole:
+
+| Scenario | Process CPU | App GPU engine | DWM GPU | GPU power |
+| --- | --- | --- | --- | --- |
+| Spinner (144 fps) | 16.1% → 19.6% | 18.3% → 23.2% | 0.41% → 0.46% | 51.4 → 32.3 W |
+| Scroll (144 fps) | 26.8% → 28.6% | 18.8% → 24.6% | 0.41% → 0.67% | 51.2 → 37.4 W |
+| Quotes | 4.43% → 4.30% | 2.23% → 1.32% | 0.27% → 0.11% | 12.8 → 12.4 W |
+| CaretBlink | 1.86% → 2.41% | 0.91% → 0.50% | 2.86% → 0.06% | idle clocks |
+| Clock | — | 0.50% → 0.25% | 1.47% → 0.01% | idle clocks |
+| Hover | — | 1.77% → 0.98% | 5.51% → 0.05% | idle clocks |
+
+Frame rates and frame counts are unchanged. DWM takes the dirty
+rectangles: its GPU time for small updates drops 95–99%. The animations
+draw 37% and 27% less GPU power; their engine time rises because the GPU
+then runs at lower clocks (1013 → 852 MHz). Process CPU rises a little for
+the animations (the damage diff and the partial bookkeeping), about 0.6 W
+of CPU against 19 W of GPU for the spinner. A spinner frame (3,788 pixels)
+and a scroll frame (1.2 M pixels) took about the same GPU time, as the
+whole-canvas copy (31 MB a frame, 9 GB/s at 144 fps) dominated both, and
+most of the whole frames left came from atlas writes (4 of 5 in Quotes, 36
+in Scroll): the two reasons the copy now follows the back buffers and atlas
+writes damage only their sprites. Not re-measured since. CI checks the
+pixels of both platforms (see Verifying); measure with
+`GPUI_RENDER_STATS=1` and the platform's GPU tools (Instruments, PIX or
+GPUView).
 
 ## Controls
 
