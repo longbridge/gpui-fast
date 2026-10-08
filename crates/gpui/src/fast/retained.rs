@@ -1081,44 +1081,73 @@ impl Window {
             return;
         }
         let notified = &self.retained_state.notified_entities;
+        let records = &self.rendered_frame.retained.records;
         let mut changed = SmallVec::<[EntityId; 8]>::new();
-        // The last record inside the outermost cached view the walk is in.
-        let mut cached_until = None;
-        for (index, record) in self.rendered_frame.retained.records.iter().enumerate() {
-            if cached_until.is_some_and(|until| index > until) {
-                cached_until = None;
-            }
-            if cached_until.is_none() && record.is_cached() {
-                cached_until = Some(index + record.nested);
+        // Views inside a cached view changed only by an update that was not
+        // notified, each with the innermost cached view around it.
+        let mut updated_in_cached = SmallVec::<[(EntityId, EntityId); 8]>::new();
+        // The cached views the walk is in, innermost last, with the last
+        // record inside each.
+        let mut cached = SmallVec::<[(EntityId, usize); 4]>::new();
+        for (index, record) in records.iter().enumerate() {
+            while cached.last().is_some_and(|(_, until)| index > *until) {
+                cached.pop();
             }
             let Some(entity) = crate::fast::splice::view_entity(&record.id) else {
                 continue;
             };
-            // A cached view, and what is drawn inside it, is drawn again for
-            // what is notified, not for what is only updated. See
-            // `App::notified_dependencies_changed`.
-            let own_changed = if cached_until.is_some() {
-                cx.notified_dependencies_changed(&record.own_dependencies)
-            } else {
-                let inside_notified = !notified.is_empty()
-                    && self
-                        .rendered_frame
-                        .dispatch_tree
-                        .view_path_reversed(entity)
-                        .any(|view| notified.contains(&view));
-                cx.dependencies_changed(&record.own_dependencies, inside_notified)
+            let changed_alone = || {
+                crate::fast::layers::invalidate::offset_read_changed(self, &record.own_dependencies)
             };
-            if own_changed
-                || crate::fast::layers::invalidate::offset_read_changed(
-                    self,
-                    &record.own_dependencies,
-                )
+            if record.is_cached() {
+                // A cached view is drawn again for what is notified, not
+                // for what is only updated. See
+                // `App::notified_dependencies_changed`.
+                if cx.notified_dependencies_changed(&record.own_dependencies) || changed_alone() {
+                    changed.push(entity);
+                }
+                cached.push((entity, index + record.nested));
+                continue;
+            }
+            let inside_notified = !notified.is_empty()
+                && self
+                    .rendered_frame
+                    .dispatch_tree
+                    .view_path_reversed(entity)
+                    .any(|view| notified.contains(&view));
+            if !cx.dependencies_changed(&record.own_dependencies, inside_notified)
+                && !changed_alone()
             {
-                changed.push(entity);
+                continue;
+            }
+            match cached.last() {
+                Some((around, _))
+                    if !cx.notified_dependencies_changed(&record.own_dependencies) =>
+                {
+                    updated_in_cached.push((entity, *around))
+                }
+                _ => changed.push(entity),
             }
         }
         // As a notification marks a view and the views around it.
         for entity in changed {
+            for view in self.rendered_frame.dispatch_tree.view_path_reversed(entity) {
+                if !self.dirty_views.insert(view) {
+                    break;
+                }
+            }
+        }
+        // A view inside a cached view that was only updated is built again
+        // only if the cached view is: one drawn from last frame draws the
+        // views inside it from last frame too, as upstream does. Marking
+        // one that is built again lets the views around it be drawn from
+        // last frame around it. Marking it marks views inside the cached
+        // view, and views around it, which is dirty already, so no other
+        // cached view becomes dirty for it.
+        for (entity, around) in updated_in_cached {
+            if !self.dirty_views.contains(&around) {
+                continue;
+            }
             for view in self.rendered_frame.dispatch_tree.view_path_reversed(entity) {
                 if !self.dirty_views.insert(view) {
                     break;
