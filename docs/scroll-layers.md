@@ -105,6 +105,22 @@ each frame it then takes one of three paths (`fast::layers::policy::decide`):
   - a row of a list draws over the paths of a row before it, or over what
     that row drew over its paths.
 
+The view holding the container is notified by the container's wheel
+listener, and a frame is taken for a scroll only while that view was
+notified no more often than the wheel scrolled what it holds. Other wheel
+listeners react to the same scroll: GPUI Kit's scrollbar notifies the view
+again when the offset moved since it last saw it, to show itself. A
+notification of a view sent while a wheel event is dispatched, when the event
+scrolled a container that view painted, counts as one for the scroll as long
+as nothing else changed while the event was dispatched: no entity was
+updated or written and no global changed (`fast::layers::wheel`). A wheel
+listener that updates an entity and notifies changed the content, and the
+layer is painted again. What this assumes is that state outside entities
+that a listener changes in reaction to a scroll, and notifies the view for,
+does not change what the view renders inside the scrolled content: the
+scrollbar beside it is drawn afresh, the content is not. State that does
+belongs in an entity the listener updates.
+
 The demotion policy also tracks rebuilding work over the last 32 completed
 layer frames. Virtual lists count the rows and paint operations they actually
 rebuilt relative to the visible rows; other scroll containers count painted

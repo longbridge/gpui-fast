@@ -5682,6 +5682,7 @@ impl Window {
         } else if let Some(touch_event) = event.touch_event() {
             self.dispatch_touch_event(touch_event, cx);
         }
+        crate::fast::layers::wheel::end_dispatch(self, cx);
         if let PlatformInput::LongPress(long_press) = &event {
             match long_press.phase {
                 crate::TouchPhase::Started if !self.default_prevented => {

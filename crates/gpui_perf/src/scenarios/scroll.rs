@@ -23,9 +23,11 @@
 //! GPUI Kit's is (`scenarios::scrollbar`), as `<name>-scrollbar`, again with
 //! that scrollbar asking for an animation frame from its prepaint, as GPUI
 //! Kit's does while it fades, on every frame, as `<name>-animated-scrollbar`,
-//! and on 30 frames of every 100, as `<name>-fading-scrollbar`, and the
-//! three content kinds once more with the scrollbar's thumb dragged instead
-//! of the wheel turned, as `scrollbar-drag-*`.
+//! and on 30 frames of every 100, as `<name>-fading-scrollbar`; with it,
+//! turned by three wheel events a frame, as a trackpad sends them, as
+//! `<name>-scrollbar-burst`; and the three content kinds once more with the
+//! scrollbar's thumb dragged instead of the wheel turned, as
+//! `scrollbar-drag-*`.
 
 use std::{cell::Cell, rc::Rc};
 
@@ -183,8 +185,16 @@ fn drag(frame: usize) -> PlatformInput {
 /// The wheel event of frame `frame`: `FRAMES_PER_SWEEP` frames down, as many
 /// back up, and again.
 fn wheel(frame: usize) -> PlatformInput {
+    wheel_part(frame, 1)
+}
+
+/// One of `parts` wheel events that together scroll as far as the wheel
+/// event of frame `frame` does, as a trackpad or a fast display sends
+/// several a frame.
+fn wheel_part(frame: usize, parts: usize) -> PlatformInput {
     let down = (frame / FRAMES_PER_SWEEP).is_multiple_of(2);
-    let delta = if down { -WHEEL_STEP } else { WHEEL_STEP };
+    let step = WHEEL_STEP / parts as f32;
+    let delta = if down { -step } else { step };
     PlatformInput::ScrollWheel(ScrollWheelEvent {
         position: pointer(),
         delta: ScrollDelta::Pixels(point(px(0.), px(delta))),
@@ -586,6 +596,8 @@ impl Render for Gallery {
 enum Drive {
     /// The wheel over the content.
     Wheel,
+    /// The wheel over the content, in three events a frame.
+    WheelBurst,
     /// The scrollbar's thumb, dragged.
     Thumb,
 }
@@ -625,6 +637,12 @@ impl Scenario for WheelScroll {
         }
         let event = match self.drive {
             Drive::Wheel => wheel(frame),
+            Drive::WheelBurst => {
+                for _ in 0..2 {
+                    window.dispatch_event(wheel_part(frame, 3), cx);
+                }
+                wheel_part(frame, 3)
+            }
             Drive::Thumb => drag(frame),
         };
         window.dispatch_event(event, cx);
@@ -669,7 +687,7 @@ pub fn scenarios() -> Vec<Box<dyn Scenario>> {
                       rounded frame whose corners are paths under its border, scrolled by \
                       the wheel",
         content: |_| Content::List(ListState::new(2_000, ListAlignment::Top, px(200.)), true),
-        scrollbar: false,
+        scrollbar: Bar::None,
         drive: Drive::Wheel,
     }));
     for (kind, description, content) in KINDS {
@@ -699,6 +717,15 @@ pub fn scenarios() -> Vec<Box<dyn Scenario>> {
                 drive: Drive::Wheel,
             }));
         }
+        scenarios.push(Box::new(WheelScroll {
+            name: leak(format!("scroll-{kind}-scrollbar-burst")),
+            description: leak(format!(
+                "{description}, with a GPUI Kit scrollbar, scrolled by three wheel events a frame"
+            )),
+            content,
+            scrollbar: Bar::Still,
+            drive: Drive::WheelBurst,
+        }));
     }
     for (kind, description, content) in KINDS {
         if kind == "same-view" {
