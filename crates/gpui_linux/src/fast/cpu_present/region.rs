@@ -13,7 +13,7 @@ pub(crate) struct Region {
     rects: Vec<Bounds<DevicePixels>>,
 }
 
-// The X11 presenter only clips damage; the bookkeeping is for Wayland buffers.
+// The X11 presenter never needs the whole frame: that is for Wayland buffers.
 #[cfg_attr(not(feature = "wayland"), allow(dead_code))]
 impl Region {
     /// The whole frame.
