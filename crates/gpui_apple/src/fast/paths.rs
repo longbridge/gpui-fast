@@ -61,22 +61,117 @@ pub(crate) fn draw_primitives_to_texture(
     texture: &metal::TextureRef,
     viewport_size: Size<DevicePixels>,
 ) -> Result<Option<metal::CommandBuffer>> {
+    if let Some(command_buffer) = crate::fast::partial::draw_pending(
+        renderer,
+        scene,
+        instance_bindings,
+        writer,
+        texture,
+        viewport_size,
+    )? {
+        return Ok(Some(command_buffer));
+    }
     if scene.paths.is_empty() {
         return Ok(None);
     }
-    let path_batches = plan_paths(scene);
-    let vertices = write_vertices(scene, &path_batches, writer)?;
-
+    let paths = PathPlan::new(scene, writer)?;
     let command_queue = renderer.command_queue.clone();
     let command_buffer = command_queue.new_command_buffer();
     let alpha = if renderer.opaque { 1. } else { 0. };
+    encode_pass(
+        renderer,
+        scene,
+        instance_bindings,
+        writer,
+        &paths,
+        texture,
+        viewport_size,
+        command_buffer,
+        PassStart::Clear(metal::MTLClearColor::new(0., 0., 0., alpha)),
+    )?;
+    Ok(Some(command_buffer.to_owned()))
+}
+
+/// How a pass over the frame's batches begins.
+pub(crate) enum PassStart<'a> {
+    /// The whole texture cleared to this color.
+    Clear(metal::MTLClearColor),
+    /// The texture loaded, every main encoder scissored to `rect`, and `rect`
+    /// filled first by `fill` (see `fast::partial`).
+    Scissor {
+        rect: metal::MTLScissorRect,
+        fill: &'a dyn Fn(&metal::RenderCommandEncoderRef),
+    },
+}
+
+/// The frame's path batches, planned and their vertices written once, for
+/// one or more passes over the frame.
+pub(crate) struct PathPlan {
+    batches: Vec<PathBatch>,
+    vertices: Option<InstanceBinding>,
+}
+
+impl PathPlan {
+    pub(crate) fn new(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<Self> {
+        let batches = plan_paths(scene);
+        let vertices = write_vertices(scene, &batches, writer)?;
+        Ok(PathPlan { batches, vertices })
+    }
+}
+
+/// A main render pass encoder on `texture`, as `start` begins it: cleared,
+/// or loaded and scissored.
+fn begin_main<'a>(
+    command_buffer: &'a metal::CommandBufferRef,
+    texture: &'a metal::TextureRef,
+    viewport_size: Size<DevicePixels>,
+    start: &PassStart,
+    first: bool,
+) -> &'a metal::RenderCommandEncoderRef {
+    match start {
+        PassStart::Clear(color) => new_command_encoder_for_texture(
+            command_buffer,
+            texture,
+            viewport_size,
+            first.then_some(*color),
+        ),
+        PassStart::Scissor { rect, fill } => {
+            let encoder =
+                new_command_encoder_for_texture(command_buffer, texture, viewport_size, None);
+            encoder.set_scissor_rect(*rect);
+            if first {
+                fill(encoder);
+            }
+            encoder
+        }
+    }
+}
+
+/// Encodes every batch of `scene` into `texture` in `command_buffer`,
+/// beginning as `start` says. Paths are rasterized whole into the
+/// intermediate texture and composited through the main encoders, which
+/// `start` may scissor.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_pass(
+    renderer: &mut MetalRenderer,
+    scene: &Scene,
+    instance_bindings: &InstanceBindings,
+    writer: &mut InstanceBufferWriter,
+    paths: &PathPlan,
+    texture: &metal::TextureRef,
+    viewport_size: Size<DevicePixels>,
+    command_buffer: &metal::CommandBufferRef,
+    start: PassStart,
+) -> Result<()> {
+    let vertices = paths.vertices.as_ref();
+    let path_batches = &paths.batches;
 
     // The first group is rasterized before the main pass, which saves ending
     // the main pass for it.
     let mut rasterized = match path_batches.first() {
         Some(first) => rasterize_group(
             renderer,
-            vertices.as_ref(),
+            vertices,
             first.group.clone(),
             viewport_size,
             command_buffer,
@@ -84,12 +179,7 @@ pub(crate) fn draw_primitives_to_texture(
         None => false,
     };
 
-    let mut command_encoder = new_command_encoder_for_texture(
-        command_buffer,
-        texture,
-        viewport_size,
-        Some(metal::MTLClearColor::new(0., 0., 0., alpha)),
-    );
+    let mut command_encoder = begin_main(command_buffer, texture, viewport_size, &start, true);
     let mut path_batches = path_batches.iter().enumerate();
 
     for batch in scene.batches() {
@@ -111,17 +201,13 @@ pub(crate) fn draw_primitives_to_texture(
                     command_encoder.end_encoding();
                     rasterized = rasterize_group(
                         renderer,
-                        vertices.as_ref(),
+                        vertices,
                         path_batch.group.clone(),
                         viewport_size,
                         command_buffer,
                     )?;
-                    command_encoder = new_command_encoder_for_texture(
-                        command_buffer,
-                        texture,
-                        viewport_size,
-                        None,
-                    );
+                    command_encoder =
+                        begin_main(command_buffer, texture, viewport_size, &start, false);
                 }
                 // A batch without vertices left its bounds in the cleared
                 // texture transparent: compositing them draws nothing.
@@ -169,8 +255,7 @@ pub(crate) fn draw_primitives_to_texture(
     }
 
     command_encoder.end_encoding();
-
-    Ok(Some(command_buffer.to_owned()))
+    Ok(())
 }
 
 /// Lays out every path batch's rasterization vertices, in the order of the

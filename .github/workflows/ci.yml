@@ -54,6 +54,9 @@ jobs:
       - name: Test scroll layers on Metal
         if: runner.os == 'macOS'
         run: cargo test -p gpui_apple fast::layers -- --nocapture
+      - name: Test partial redraw on Metal
+        if: runner.os == 'macOS'
+        run: cargo test -p gpui_apple fast::partial -- --nocapture
 
       - name: Test scroll layers on Direct3D
         if: runner.os == 'Windows'

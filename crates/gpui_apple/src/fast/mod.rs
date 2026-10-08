@@ -9,4 +9,5 @@
 
 pub(crate) mod composition;
 pub(crate) mod layers;
+pub(crate) mod partial;
 pub(crate) mod paths;
