@@ -294,7 +294,7 @@ impl Window {
     pub(crate) fn splice_layout(&mut self, id: &GlobalElementId, cx: &mut App) -> Option<Splice> {
         if self.refreshing
             || cx.has_active_drag()
-            || self.a11y.is_active()
+            || crate::fast::a11y::stale(&self.a11y)
             || self.is_inspector_picking(cx)
             || self.retained_state.dirty_subtrees.contains(id)
             || self.next_frame.retained.by_id.contains_key(id)
@@ -757,6 +757,7 @@ impl Window {
         range: Range<PrepaintStateIndex>,
         dispatch: &mut OpenDispatchCopy,
     ) {
+        crate::fast::a11y::reuse_prepaint(self, &range);
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
                 .iter()

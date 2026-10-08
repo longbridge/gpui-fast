@@ -118,7 +118,7 @@ pub(crate) fn active(window: &Window, cx: &App) -> bool {
         && window.retained_state.view_retention
         && !window.refreshing
         && !cx.has_active_drag()
-        && !window.a11y.is_active()
+        && !crate::fast::a11y::stale(&window.a11y)
         && !window.is_inspector_picking(cx)
 }
 

@@ -53,8 +53,27 @@ nodes and primitives are copied from the last frame. A view depends on:
 
 Nothing is drawn from the last frame while the window is being refreshed
 (`window.refresh()`, and what refreshes it: a resize, a focus change), while
-something is dragged, while the inspector is picking, or while accessibility
-is active.
+something is dragged, while the inspector is picking, or on the first frame
+after accessibility was turned on.
+
+### Accessibility
+
+While assistive technology is attached (on macOS, many ordinary apps attach:
+window managers, clipboard and password managers, input methods), the window
+builds an AccessKit tree every frame and hands the whole of it to the
+platform. Views are still drawn from the last frame then: each frame logs
+what building its tree did — a node pushed, a synthetic child added, a node
+finished, an element made focusable, an active descendant claimed — and a
+stretch of the frame drawn again does again what its part of the log did,
+through the same builder (`crates/gpui/src/fast/a11y.rs`). Its nodes hang off
+whatever node is open where the stretch lands, a node finished again has the
+children this frame gave it (a view spliced around a nested view built again
+gets the nested view's new nodes), and the focus is asked again, so the
+focused node is the one focused now. The listeners for accessibility actions
+an element registers as it paints are moved from the last frame as mouse
+listeners are. The tree is the one drawing from scratch builds; the oracle
+compares the two on every frame with accessibility forced on
+(`Window::set_a11y_active_for_tests`, test-support only).
 
 A notified view marks the views around it dirty, because they have to be
 walked to reach it. A view that is dirty only for that reason — it was not

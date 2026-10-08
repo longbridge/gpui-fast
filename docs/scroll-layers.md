@@ -58,6 +58,15 @@ drawing as it does without layers, and how to verify and measure layers.
     keeps the list off its layer. `ListState::scroll_to_end` on a list already
     at its end, as a view keeping its list there calls on every render,
     changes nothing.
+- While accessibility is active, a `div`'s layer keeps the accessibility
+  nodes its content added as it was painted, and a composited frame adds
+  them again moved by the scroll since, as it does the content's hitboxes.
+  Content holding synthetic nodes with bounds of their own
+  (`a11y_synthetic_children`) is painted again instead, as nothing says the
+  code placing them moves them with their element. Virtual lists draw
+  without their layer while accessibility is active: the layer holds rows
+  the list does not show, whose nodes a list without a layer leaves out of
+  the tree.
 - `GPUI_SCROLL_LAYERS=0` turns layers off for a process.
   `Window::set_scroll_layers` does the same for one window in tests.
 
