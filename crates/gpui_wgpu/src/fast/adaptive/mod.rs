@@ -373,9 +373,9 @@ impl Adaptive {
             needs_gpu,
             always,
         });
-        let plan = match decision {
+        let (plan, tiles) = match decision {
             Decision::Cpu(plan) => match raster::can_draw(scene, plan.region.rects(), params) {
-                Ok(()) => plan,
+                Ok(tiles) => (plan, tiles),
                 Err(needs) => {
                     let reason = match needs {
                         raster::NeedsGpu::Surfaces => GpuReason::Surfaces,
@@ -409,10 +409,11 @@ impl Adaptive {
         let pixels = plan.region.area();
         let threads = threads_for(pixels);
         let drawing = Instant::now();
-        raster::draw(
+        raster::draw_tiles(
             canvas,
             scene,
             plan.region.rects(),
+            tiles,
             &*mirror,
             params,
             threads,

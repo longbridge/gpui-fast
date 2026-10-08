@@ -76,6 +76,12 @@ pub(super) struct TileScene {
     scene: Scene,
 }
 
+impl TileScene {
+    pub(super) fn scene(this: &Self) -> &Scene {
+        &this.scene
+    }
+}
+
 /// The content scenes of the layer tiles `scene` composites within
 /// `regions`, each tile once.
 pub(super) fn tile_scenes(scene: &Scene, regions: &[IRect]) -> Vec<TileScene> {

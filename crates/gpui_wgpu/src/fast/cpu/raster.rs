@@ -114,20 +114,38 @@ pub(crate) enum NeedsGpu {
     PathSampling,
 }
 
+/// The scroll layer tiles a scene composites within a frame's regions, as
+/// [`can_draw`] found them drawable, for [`draw_tiles`].
+pub(crate) struct Tiles(Vec<plan::TileScene>);
+
 /// Whether the CPU can draw `scene` inside `regions` as the GPU would with
-/// `params`.
+/// `params`, checking the scene and the content of the layer tiles drawn
+/// there; the tiles, to draw them with [`draw_tiles`].
 pub(crate) fn can_draw(
     scene: &Scene,
-    _regions: &[Bounds<DevicePixels>],
+    regions: &[Bounds<DevicePixels>],
     params: &RasterParams,
-) -> Result<(), NeedsGpu> {
-    if !scene.surfaces.is_empty() {
-        Err(NeedsGpu::Surfaces)
-    } else if !scene.paths.is_empty() && params.path_sample_count != 4 {
-        Err(NeedsGpu::PathSampling)
-    } else {
-        Ok(())
+) -> Result<Tiles, NeedsGpu> {
+    let check = |scene: &Scene| {
+        if !scene.surfaces.is_empty() {
+            Err(NeedsGpu::Surfaces)
+        } else if !scene.paths.is_empty() && params.path_sample_count != 4 {
+            Err(NeedsGpu::PathSampling)
+        } else {
+            Ok(())
+        }
+    };
+    check(scene)?;
+    let regions: Vec<IRect> = regions
+        .iter()
+        .map(IRect::from_bounds)
+        .filter(|region| !region.is_empty())
+        .collect();
+    let tiles = plan::tile_scenes(scene, &regions);
+    for tile in &tiles {
+        check(plan::TileScene::scene(tile))?;
     }
+    Ok(Tiles(tiles))
 }
 
 /// Regions with fewer pixels than this are drawn on the calling thread.
@@ -152,6 +170,39 @@ pub(crate) fn draw(
     params: &RasterParams,
     threads: usize,
 ) {
+    draw_with(canvas, scene, regions, None, sprites, params, threads);
+}
+
+/// [`draw`], with the layer tiles [`can_draw`] found for `regions`.
+pub(crate) fn draw_tiles(
+    canvas: &mut Canvas,
+    scene: &Scene,
+    regions: &[Bounds<DevicePixels>],
+    tiles: Tiles,
+    sprites: &dyn SpritePixels,
+    params: &RasterParams,
+    threads: usize,
+) {
+    draw_with(
+        canvas,
+        scene,
+        regions,
+        Some(tiles),
+        sprites,
+        params,
+        threads,
+    );
+}
+
+fn draw_with(
+    canvas: &mut Canvas,
+    scene: &Scene,
+    regions: &[Bounds<DevicePixels>],
+    tiles: Option<Tiles>,
+    sprites: &dyn SpritePixels,
+    params: &RasterParams,
+    threads: usize,
+) {
     let canvas_rect = IRect::new(0, 0, canvas.width as i32, canvas.height as i32);
     let regions: Vec<IRect> = regions
         .iter()
@@ -161,7 +212,10 @@ pub(crate) fn draw(
     if regions.is_empty() {
         return;
     }
-    let tile_scenes = plan::tile_scenes(scene, &regions);
+    let tile_scenes = match tiles {
+        Some(Tiles(tile_scenes)) => tile_scenes,
+        None => plan::tile_scenes(scene, &regions),
+    };
     let tiles = plan::tile_plans(scene, &tile_scenes);
     let plan = plan::Plan::new(scene, &tiles);
     let ctx = Ctx {
