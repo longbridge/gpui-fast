@@ -2,6 +2,7 @@
 
 mod dependencies;
 mod dispatch;
+mod element_refresh;
 mod global_id;
 mod layers;
 mod layers_lists;

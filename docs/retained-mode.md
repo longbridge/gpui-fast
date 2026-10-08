@@ -56,6 +56,18 @@ Nothing is drawn from the last frame while the window is being refreshed
 something is dragged, while the inspector is picking, or while accessibility
 is active.
 
+GPUI's own elements do not refresh the window for state of their own: a
+clickable `div` noting the press a click starts from, an `active` style
+showing while it is pressed, an `InteractiveText` noting where it was pressed.
+That state lives in the element's state, inside the view that painted it, and
+only the element reads it, so only that view is built again, as for a hover
+style (`crates/gpui/src/fast/element_refresh.rs`). A refresh an application
+asks for (`window.refresh()`, `cx.refresh_windows()`) still draws everything
+again: it is how an application says that state outside entities changed, and
+nothing tells which views read that state. A listener that sets an
+`Rc<Cell<_>>` and refreshes may be in one view while the view reading the
+cell, to show a dialog, is another, so the listener's view is not enough.
+
 A notified view marks the views around it dirty, because they have to be
 walked to reach it. A view that is dirty only for that reason — it was not
 notified, nothing it read itself changed and it is hovered as it was — is not
@@ -147,7 +159,9 @@ list or scroll state, or the window's pointer position, modifier keys and caps
 lock, which are tracked too. Anything else it reads — an `Rc<RefCell<..>>`
 shared outside entities, the time — it has to be notified of (`cx.notify()`),
 as a cached view already has to be in upstream GPUI. Otherwise it keeps
-showing what it showed when it was last built.
+showing what it showed when it was last built. A click does not draw every
+view again along the way: a click handler that changes such state notifies
+the views reading it, or refreshes the window.
 
 What still costs a rebuild every frame is a change made every frame. An
 entity notified, or a global written (`cx.global_mut`, `cx.update_global`),
