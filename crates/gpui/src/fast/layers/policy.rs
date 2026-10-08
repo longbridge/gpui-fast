@@ -220,8 +220,13 @@ pub(crate) fn decide(
     let mut rerendered = false;
     let mut demote = layer.record.is_some() && policy.work.over_budget();
     let mut ineligible = false;
+    let mut owner_animating = false;
     let decision = match &layer.record {
         _ if demoted_until.is_some() => Decision::Bypass,
+        _ if invalidate::owner_animating(window, id) => {
+            owner_animating = true;
+            Decision::Bypass
+        }
         Some(record) if !fits(window, record) => {
             demote = true;
             Decision::Bypass
@@ -330,10 +335,12 @@ pub(crate) fn decide(
     if changed_while_demoted {
         policy.stable_since = frame;
     }
-    if ineligible {
+    if ineligible || owner_animating {
         layer.record = None;
         policy.painted_in = None;
-        policy.retry_at = Some(frame + RETRY_AFTER_INELIGIBLE_FRAMES);
+        if ineligible {
+            policy.retry_at = Some(frame + RETRY_AFTER_INELIGIBLE_FRAMES);
+        }
         return decision;
     }
     match decision {
@@ -391,7 +398,7 @@ fn fits(window: &Window, record: &LayerRecord) -> bool {
 /// Whether the content `record` holds of the scroll container `id` can be
 /// composited from a layer this frame (spec §5.6, §6.5): it deferred no
 /// draws (anchored popovers), placed no anchored element, handles no text
-/// input (a focused input is inside), and no view in it asked for an
+/// input (a focused input is inside), and nothing in it asked for an
 /// animation frame.
 fn eligible(
     window: &Window,

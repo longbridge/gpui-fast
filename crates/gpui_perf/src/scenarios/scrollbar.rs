@@ -16,8 +16,11 @@
 //!   notifications to 120 per second, which one move a frame never reaches;
 //! - hovering the track notifies the view when the hover changes.
 //!
-//! Its fade and width animations are left out: they run for 300–500 ms
-//! around a scroll and would make the scenarios depend on wall time.
+//! Its fade and width animations, which run for 300–500 ms around a scroll,
+//! are stood in for by [`State::animated`]: a thumb whose shade steps every
+//! frame while it animates, asking for an animation frame from its prepaint
+//! as GPUI Kit's does while it fades, counted in frames rather than wall
+//! time.
 
 use std::{cell::Cell, rc::Rc};
 
@@ -90,6 +93,27 @@ pub struct State {
     /// Where on the thumb it was grabbed, while it is dragged.
     grab: Option<Pixels>,
     hovered: bool,
+    /// On how many frames of every 100 the thumb's shade steps, asking for
+    /// an animation frame from the scrollbar's prepaint.
+    animated_frames: u32,
+    /// The frames the scrollbar was prepainted in.
+    tick: u32,
+}
+
+impl State {
+    /// A scrollbar animating on the first `frames` of every 100 frames it is
+    /// drawn in, as GPUI Kit's does while it fades in and out.
+    pub fn animated(frames: u32) -> Self {
+        Self {
+            animated_frames: frames,
+            ..Self::default()
+        }
+    }
+
+    /// Whether the thumb is animating.
+    fn animating(&self) -> bool {
+        self.tick % 100 < self.animated_frames
+    }
 }
 
 /// The thumb of a track of `track` bounds over content of `content` height,
@@ -111,6 +135,8 @@ fn thumb(track: Bounds<Pixels>, content: Pixels, scrolled: Pixels) -> Option<Bou
 fn thumb_color(state: &State) -> Hsla {
     if state.grab.is_some() || state.hovered {
         hsla(0., 0., 0., 0.45)
+    } else if state.animating() {
+        hsla(0., 0., 0., 0.15 + 0.01 * (state.tick % 20) as f32)
     } else {
         hsla(0., 0., 0., 0.25)
     }
@@ -123,15 +149,19 @@ pub fn scrollbar(scrolled: Scrolled, state: Rc<Cell<State>>) -> impl IntoElement
         {
             let scrolled = scrolled.clone();
             let state = state.clone();
-            move |bounds, _, _| {
+            move |bounds, window, _| {
                 // Placing the thumb reads the offset, as GPUI Kit's
                 // `Scrollbar::prepaint` does.
                 let offset = scrolled.offset();
                 let mut current = state.get();
                 if offset != current.last_offset {
                     current.last_offset = offset;
-                    state.set(current);
                 }
+                current.tick = current.tick.wrapping_add(1);
+                if current.animating() {
+                    window.request_animation_frame();
+                }
+                state.set(current);
                 let track = Bounds {
                     origin: point(bounds.right() - px(TRACK_WIDTH), bounds.top()),
                     size: size(px(TRACK_WIDTH), bounds.size.height),
