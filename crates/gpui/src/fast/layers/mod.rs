@@ -10,6 +10,7 @@ pub(crate) mod background;
 pub(crate) mod input;
 pub(crate) mod invalidate;
 pub(crate) mod lists;
+pub(crate) mod overlay;
 pub(crate) mod paint;
 pub(crate) mod policy;
 pub(crate) mod record;

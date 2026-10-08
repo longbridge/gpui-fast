@@ -249,8 +249,13 @@ struct Row {
     part: LayerPart,
     /// The hash of what the row draws over each tile it reaches.
     tile_hashes: Vec<(TileCoord, u64)>,
-    /// Whether the row painted a path, which tiles cannot hold.
-    has_paths: bool,
+    /// What the row drew that its tiles cannot hold, in content space, in
+    /// drawing order: its paths and what it drew over them
+    /// (`fast::layers::overlay`), drawn over the tiles.
+    overlay: Rc<[Primitive]>,
+    /// Everything the row drew, the overlay included, when it has one: what
+    /// drawing the row into the frame draws.
+    whole: Option<Rc<Scene>>,
     /// The layer's translation when the row was painted: its hitboxes, and
     /// the positions its closures and element states hold, are window
     /// positions at it.
@@ -1382,7 +1387,7 @@ fn drawn_alike(a: &Row, b: &Row) -> bool {
             ScaledPixels(-row.slot.origin.y.0),
         );
         let operations: Vec<PaintOperation> = row
-            .part
+            .whole_part()
             .scene
             .paint_operations
             .iter()
@@ -1402,7 +1407,22 @@ fn drawn_alike(a: &Row, b: &Row) -> bool {
         let (tiles, _) = part_tile_hashes(&operations, paint::TILE_SIZE);
         tiles.first().map_or(0, |(_, hash)| *hash)
     }
-    a.part.scene.paint_operations.len() == b.part.scene.paint_operations.len() && hash(a) == hash(b)
+    a.part.scene.paint_operations.len() == b.part.scene.paint_operations.len()
+        && a.overlay.len() == b.overlay.len()
+        && hash(a) == hash(b)
+}
+
+impl Row {
+    /// The part drawing everything the row drew, overlay included.
+    fn whole_part(&self) -> LayerPart {
+        match &self.whole {
+            Some(whole) => LayerPart {
+                bounds: None,
+                scene: whole.clone(),
+            },
+            None => self.part.clone(),
+        }
+    }
 }
 
 /// The parts of `range` outside every one of `spans`.
@@ -2386,7 +2406,7 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
                 .rows
                 .iter()
                 .filter(|(ix, _)| carried.contains(ix))
-                .map(|(_, row)| row.part.scene.clone())
+                .map(|(_, row)| Row::whole_part(row).scene)
                 .collect();
             drop(record);
             for scene in kept {
@@ -2494,10 +2514,16 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
                 PaintOperation::EndLayer => {}
             }
         }
+        let (row_operations, overlay, whole) =
+            match crate::fast::layers::overlay::split(&row_operations) {
+                Some((tiles, overlay)) => {
+                    let mut whole = Scene::default();
+                    whole.paint_operations = row_operations;
+                    (tiles, Rc::from(overlay), Some(Rc::new(whole)))
+                }
+                None => (row_operations, Rc::from([]), None),
+            };
         let (tile_hashes, reach) = part_tile_hashes(&row_operations, paint::TILE_SIZE);
-        let has_paths = row_operations
-            .iter()
-            .any(|operation| matches!(operation, PaintOperation::Primitive(Primitive::Path(_))));
         let mut scene = Scene::default();
         scene.paint_operations = row_operations;
         let (prepaint, hitboxes, layout_keys, read) =
@@ -2552,7 +2578,8 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
                     scene: Rc::new(scene),
                 },
                 tile_hashes,
-                has_paths,
+                overlay,
+                whole,
                 translation,
                 hitboxes,
                 hovers: span.hovers,
@@ -2579,9 +2606,7 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
             .keys()
             .all(|ix| match (rows.rows.get(ix), repainted_over.get(ix)) {
                 (Some(row), Some(before)) => {
-                    row.slot.size == before.slot.size
-                        && row.has_paths == before.has_paths
-                        && drawn_alike(row, before)
+                    row.slot.size == before.slot.size && drawn_alike(row, before)
                 }
                 _ => false,
             });
@@ -2595,7 +2620,27 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
         .max(rendered_operations as f32 / visible_operations.max(1) as f32);
 
     // The content: the rows in order.
-    let content = LayerContent::from_parts(rows.rows.values().map(|row| row.part.clone()));
+    // A row's overlay is drawn over the tiles, so over every later row too:
+    // when a later row draws over it, the content is drawn into the frame.
+    let has_paths = rows.rows.values().enumerate().any(|(ix, row)| {
+        let Some(reach) = crate::fast::layers::overlay::OverlayReach::of(&row.overlay) else {
+            return false;
+        };
+        rows.rows.values().skip(ix + 1).any(|later| {
+            reach.may_meet(later.part.bounds)
+                && reach.drawn_over(&later.part.scene.paint_operations)
+        })
+    });
+    let content = if has_paths {
+        LayerContent::from_parts(rows.rows.values().map(Row::whole_part))
+    } else {
+        LayerContent::from_parts(rows.rows.values().map(|row| row.part.clone()))
+    };
+    let overlay: Rc<[Primitive]> = rows
+        .rows
+        .values()
+        .flat_map(|row| row.overlay.iter().cloned())
+        .collect();
     let mut region = Bounds {
         origin: viewport.origin + to_content,
         size: viewport.size,
@@ -2608,7 +2653,6 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
         paint::TILE_SIZE,
         region,
     );
-    let has_paths = rows.rows.values().any(|row| row.has_paths);
 
     let old = layer.record.take();
     let generation = layer.next_generation();
@@ -2657,7 +2701,7 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
         dependencies,
         views,
         has_paths,
-        paths: Rc::from([]),
+        overlay,
         view_layouts: Rc::default(),
     });
     finish_records(window, id, &frame, records);

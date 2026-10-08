@@ -2,12 +2,13 @@
 //! translation at paint, prepaint and paint ranges and dependencies (M3).
 
 use crate::{
-    Bounds, EntityId, GlobalElementId, HitboxId, PaintIndex, Path, Pixels, Point,
-    PrepaintStateIndex, Rgba, ScaledPixels, TileCoord,
+    Bounds, EntityId, GlobalElementId, HitboxId, PaintIndex, Pixels, Point, PrepaintStateIndex,
+    Rgba, ScaledPixels, TileCoord,
     fast::{
         dependencies::RenderDependencies,
         layers::{reuse::KeptLayout, scene::LayerContent},
     },
+    scene::Primitive,
 };
 use collections::FxHashMap;
 use std::{ops::Range, rc::Rc};
@@ -52,16 +53,15 @@ pub(crate) struct LayerRecord {
     /// The views drawn inside the content, which render before it is
     /// recorded.
     pub(crate) views: Rc<[EntityId]>,
-    /// Whether the content painted a path that other content draws over.
-    /// Paths are never composited from tiles: their antialiasing pairs
-    /// pixels in 2×2 quads, so a path moved by an odd number of device
-    /// pixels would not match a direct draw (spec §5.6). Such content is
+    /// Whether the content's overlay cannot be drawn over its tiles: a
+    /// list row drew over the overlay of a row before it. Such content is
     /// drawn into the frame instead.
     pub(crate) has_paths: bool,
-    /// The paths the content painted that nothing in it draws over, in
+    /// The paths the content painted, and what it drew over them, in
     /// content space, in drawing order: left out of `content`, and drawn
-    /// into the frame over the layer's tiles wherever it is composited.
-    pub(crate) paths: Rc<[Path<ScaledPixels>]>,
+    /// into the frame over the layer's tiles wherever it is composited
+    /// (`fast::layers::overlay`).
+    pub(crate) overlay: Rc<[Primitive]>,
     /// How the views drawn inside the content were laid out when it was
     /// painted, by the views' ids: a frame that composites the layer lays
     /// them out again from these instead of rendering them (spec §6.3).
