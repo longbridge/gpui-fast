@@ -37,6 +37,22 @@ cargo run -p gpui_perf --example native_webview
 cargo run -p gpui_perf --example linux_webview
 ```
 
+## Adaptive rendering
+
+Most of the time an application window changes a few pixels: a caret blinks, a clock ticks, a quote changes. GPUI redraws the whole window on the GPU for each of these. On Linux, GPUI Fast works out exactly which pixels a frame changes, draws only those on the CPU, and shows them without waking the GPU. Larger changes, such as scrolling, still go to the GPU.
+
+At the same or lower CPU cost, the application stops using the GPU for small updates. Measured on Wayland with an Intel integrated GPU and a 4K monitor:
+
+| Small update | Process CPU | Application GPU time |
+| --- | --- | --- |
+| Caret blink | 0.4% → 0.2% | 24.6 → 0 ms/s |
+| Streaming quotes | 1.9% → 1.4% | 64.7 → 0 ms/s |
+| Spinner animation | 8.3% → 4.3% | 356 → 0 ms/s |
+
+CPU use goes down too: drawing a few hundred pixels on the CPU costs less than recording and submitting a whole-window GPU frame.
+
+The benefit is keeping the GPU idle, which mainly saves power and heat. It is largest on laptops and discrete GPUs, where every wake-up raises the GPU's clocks. Adaptive rendering does not make an application faster. Frame rate, latency and scrolling are unchanged. The compositor still composites the window, so its GPU time drops only for animations. Power savings have not been measured yet. See [Adaptive rendering](docs/adaptive-rendering.md) for the full measurements, including X11, and for the environment variables.
+
 ## Using it
 
 Alias the published crates to GPUI's library names:
