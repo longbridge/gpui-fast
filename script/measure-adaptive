@@ -8,6 +8,7 @@ drift fall on both:
 
   gpu       GPUI_CPU_RENDER=0       every frame on the GPU
   adaptive  (unset)                 the default: small changes on the CPU
+  blit      GPUI_CPU_PRESENT=blit   adaptive, CPU frames shown by GPU blit
   always    GPUI_CPU_RENDER=always  every frame the CPU can draw, on the CPU
 
 The scenarios (`gpui_perf --idle --list`) show the trading workspace in a
@@ -24,8 +25,12 @@ after a warm-up:
 
 While each run measures (between the `gpui_perf idle: begin/end` lines it
 prints), this samples every 100 ms: the process's CPU time (utime + stime of
-all threads, /proc/<pid>/stat) and resident memory, and the GPU's power,
-utilization, performance state, graphics clock and memory (nvidia-smi). It
+all threads, /proc/<pid>/stat) and resident memory; the GPU time of the
+process and of the compositor (Hyprland), from their DRM clients
+(/proc/<pid>/fdinfo `drm-engine-*`: i915, xe, amdgpu and others); and the
+whole GPU: on NVIDIA its power, utilization, performance state, graphics
+clock and memory (nvidia-smi), on Intel (i915) its utilization (time out of
+RC6) and graphics clock (sysfs; its power needs root). It
 runs gpui_perf with GPUI_RENDER_STATS=1 and keeps the renderer's
 `render stats:` lines from stderr, raw, and parses them loosely for frames
 drawn on the CPU and on the GPU. Before the runs it samples the GPU for
@@ -70,7 +75,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SCENARIOS = ["Idle", "CaretBlink", "Clock", "Hover", "Spinner", "Quotes", "Scroll"]
-MODES = {"gpu": "0", "adaptive": None, "always": "always"}
+# Each mode's GPUI_CPU_RENDER and GPUI_CPU_PRESENT (None: unset).
+MODES = {
+    "gpu": ("0", None),
+    "adaptive": (None, None),
+    "blit": (None, "blit"),
+    "always": ("always", None),
+}
 NVIDIA_FIELDS = ["power_w", "util_pct", "pstate", "clock_mhz", "memory_mib"]
 SAMPLE_MS = 100
 CLK_TCK = os.sysconf("SC_CLK_TCK")
@@ -158,6 +169,174 @@ class NvidiaSampler:
                 self.process.kill()
             self.thread.join(timeout=3)
         return self.samples
+
+
+class IntelSampler:
+    """An Intel GPU (i915) from sysfs: utilization as the share of time out of
+    RC6 (its idle state), and the actual graphics clock. No power: RAPL needs
+    root."""
+
+    CARD = Path("/sys/class/drm")
+
+    def __init__(self):
+        self.samples = []
+        self.stopped = threading.Event()
+        self.thread = None
+
+    @classmethod
+    def card(cls):
+        for card in sorted(cls.CARD.glob("card[0-9]*")):
+            if (card / "gt/gt0/rc6_residency_ms").exists() and (card / "gt_act_freq_mhz").exists():
+                return card
+        return None
+
+    @classmethod
+    def available(cls):
+        return cls.card() is not None
+
+    def start(self):
+        self.path = self.card()
+        if self.path:
+            self.thread = threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+        return self
+
+    def _read(self):
+        rc6 = int((self.path / "gt/gt0/rc6_residency_ms").read_text())
+        clock = float((self.path / "gt_act_freq_mhz").read_text())
+        return time.time(), rc6, clock
+
+    def _run(self):
+        try:
+            last = self._read()
+        except (OSError, ValueError):
+            return
+        while not self.stopped.wait(SAMPLE_MS / 1000):
+            try:
+                now = self._read()
+            except (OSError, ValueError):
+                break
+            elapsed_ms = (now[0] - last[0]) * 1000
+            idle = (now[1] - last[1]) / elapsed_ms if elapsed_ms > 0 else 1
+            self.samples.append({"t": now[0], "util_pct": max(0.0, 1 - idle) * 100,
+                                 "clock_mhz": now[2], "power_w": None, "pstate": None,
+                                 "memory_mib": None})
+            last = now
+
+    def stop(self):
+        self.stopped.set()
+        if self.thread:
+            self.thread.join(timeout=3)
+        return self.samples
+
+
+class NoGpuSampler:
+    samples = []
+
+    @staticmethod
+    def available():
+        return False
+
+    def start(self):
+        return self
+
+    def stop(self):
+        return []
+
+
+def gpu_sampler():
+    """The GPU sampler for this machine's GPU: NVIDIA's, Intel's, or none."""
+    if NvidiaSampler.available():
+        return NvidiaSampler
+    if IntelSampler.available():
+        return IntelSampler
+    return NoGpuSampler
+
+
+def drm_engine_ns(pid):
+    """The GPU time, in ns, that process `pid`'s DRM clients have used on
+    every engine (`drm-engine-*` in /proc/<pid>/fdinfo, which i915, xe, amdgpu
+    and others report), or None when it reports none."""
+    clients = {}
+    try:
+        fds = os.listdir(f"/proc/{pid}/fdinfo")
+    except OSError:
+        return None
+    for fd in fds:
+        try:
+            with open(f"/proc/{pid}/fdinfo/{fd}") as file:
+                text = file.read()
+        except OSError:
+            continue
+        if "drm-client-id" not in text:
+            continue
+        client, total = None, 0
+        for line in text.splitlines():
+            key, _, value = line.partition(":")
+            if key == "drm-client-id":
+                client = value.strip()
+            elif key.startswith("drm-engine-") and not key.startswith("drm-engine-capacity"):
+                total += int(value.split()[0])
+        if client is not None:
+            clients[client] = total
+    return sum(clients.values()) if clients else None
+
+
+class DrmSampler:
+    """The GPU time of processes, from their DRM clients (`drm_engine_ns`)."""
+
+    def __init__(self, pids):
+        self.pids = pids
+        self.samples = []
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self.thread.start()
+        return self
+
+    def _run(self):
+        while True:
+            sample = {"t": time.time()}
+            for name, pid in self.pids.items():
+                if pid is not None:
+                    sample[name] = drm_engine_ns(pid)
+            self.samples.append(sample)
+            if self.stopped.wait(SAMPLE_MS / 1000):
+                break
+
+    def stop(self):
+        self.stopped.set()
+        self.thread.join(timeout=3)
+        return self.samples
+
+
+def compositor_pid():
+    """The Wayland compositor's process, when it is Hyprland."""
+    try:
+        out = subprocess.run(["pgrep", "-x", "Hyprland"], capture_output=True, text=True,
+                             timeout=5).stdout.split()
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return int(out[0]) if out else None
+
+
+def summarize_drm(samples, begin, end):
+    """GPU milliseconds per second of each process sampled by `DrmSampler`."""
+    inside = [s for s in samples if begin <= s["t"] <= end]
+    summary = {}
+    if len(inside) < 2:
+        return summary
+    for name in inside[0]:
+        if name == "t":
+            continue
+        values = [(s["t"], s.get(name)) for s in inside if s.get(name) is not None]
+        if len(values) < 2:
+            continue
+        (t0, v0), (t1, v1) = values[0], values[-1]
+        if t1 > t0:
+            summary[f"{name}_gpu_ms_per_s"] = (v1 - v0) / 1e6 / (t1 - t0)
+    return summary
 
 
 class ProcSampler:
@@ -283,6 +462,7 @@ def cool_down(target, limit):
     state `target` or a slower one (the one the idle desktop mostly sat in),
     so that one run's clocks do not carry over into the next. Returns the
     seconds waited."""
+    # Only NVIDIA's GPUs report P-states.
     if limit <= 0 or not target or not NvidiaSampler.available():
         return 0
     started = time.time()
@@ -314,7 +494,8 @@ def summarize_gpu(samples, baseline_power):
     memory = [s["memory_mib"] for s in samples if s.get("memory_mib") is not None]
     pstates = {}
     for sample in samples:
-        pstates[sample["pstate"]] = pstates.get(sample["pstate"], 0) + 1
+        if sample.get("pstate") is not None:
+            pstates[sample["pstate"]] = pstates.get(sample["pstate"], 0) + 1
     summary = {
         "samples": len(samples),
         "power_w_mean": statistics.fmean(powers) if powers else None,
@@ -322,6 +503,7 @@ def summarize_gpu(samples, baseline_power):
         "clock_mhz_mean": statistics.fmean(clocks) if clocks else None,
         "memory_mib_mean": statistics.fmean(memory) if memory else None,
         "pstate_fraction": {k: v / len(samples) for k, v in sorted(pstates.items())},
+        "sampler": samples[0].get("sampler"),
     }
     if summary["power_w_mean"] is not None and baseline_power is not None:
         summary["power_w_delta"] = summary["power_w_mean"] - baseline_power
@@ -347,9 +529,10 @@ def run_once(binary, scenario, mode, args, run_dir, baseline_power):
     """One gpui_perf run of `scenario` in `mode`; returns its record."""
     env = dict(os.environ)
     env["GPUI_RENDER_STATS"] = "1"
-    env.pop("GPUI_CPU_RENDER", None)
-    if MODES[mode] is not None:
-        env["GPUI_CPU_RENDER"] = MODES[mode]
+    for name, value in zip(("GPUI_CPU_RENDER", "GPUI_CPU_PRESENT"), MODES[mode]):
+        env.pop(name, None)
+        if value is not None:
+            env[name] = value
     if args.x11:
         env.pop("WAYLAND_DISPLAY", None)
         env["DISPLAY"] = env.get("DISPLAY") or ":0"
@@ -357,11 +540,12 @@ def run_once(binary, scenario, mode, args, run_dir, baseline_power):
     stem = run_dir / name
     command = [str(binary), "--idle", "--only", scenario, "--duration", str(args.duration),
                "--warmup", str(args.warmup), "--json", f"{stem}.json"]
-    nvidia = NvidiaSampler().start()
+    nvidia = gpu_sampler()().start()
     launched = time.time()
     process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True)
     proc = ProcSampler(process.pid).start()
+    drm = DrmSampler({"app": process.pid, "compositor": compositor_pid()}).start()
     markers, stdout_lines, stderr_lines, render_stats = {}, [], [], []
 
     def read_stdout():
@@ -395,6 +579,7 @@ def run_once(binary, scenario, mode, args, run_dir, baseline_power):
         reader.join(timeout=3)
     proc_samples = proc.stop()
     gpu_samples = nvidia.stop()
+    drm_samples = drm.stop()
     (stem.with_suffix(".stdout")).write_text("".join(stdout_lines))
     (stem.with_suffix(".stderr")).write_text("".join(stderr_lines))
 
@@ -419,7 +604,7 @@ def run_once(binary, scenario, mode, args, run_dir, baseline_power):
         "scenario": scenario,
         "mode": mode,
         "command": command,
-        "env": {k: env.get(k) for k in ("GPUI_CPU_RENDER", "GPUI_RENDER_STATS",
+        "env": {k: env.get(k) for k in ("GPUI_CPU_RENDER", "GPUI_CPU_PRESENT", "GPUI_RENDER_STATS",
                                         "WAYLAND_DISPLAY", "DISPLAY")},
         "exit_code": process.returncode,
         "launched": launched,
@@ -430,14 +615,17 @@ def run_once(binary, scenario, mode, args, run_dir, baseline_power):
         "app": app,
         "proc": summarize_proc(proc_samples, begin, end),
         "gpu": summarize_gpu(gpu_inside, baseline_power),
+        "drm": summarize_drm(drm_samples, begin, end),
         "render_frames": path_frames,
         "render_stats": stats_inside,
-        "raw": {"proc": proc_samples, "gpu": gpu_samples},
+        "raw": {"proc": proc_samples, "gpu": gpu_samples, "drm": drm_samples},
     }
     gpu = record["gpu"]
     log(f"  {scenario:<10} {mode:<8} frames {app_result.get('frames', '-')!s:>5}  "
         f"cpu {fmt(record['proc'].get('cpu_pct'), '%', 1)}  "
         f"gpu {fmt(gpu.get('util_pct_mean'), '%', 0)} {fmt(gpu.get('power_w_mean'), 'W', 1)}"
+        + f"  app gpu {fmt(record['drm'].get('app_gpu_ms_per_s'), 'ms/s', 1)}"
+        + f"  compositor gpu {fmt(record['drm'].get('compositor_gpu_ms_per_s'), 'ms/s', 1)}"
         + ("" if process.returncode == 0 else f"  exit {process.returncode}"))
     return record
 
@@ -463,8 +651,9 @@ def summary_markdown(results, baseline, args, window):
         f"{pstates_text(baseline.get('pstate_fraction'))}.",
         "",
         "| Scenario | Mode | Frames | FPS | Process CPU | Main ms/frame (p50/p95) "
-        "| GPU util | GPU power | ΔW vs idle | P-states | Renderer CPU/GPU frames |",
-        "|---|---|---:|---:|---:|---|---:|---:|---:|---|---|",
+        "| App GPU ms/s | Compositor GPU ms/s | GPU util | GPU clock | GPU power | ΔW vs idle "
+        "| P-states | Renderer CPU/GPU frames |",
+        "|---|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---|---|",
     ]
     for scenario in args.scenarios:
         for mode in args.modes:
@@ -489,17 +678,23 @@ def summary_markdown(results, baseline, args, window):
                 f"| {fmt(mean(a.get('fps') for a in apps), '', 1)} "
                 f"| {fmt(mean(r['proc'].get('cpu_pct') for r in runs), ' %', 1)} "
                 f"| {fmt(p50, '', 2)} / {fmt(p95, '', 2)} "
+                f"| {fmt(mean(r['drm'].get('app_gpu_ms_per_s') for r in runs), '', 2)} "
+                f"| {fmt(mean(r['drm'].get('compositor_gpu_ms_per_s') for r in runs), '', 2)} "
                 f"| {fmt(mean(r['gpu'].get('util_pct_mean') for r in runs), ' %', 1)} "
+                f"| {fmt(mean(r['gpu'].get('clock_mhz_mean') for r in runs), ' MHz', 0)} "
                 f"| {fmt(mean(r['gpu'].get('power_w_mean') for r in runs), ' W', 1)} "
                 f"| {fmt_signed(mean(r['gpu'].get('power_w_delta') for r in runs))} "
                 f"| {pstates_text(pstate)} | {split} |")
     lines += [
         "",
         "Means over repetitions. Process CPU: utime + stime of all threads from "
-        "/proc/<pid>/stat over the measured stretch, as a share of one core. Main "
+        "/proc/<pid>/stat over the measured stretch, as a share of one core. App and "
+        "compositor GPU: the GPU time their DRM clients used per second (/proc/<pid>/fdinfo "
+        "drm-engine-*; the compositor is Hyprland's). Main "
         "ms/frame: the main thread's CPU between two updates per frame drawn (gpui_perf). "
-        "GPU columns: nvidia-smi every 100 ms; the power is the whole card's, desktop "
-        "compositor included, and ΔW is against the idle desktop sampled before the runs. "
+        "GPU util, clock, power: the whole GPU's every 100 ms, desktop compositor included, "
+        "from nvidia-smi (ΔW against the idle desktop sampled before the runs), or on Intel "
+        "from i915's sysfs (util: time out of RC6; no power). "
         "Renderer CPU/GPU frames: summed from the `render stats:` lines, where they say.",
     ]
     return "\n".join(lines) + "\n"
@@ -526,7 +721,8 @@ def main():
                              "for ~5 s after the window opens)")
     parser.add_argument("--reps", type=int, default=2, help="repetitions of every run")
     parser.add_argument("--modes", default="gpu,adaptive",
-                        help="comma-separated, of gpu, adaptive, always (default gpu,adaptive)")
+                        help="comma-separated, of gpu, adaptive, blit, always "
+                             "(default gpu,adaptive)")
     parser.add_argument("--out", type=Path, help="output directory")
     parser.add_argument("--baseline", type=float, default=10,
                         help="seconds of idle-desktop GPU sampling first (0 to skip)")
@@ -558,14 +754,15 @@ def main():
         "%Y%m%d-%H%M%S")
     out.mkdir(parents=True, exist_ok=True)
     binary = build(args.no_build)
-    if not NvidiaSampler.available():
-        log("nvidia-smi not found: no GPU samples")
+    sampler_class = gpu_sampler()
+    if sampler_class is NoGpuSampler:
+        log("neither nvidia-smi nor an i915 GPU found: no whole-GPU samples")
 
     baseline_samples = []
-    if args.baseline > 0 and NvidiaSampler.available():
+    if args.baseline > 0 and sampler_class.available():
         cool_down("P8", args.cooldown)
         log(f"sampling the idle desktop's GPU for {args.baseline:g} s; keep the desktop quiet…")
-        sampler = NvidiaSampler().start()
+        sampler = sampler_class().start()
         time.sleep(args.baseline)
         baseline_samples = sampler.stop()
     baseline = summarize_gpu(baseline_samples, None)
