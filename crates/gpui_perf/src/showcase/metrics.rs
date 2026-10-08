@@ -301,12 +301,22 @@ fn clock_time(clock: libc::clockid_t) -> Duration {
 
 pub use gpui_perf::instructions::main_thread_instructions;
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn main_thread_cpu_time() -> Duration {
+    gpui_perf::runner::windows_cpu_time(gpui_perf::runner::CpuTimeOf::Thread).unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn process_cpu_time() -> Duration {
+    gpui_perf::runner::windows_cpu_time(gpui_perf::runner::CpuTimeOf::Process).unwrap_or_default()
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn main_thread_cpu_time() -> Duration {
     Duration::ZERO
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn process_cpu_time() -> Duration {
     Duration::ZERO
 }

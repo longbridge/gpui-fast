@@ -68,6 +68,10 @@ raw-window-handle.workspace = true
 cocoa.workspace = true
 objc.workspace = true
 
+# CPU time of the process and the main thread.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 # 0.39 rather than zed-industries/zed#62379's 0.38, which is built on windows
 # 0.61: gpui_windows hands out windows 0.62's `IUnknown`.

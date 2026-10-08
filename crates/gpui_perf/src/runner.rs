@@ -439,7 +439,56 @@ fn thread_cpu_time() -> Option<Duration> {
     (result == 0).then(|| Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn thread_cpu_time() -> Option<Duration> {
+    windows_cpu_time(CpuTimeOf::Thread)
+}
+
+/// Whose CPU time [`windows_cpu_time`] reads.
+#[cfg(windows)]
+pub enum CpuTimeOf {
+    /// The calling thread's.
+    Thread,
+    /// Every thread of the process's.
+    Process,
+}
+
+/// Kernel plus user time, from `GetThreadTimes` or `GetProcessTimes`, in the
+/// 100 ns units Windows counts them in.
+#[cfg(windows)]
+pub fn windows_cpu_time(of: CpuTimeOf) -> Option<Duration> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, GetCurrentThread, GetProcessTimes, GetThreadTimes,
+    };
+    let (mut creation, mut exit, mut kernel, mut user) = Default::default();
+    // SAFETY: the pseudo handles need no closing, and every out pointer is a
+    // valid, writable FILETIME.
+    let result = unsafe {
+        match of {
+            CpuTimeOf::Thread => GetThreadTimes(
+                GetCurrentThread(),
+                &mut creation,
+                &mut exit,
+                &mut kernel,
+                &mut user,
+            ),
+            CpuTimeOf::Process => GetProcessTimes(
+                GetCurrentProcess(),
+                &mut creation,
+                &mut exit,
+                &mut kernel,
+                &mut user,
+            ),
+        }
+    };
+    result.ok()?;
+    let ticks =
+        |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    Some(Duration::from_nanos((ticks(kernel) + ticks(user)) * 100))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn thread_cpu_time() -> Option<Duration> {
     None
 }
