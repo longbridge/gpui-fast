@@ -17,9 +17,10 @@
 //! damage rectangle in turn, fills it with the clear color a whole frame
 //! starts from in the first pass, and draws the pass's batches of the scene
 //! (`fast::paths::encode_pass`). Overlapping rectangles are merged first, so
-//! no pixel is drawn twice. Paths are rasterized into their intermediate
-//! texture whole, as in a whole frame, and composited through the scissor, so
-//! a pixel inside a rectangle comes out as a whole frame draws it.
+//! no pixel is drawn twice. Only paths whose clipped bounds reach the damage
+//! are rasterized into their intermediate texture. Each retained path is
+//! rasterized whole and composited through the scissor, so a pixel inside a
+//! rectangle comes out as a whole frame draws it.
 //!
 //! A scene drawn again (the number the canvas holds), or one whose damage
 //! with the scene the canvas holds is empty, is neither drawn nor presented
@@ -300,6 +301,8 @@ pub(crate) struct PartialRedraw {
     /// The main passes over the canvas the last frame encoded, for tests.
     #[cfg(test)]
     pub(crate) main_passes: usize,
+    #[cfg(test)]
+    pub(crate) path_vertices: u64,
     /// The frames [`skip`] skipped, for tests.
     #[cfg(test)]
     pub(crate) skipped: usize,
@@ -458,7 +461,11 @@ pub(crate) fn draw_pending(
         Some(Some(pipelines)) => pipelines.fill.clone(),
         _ => return Err(anyhow!("partial frame without its pipelines")),
     };
-    let paths = PathPlan::new(scene, writer)?;
+    let paths = PathPlan::for_damage(scene, writer, Some(&pending.rects))?;
+    #[cfg(test)]
+    {
+        renderer.fast_partial.path_vertices = paths.vertex_count();
+    }
     let command_queue = renderer.command_queue.clone();
     let command_buffer = command_queue.new_command_buffer();
     let color = pending.color;

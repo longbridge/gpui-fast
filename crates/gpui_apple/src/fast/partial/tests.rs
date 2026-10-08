@@ -63,10 +63,19 @@ fn frames_with_nothing_to_draw_are_skipped() {
         return;
     };
     let tiles = Tiles::new(&harness);
-    assert!(!harness.skip(&scene(&tiles, Change::None, 1, 0, &[])), "no canvas yet");
+    assert!(
+        !harness.skip(&scene(&tiles, Change::None, 1, 0, &[])),
+        "no canvas yet"
+    );
     harness.draw(&scene(&tiles, Change::None, 1, 0, &[]));
-    assert!(harness.skip(&scene(&tiles, Change::None, 1, 0, &[])), "the same scene");
-    assert!(harness.skip(&scene(&tiles, Change::None, 2, 1, &[])), "empty damage");
+    assert!(
+        harness.skip(&scene(&tiles, Change::None, 1, 0, &[])),
+        "the same scene"
+    );
+    assert!(
+        harness.skip(&scene(&tiles, Change::None, 2, 1, &[])),
+        "empty damage"
+    );
     assert!(
         !harness.skip(&scene(&tiles, Change::None, 3, 1, &[])),
         "damage relative to a scene the canvas no longer holds"
@@ -565,4 +574,54 @@ fn quad(bounds: Bounds<ScaledPixels>, color: Hsla) -> Quad {
 
 fn device_size(width: i32, height: i32) -> Size<DevicePixels> {
     size(DevicePixels(width), DevicePixels(height))
+}
+
+/// A partial frame must not rasterize paths that cannot reach its damage.
+#[test]
+fn paths_outside_damage_are_not_rasterized() {
+    let Some(mut harness) = Harness::new(device_size(WIDTH, HEIGHT), true) else {
+        return;
+    };
+    let tiles = Tiles::new(&harness);
+    let first = harness.draw(&scene(&tiles, Change::None, 1, 0, &[]));
+    let damage = [rect(5, 5, 4, 10)];
+    let partial = harness.draw(&scene(&tiles, Change::None, 2, 1, &damage));
+    assert_same_pixels(&partial, &first);
+    assert_eq!(harness.renderer.fast_partial.path_vertices, 0);
+}
+
+/// Culling a distant path in a mixed batch preserves the pixels of paths
+/// crossing the damage, including their transparent antialiasing edges.
+#[test]
+fn mixed_path_batches_cull_only_paths_outside_damage() {
+    let Some(mut harness) = Harness::new(device_size(WIDTH, HEIGHT), false) else {
+        return;
+    };
+    let tiles = Tiles::new(&harness);
+    let make_scene = |number, since, damage: &[Bounds<DevicePixels>]| {
+        let mut scene = scene(&tiles, Change::None, number, since, damage);
+        let mut distant = Path::new(point(px(340.), px(250.)));
+        distant.line_to(point(px(370.), px(250.)));
+        distant.line_to(point(px(350.), px(280.)));
+        distant.line_to(point(px(340.), px(250.)));
+        distant.content_mask = ContentMask {
+            bounds: no_mask().bounds.map(|c| px(c.0)),
+        };
+        distant.color = Hsla::from(rgba(0x2266cc80)).into();
+        scene.insert_primitive(distant.scale(1.));
+        scene.finish();
+        scene
+    };
+    let first_scene = make_scene(1, 0, &[]);
+    let vertices: usize = first_scene
+        .paths
+        .iter()
+        .map(|path| path.vertices.len())
+        .sum();
+    let first = harness.draw(&first_scene);
+    let damage = [rect(40, 40, 120, 80), rect(210, 138, 80, 70)];
+    let partial = harness.draw(&make_scene(2, 1, &damage));
+    assert_same_pixels(&partial, &first);
+    assert!(harness.renderer.fast_partial.path_vertices > 0);
+    assert!(harness.renderer.fast_partial.path_vertices < vertices as u64);
 }

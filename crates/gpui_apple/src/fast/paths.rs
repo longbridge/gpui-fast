@@ -22,7 +22,7 @@
 use std::{mem, ops::Range};
 
 use anyhow::{Context as _, Result};
-use gpui::{Bounds, DevicePixels, PrimitiveBatch, ScaledPixels, Scene, Size};
+use gpui::{Bounds, DevicePixels, Path, PrimitiveBatch, ScaledPixels, Scene, Size, point, size};
 
 use crate::metal_renderer::{
     InstanceBinding, InstanceBindings, InstanceBufferWriter, MetalRenderer,
@@ -113,9 +113,25 @@ pub(crate) struct PathPlan {
 }
 
 impl PathPlan {
+    #[cfg(test)]
+    pub(crate) fn vertex_count(&self) -> u64 {
+        self.batches.last().map_or(0, |batch| batch.vertices.end)
+    }
+
     pub(crate) fn new(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<Self> {
-        let batches = plan_paths(scene);
-        let vertices = write_vertices(scene, &batches, writer)?;
+        Self::for_damage(scene, writer, None)
+    }
+
+    /// Keeps batching and draw order, but omits path vertices that cannot
+    /// reach any damage rectangle. The intermediate texture is cleared for
+    /// each group, so an omitted path contributes no pixels to the scissor.
+    pub(crate) fn for_damage(
+        scene: &Scene,
+        writer: &mut InstanceBufferWriter,
+        damage: Option<&[metal::MTLScissorRect]>,
+    ) -> Result<Self> {
+        let batches = plan_paths(scene, damage);
+        let vertices = write_vertices(scene, &batches, writer, damage)?;
         Ok(PathPlan { batches, vertices })
     }
 }
@@ -354,7 +370,7 @@ fn draw_item(
 
 /// Lays out every path batch's rasterization vertices, in the order of the
 /// scene's batches, and groups the batches.
-fn plan_paths(scene: &Scene) -> Vec<PathBatch> {
+fn plan_paths(scene: &Scene, damage: Option<&[metal::MTLScissorRect]>) -> Vec<PathBatch> {
     let mut path_batches: Vec<PathBatch> = Vec::new();
     let mut vertex_count = 0u64;
     let mut group_start = 0;
@@ -371,7 +387,9 @@ fn plan_paths(scene: &Scene) -> Vec<PathBatch> {
         let mut union = first_path.clipped_bounds();
         for path in paths {
             union = union.union(&path.clipped_bounds());
-            vertex_count += path.vertices.len() as u64;
+            if reaches_damage(path, damage) {
+                vertex_count += path.vertices.len() as u64;
+            }
         }
 
         let near = union.dilate(ScaledPixels(PATH_BATCH_MARGIN));
@@ -394,6 +412,26 @@ fn plan_paths(scene: &Scene) -> Vec<PathBatch> {
     path_batches
 }
 
+/// Paths use device coordinates already. Keep a two-pixel margin for
+/// rasterization and the intermediate texture's linear-filter footprint.
+fn reaches_damage(path: &Path<ScaledPixels>, damage: Option<&[metal::MTLScissorRect]>) -> bool {
+    let Some(damage) = damage else {
+        return true;
+    };
+    let bounds = path
+        .clipped_bounds()
+        .dilate(ScaledPixels(PATH_BATCH_MARGIN));
+    damage.iter().any(|rect| {
+        bounds.intersects(&Bounds {
+            origin: point(ScaledPixels(rect.x as f32), ScaledPixels(rect.y as f32)),
+            size: size(
+                ScaledPixels(rect.width as f32),
+                ScaledPixels(rect.height as f32),
+            ),
+        })
+    })
+}
+
 /// Gives the first batch of `group` the vertices of all of it.
 fn close_group(group: &mut [PathBatch]) {
     if let Some(end) = group.last().map(|last| last.vertices.end)
@@ -410,6 +448,7 @@ fn write_vertices(
     scene: &Scene,
     path_batches: &[PathBatch],
     writer: &mut InstanceBufferWriter,
+    damage: Option<&[metal::MTLScissorRect]>,
 ) -> Result<Option<InstanceBinding>> {
     let count = path_batches.last().map_or(0, |last| last.vertices.end) as usize;
     if count == 0 {
@@ -418,6 +457,7 @@ fn write_vertices(
     let vertices = path_batches
         .iter()
         .flat_map(|batch| &scene.paths[batch.paths.clone()])
+        .filter(|path| reaches_damage(path, damage))
         .flat_map(|path| {
             let bounds = path.bounds.intersect(&path.content_mask.bounds);
             path.vertices.iter().map(move |v| PathRasterizationVertex {
