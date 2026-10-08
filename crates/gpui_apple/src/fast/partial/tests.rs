@@ -54,6 +54,51 @@ fn a_frame_with_empty_damage_shows_the_canvas() {
     assert_same_pixels(&second, &first);
 }
 
+/// Several rectangles, one over the path only and one over the image only,
+/// are drawn in one pass over the canvas: the scene's one group of path
+/// batches is rasterized before it.
+#[test]
+fn separate_rectangles_are_drawn_in_one_pass() {
+    for opaque in [true, false] {
+        let Some(mut harness) = Harness::new(device_size(WIDTH, HEIGHT), opaque) else {
+            return;
+        };
+        let tiles = Tiles::new(&harness);
+        harness.draw(&scene(&tiles, Change::None, 1, 0, &[]));
+        let damage = [
+            rect(40, 40, 120, 80),
+            rect(210, 138, 80, 70),
+            rect(300, 55, 30, 30),
+            rect(170, 85, 30, 30),
+        ];
+        let partial = harness.draw(&scene(&tiles, Change::Some, 2, 1, &damage));
+        assert_eq!(harness.last_plan(), Plan::Partial(damage.to_vec()));
+        assert_eq!(harness.renderer.fast_partial.main_passes, 1);
+        assert_same_pixels(&partial, &whole(&tiles, Change::Some, opaque));
+    }
+}
+
+/// Overlapping damage rectangles are merged: their overlap is drawn once.
+#[test]
+fn overlapping_rectangles_are_drawn_once() {
+    let Some(mut harness) = Harness::new(device_size(WIDTH, HEIGHT), false) else {
+        return;
+    };
+    let tiles = Tiles::new(&harness);
+    harness.draw(&scene(&tiles, Change::None, 1, 0, &[]));
+    let damage = [
+        rect(40, 40, 120, 80),
+        rect(100, 60, 80, 40),
+        rect(210, 138, 80, 70),
+    ];
+    let partial = harness.draw(&scene(&tiles, Change::Some, 2, 1, &damage));
+    assert_eq!(
+        harness.last_plan(),
+        Plan::Partial(vec![rect(40, 40, 140, 80), rect(210, 138, 80, 70)])
+    );
+    assert_same_pixels(&partial, &whole(&tiles, Change::Some, false));
+}
+
 #[test]
 fn consecutive_partial_frames_stay_exact() {
     let Some(mut harness) = Harness::new(device_size(WIDTH, HEIGHT), true) else {
@@ -167,6 +212,21 @@ fn decisions() {
             ..frame(Some(window), 5, 4)
         }),
         Plan::Partial(vec![rect(90, 90, 10, 10)])
+    );
+    // Overlapping rectangles merged, until none overlap; the merged one
+    // overlaps the third no more than the first did.
+    let overlapping = [
+        rect(0, 0, 20, 20),
+        rect(50, 50, 10, 10),
+        rect(15, 15, 40, 10),
+        rect(54, 20, 10, 32),
+    ];
+    assert_eq!(
+        decide(&Frame {
+            damage: &overlapping,
+            ..frame(Some(window), 5, 4)
+        }),
+        Plan::Partial(vec![rect(0, 0, 64, 60)])
     );
     // Over half the window.
     let large = [rect(0, 0, 100, 51)];
