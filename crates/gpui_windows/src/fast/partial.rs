@@ -24,7 +24,8 @@
 //! - an atlas tile was written since the last frame (atlas content is outside
 //!   the scene: a tile freed and allocated again keeps its id);
 //! - the scene has surfaces (video frames);
-//! - its damage covers more than half the window;
+//! - its damage covers more than half the window (overlapping rectangles
+//!   merged first: each draws the whole scene into itself);
 //! - a graphics debugger is capturing (upstream's labeled loop then draws);
 //! - `GPUI_PARTIAL_REDRAW=0`, which also keeps the old path without a canvas.
 //!
@@ -210,11 +211,39 @@ pub(crate) fn plan(frame: &Frame) -> Plan {
             (clamped.left < clamped.right && clamped.top < clamped.bottom).then_some(clamped)
         })
         .collect();
+    let rects = disjoint(rects);
     let area: i64 = rects.iter().map(area).sum();
     if rects.len() > MAX_RECTS || area * 2 > i64::from(frame.width) * i64::from(frame.height) {
         return Plan::Whole(Whole::LargeDamage);
     }
     Plan::Partial(rects)
+}
+
+/// `rects` with every two that overlap replaced by their union, until none
+/// overlap: each rectangle draws the whole scene into itself, so a pixel two
+/// rectangles share would have its translucent primitives blended twice.
+fn disjoint(mut rects: Vec<RECT>) -> Vec<RECT> {
+    let overlap = |a: &RECT, b: &RECT| {
+        a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
+    };
+    'merge: loop {
+        for i in 0..rects.len() {
+            for j in i + 1..rects.len() {
+                if overlap(&rects[i], &rects[j]) {
+                    let b = rects.swap_remove(j);
+                    let a = &mut rects[i];
+                    *a = RECT {
+                        left: a.left.min(b.left),
+                        top: a.top.min(b.top),
+                        right: a.right.max(b.right),
+                        bottom: a.bottom.max(b.bottom),
+                    };
+                    continue 'merge;
+                }
+            }
+        }
+        return rects;
+    }
 }
 
 fn area(rect: &RECT) -> i64 {

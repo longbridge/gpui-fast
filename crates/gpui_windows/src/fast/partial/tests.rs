@@ -83,6 +83,27 @@ fn damage_relative_to_the_canvas_draws_partially() {
     assert_eq!(plan(&frame(&[])), Plan::Partial(Vec::new()));
 }
 
+/// Overlapping rectangles become their union, and the union absorbs what it
+/// then overlaps, so no pixel is drawn twice.
+#[test]
+fn overlapping_damage_is_merged() {
+    let damage = [
+        rect(10, 10, 20, 20),
+        rect(25, 25, 20, 20),
+        rect(44, 5, 10, 10),
+        rect(100, 100, 5, 5),
+    ];
+    let Plan::Partial(rects) = plan(&frame(&damage)) else {
+        panic!("drawn whole");
+    };
+    let mut rects: Vec<(i32, i32, i32, i32)> = rects
+        .iter()
+        .map(|r| (r.left, r.top, r.right, r.bottom))
+        .collect();
+    rects.sort();
+    assert_eq!(rects, [(10, 5, 54, 45), (100, 100, 105, 105)]);
+}
+
 #[test]
 fn frames_the_canvas_may_not_hold_draw_whole() {
     let damage = [rect(10, 10, 20, 20)];
