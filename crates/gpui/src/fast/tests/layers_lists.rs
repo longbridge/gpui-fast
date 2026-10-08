@@ -1667,6 +1667,10 @@ mod list {
         /// Only whether a row shows, neither above nor below the viewport, as
         /// an outline beside a transcript does to light the turns in view.
         Shows(usize),
+        /// Which of every other row is the first to show, asking of each
+        /// row above it whether it is above the viewport, as an outline
+        /// beside a transcript finds the first turn in view.
+        Outline,
     }
 
     /// A [`ListPage`] that reads where its list is scrolled to as it
@@ -1684,6 +1688,7 @@ mod list {
                 ScrollRead::AtEnd => self.list.state.is_scrolled_to_end() == Some(false),
                 ScrollRead::Offset => self.list.state.logical_scroll_top().item_ix > 0,
                 ScrollRead::Shows(ix) => shows(&self.list.state, ix),
+                ScrollRead::Outline => first_shown(&self.list.state).is_multiple_of(4),
             };
             div()
                 .flex()
@@ -1825,6 +1830,36 @@ mod list {
         assert_eq!(crossed, 1);
     }
 
+    /// The first of every other row of the list of `state` that shows, as
+    /// an outline finds it.
+    fn first_shown(state: &ListState) -> usize {
+        for ix in (0..state.item_count()).step_by(2) {
+            if state.item_is_above_viewport(ix) == Some(true) {
+                continue;
+            }
+            if state.item_is_below_viewport(ix) == Some(true) {
+                break;
+            }
+            return ix;
+        }
+        0
+    }
+
+    #[crate::test]
+    fn a_view_finding_the_first_row_that_shows_matches_layers_off(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let (with_layers, _) = scroll_aware_page(cx, 60, ScrollRead::Outline);
+        let (without_layers, _) = scroll_aware_page(cx, 60, ScrollRead::Outline);
+        let composited =
+            compare_with_layers_off(cx, with_layers, without_layers, &[-7.; 150], "down");
+        assert!(composited > 100, "the layer was composited ({composited})");
+        compare_with_layers_off(cx, with_layers, without_layers, &[7.; 150], "up");
+        compare_with_layers_off(cx, with_layers, without_layers, &[-23.; 60], "down fast");
+        compare_with_layers_off(cx, with_layers, without_layers, &[29.; 60], "up fast");
+    }
+
     #[crate::test]
     fn a_view_asking_whether_a_row_shows_matches_layers_off(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {
@@ -1841,21 +1876,33 @@ mod list {
     #[crate::test]
     fn a_list_answers_whether_a_row_shows_as_its_geometry_does(cx: &mut TestAppContext) {
         let state = ListState::new(30, ListAlignment::Top, px(0.));
-        let geometry = || crate::fast::layers::answers::ListGeometry::of(&state.0.borrow());
         let check = |label: &str| {
+            let (above, below, at_end): (Vec<_>, Vec<_>, _) = {
+                let inner = state.0.borrow();
+                let geometry = crate::fast::layers::answers::ListGeometry::of(&inner);
+                (
+                    (0..32)
+                        .map(|ix| geometry.item_is_above_viewport(ix))
+                        .collect(),
+                    (0..32)
+                        .map(|ix| geometry.item_is_below_viewport(ix))
+                        .collect(),
+                    geometry.at_end(),
+                )
+            };
             for ix in 0..32 {
                 assert_eq!(
-                    geometry().item_is_above_viewport(ix),
+                    above[ix],
                     state.item_is_above_viewport(ix),
                     "{label}: row {ix} above"
                 );
                 assert_eq!(
-                    geometry().item_is_below_viewport(ix),
+                    below[ix],
                     state.item_is_below_viewport(ix),
                     "{label}: row {ix} below"
                 );
             }
-            assert_eq!(geometry().at_end(), state.is_scrolled_to_end(), "{label}");
+            assert_eq!(at_end, state.is_scrolled_to_end(), "{label}");
         };
         check("not laid out");
         let (handle, _) = page(cx, state.clone());
