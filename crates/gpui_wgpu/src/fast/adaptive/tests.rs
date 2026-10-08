@@ -849,3 +849,90 @@ fn unavailable_blit_surface_draws_on_gpu_or_skips_the_frame() {
             .contains("blit_n=1 ")
     );
 }
+
+/// Atlas writes taken for a frame that is not presented stay for the next
+/// one: a scene presented again redraws the sprites over them.
+#[test]
+fn atlas_writes_outlive_frames_not_presented() {
+    let mut window = Window::new();
+    window.adaptive.resolved = Some(Some(PresentMode::Blit));
+    window.adaptive.presenter_shows = false;
+    let t0 = Instant::now();
+    let mut output = FakeOutput {
+        prepared: Prepared::Ready,
+        shown: Vec::new(),
+    };
+    assert_eq!(blit_frame(&mut window, &mut output, 1, t0), None);
+    Adaptive::gpu_drew_at(&mut window.adaptive, &scene(1, 0, &[]), t0 + ms(2));
+    assert_eq!(
+        blit_frame(&mut window, &mut output, 2, t0 + ms(500)),
+        Some(true)
+    );
+
+    let texture = AtlasTextureId {
+        index: 0,
+        kind: AtlasTextureKind::Monochrome,
+    };
+    AtlasMirror::upload_raw(
+        &mut window.mirror,
+        texture,
+        1024,
+        1024,
+        1,
+        rect(0, 0, 4, 4),
+        &[255; 16],
+    );
+    let mut third = scene(3, 2, &[]);
+    let sprite = MonochromeSprite {
+        order: 0,
+        pad: 0,
+        bounds: scaled(100., 100., 4., 4.),
+        content_mask: ContentMask {
+            bounds: scaled(0., 0., 1000., 800.),
+        },
+        color: Default::default(),
+        tile: AtlasTile {
+            texture_id: texture,
+            tile_id: gpui::TileId(1),
+            padding: 0,
+            bounds: rect(0, 0, 4, 4),
+        },
+        transformation: TransformationMatrix::unit(),
+    };
+    third.monochrome_sprites.push(sprite);
+    let mut attempt = |output: &mut FakeOutput, now: Instant| {
+        Adaptive::frame(
+            &mut window.adaptive,
+            &third,
+            &mut window.mirror,
+            TARGET,
+            &PARAMS,
+            now,
+            output,
+            PresentMode::Blit,
+        )
+    };
+    output.prepared = Prepared::NotPresented;
+    assert_eq!(attempt(&mut output, t0 + ms(1000)), Some(false));
+    // The same scene, presented this time: still relative to scene 2.
+    output.prepared = Prepared::Ready;
+    assert_eq!(attempt(&mut output, t0 + ms(1500)), Some(true));
+    assert_eq!(output.shown[1], vec![rect(99, 99, 6, 6)]);
+    // Presented, the writes are done with.
+    let mut fourth = scene(4, 3, &[]);
+    fourth.monochrome_sprites.push(sprite);
+    let mut attempt = |output: &mut FakeOutput, now: Instant| {
+        Adaptive::frame(
+            &mut window.adaptive,
+            &fourth,
+            &mut window.mirror,
+            TARGET,
+            &PARAMS,
+            now,
+            output,
+            PresentMode::Blit,
+        )
+    };
+    assert_eq!(attempt(&mut output, t0 + ms(2000)), Some(true));
+    assert_eq!(output.shown[2], Vec::new());
+}
