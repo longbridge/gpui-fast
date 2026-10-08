@@ -936,3 +936,37 @@ fn atlas_writes_outlive_frames_not_presented() {
     assert_eq!(attempt(&mut output, t0 + ms(2000)), Some(true));
     assert_eq!(output.shown[2], Vec::new());
 }
+
+/// A presenter carried over to a renderer recreated after the device was
+/// lost releases its memory, and is told when the new renderer's first
+/// frame, on the GPU, replaces what it shows.
+#[test]
+fn presenter_carried_over_device_recovery() {
+    let mut window = Window::new();
+    let t0 = Instant::now();
+    assert!(!window.draw(&scene(1, 0, &[]), t0));
+    assert!(window.draw(&scene(2, 1, &[]), t0 + ms(500)));
+    window.log.borrow_mut().events.clear();
+
+    let presenter = Adaptive::take_presenter(&mut window.adaptive).unwrap();
+    assert_eq!(window.log.borrow().events, vec![Event::Released]);
+    let mut recreated = Adaptive {
+        mode: Some(Mode::Auto),
+        ..Adaptive::default()
+    };
+    Adaptive::install(&mut recreated, presenter, &mut window.mirror);
+    recreated.resolved = Some(Some(PresentMode::Native));
+    window.adaptive = recreated;
+
+    assert!(!window.draw(&scene(3, 2, &[]), t0 + ms(1000)));
+    assert!(window.draw(&scene(4, 3, &[]), t0 + ms(1500)));
+    assert_eq!(
+        window.log.borrow().events,
+        vec![
+            Event::Released,
+            Event::GpuPresented,
+            Event::SwapchainPresent,
+            Event::Present(vec![whole(1000, 800)]),
+        ]
+    );
+}

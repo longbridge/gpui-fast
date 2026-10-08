@@ -286,6 +286,17 @@ impl Adaptive {
         };
     }
 
+    /// Takes the presenter out, to install it again in a renderer recreated
+    /// after the device was lost ([`take_presenter`]), with the memory it
+    /// kept for presenting released. What it shows stays on the window until
+    /// the new renderer's first frame, on the GPU, tells it
+    /// ([`Adaptive::install`] has it told).
+    fn take_presenter(this: &mut Self) -> Option<Box<dyn CpuPresenter>> {
+        let mut presenter = this.presenter.take()?;
+        presenter.release();
+        Some(presenter)
+    }
+
     /// Resolves how CPU frames are shown, on the first frame, and turns the
     /// atlas's CPU copy off when there are none.
     fn resolve(this: &mut Self, mirror: &mut AtlasMirror) -> Option<PresentMode> {
@@ -671,6 +682,25 @@ impl WgpuRenderer {
             presenter,
             &mut self.atlas.cpu_mirror(),
         );
+    }
+}
+
+/// The platform's presenter, out of `renderer` before `WgpuRenderer::recover`
+/// recreates it: the platform installs it only with the window, so it is
+/// carried over to the new renderer ([`restore_presenter`]).
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn take_presenter(renderer: &mut WgpuRenderer) -> Option<Box<dyn CpuPresenter>> {
+    Adaptive::take_presenter(&mut renderer.fast_adaptive)
+}
+
+/// Installs `presenter`, from [`take_presenter`], in the recreated `renderer`.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn restore_presenter(
+    renderer: &mut WgpuRenderer,
+    presenter: Option<Box<dyn CpuPresenter>>,
+) {
+    if let Some(presenter) = presenter {
+        renderer.set_cpu_presenter(presenter);
     }
 }
 
