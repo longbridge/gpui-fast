@@ -67,6 +67,7 @@ pub(crate) mod region;
 pub(crate) mod stats;
 #[cfg(test)]
 mod tests;
+pub(crate) mod verify;
 
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -212,6 +213,8 @@ pub(crate) struct Adaptive {
     atlas_region: Region,
     writes: Vec<(AtlasTextureId, Bounds<DevicePixels>)>,
     writes_by_texture: FxHashMap<AtlasTextureId, Vec<Bounds<DevicePixels>>>,
+    /// The scene drawn whole, with `GPUI_CPU_VERIFY=1` ([`verify`]).
+    verify_canvas: Canvas,
     /// Overrides [`mode`], for tests.
     #[cfg(test)]
     mode: Option<Mode>,
@@ -442,6 +445,30 @@ impl Adaptive {
             return Self::to_gpu(this, scene, everything, GpuReason::PresentFailed, now);
         }
         this.failures = 0;
+        if verify::enabled() {
+            let threads = threads_for(i64::from(target.width) * i64::from(target.height));
+            let mismatch = verify::check(
+                canvas,
+                &mut this.verify_canvas,
+                scene,
+                &*mirror,
+                params,
+                threads,
+            );
+            if let Some(mismatch) = mismatch {
+                log::error!(
+                    "CPU frame {} (since {}) differs from its scene drawn whole in {} pixels \
+                     within {:?}; damage {:?}, region {:?}",
+                    damage.frame,
+                    damage.since,
+                    mismatch.pixels,
+                    mismatch.bounds,
+                    damage.rects,
+                    plan.region.rects(),
+                );
+            }
+            this.stats.verified(mismatch);
+        }
         this.presenter_shows = present_mode == PresentMode::Native;
         // Wall time, plus the other threads' share of the drawing.
         let cpu = took + drawn * (threads as u32 - 1);

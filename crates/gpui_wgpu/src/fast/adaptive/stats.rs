@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::fast::adaptive::PresentMode;
 use crate::fast::adaptive::policy::GpuReason;
+use crate::fast::adaptive::verify::Mismatch;
 
 const REASONS: usize = GpuReason::ALL.len();
 
@@ -74,6 +75,11 @@ pub(crate) struct WindowStats {
     gpu_timed: u64,
     gpu_time: Duration,
     gpu_reasons: [u64; REASONS],
+    /// CPU frames checked with `GPUI_CPU_VERIFY=1`, those that differed from
+    /// their scene drawn whole, and their differing pixels.
+    verified: u64,
+    mismatched: u64,
+    mismatched_pixels: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -98,6 +104,15 @@ impl WindowStats {
         cpu.pixels += pixels;
         cpu.time += took;
         cpu.max = cpu.max.max(took);
+    }
+
+    /// Notes a CPU frame checked against its scene drawn whole.
+    pub(crate) fn verified(&mut self, mismatch: Option<Mismatch>) {
+        self.verified += 1;
+        if let Some(mismatch) = mismatch {
+            self.mismatched += 1;
+            self.mismatched_pixels += mismatch.pixels;
+        }
     }
 
     fn cpu_frames(&self) -> u64 {
@@ -171,6 +186,12 @@ impl WindowStats {
                     name = mode.name(),
                 ));
             }
+        }
+        if self.verified > 0 {
+            line.push_str(&format!(
+                " verify_n={} verify_bad={} verify_bad_px={}",
+                self.verified, self.mismatched, self.mismatched_pixels
+            ));
         }
         for reason in GpuReason::ALL {
             let count = self.gpu_reasons[reason.index()];
