@@ -82,9 +82,9 @@ pub(crate) struct LayerRows {
     /// Whether the layer is a list's, which a scroll extends by the rows it
     /// uncovers instead of painting it again.
     pub(crate) list: bool,
-    /// Whether the layer is a `list`'s, painted afresh for a change of its
-    /// content only over the rows the list shows (see [`overscan_reach`]),
-    /// rather than over the whole overscan, as a `uniform_list`'s is.
+    /// Whether the layer is a `list`'s, whose rows the view holding it may
+    /// render again without the layer being painted afresh (see
+    /// [`LayerRows::rerendered`]).
     pub(crate) repaints_shown_rows: bool,
     /// How many rows frames that kept the rows the layer held added to it
     /// since its rows were last painted afresh. What the rows read is kept
@@ -98,10 +98,6 @@ pub(crate) struct LayerRows {
     measured: Option<Measured>,
     /// The layer's translation in the last frame that drew its rows.
     last_translation: Option<Point<ScaledPixels>>,
-    /// How many viewports' height of rows a `list`'s layer holds on each side
-    /// of the rows it shows, up to [`paint::OVERSCAN_VIEWPORTS`]. See
-    /// [`overscan_reach`].
-    reach: f32,
     /// The rows the list showed in the last frame that drew it, and that
     /// frame: the rows whose element states it kept alive, as a list
     /// without a layer does. See [`sort_rows`].
@@ -185,30 +181,6 @@ impl LayerRows {
 /// How many times the rows a list's layer is to hold its frames that keep
 /// rows may add before its rows are painted afresh.
 const REPAINT_AFTER_ADDED: usize = 4;
-
-/// How many viewports' height of rows a frame that keeps a `list`'s rows may
-/// add to the overscan on each side, growing it back after a repaint.
-const REACH_STEP_VIEWPORTS: f32 = 0.5;
-
-/// How many viewports' height of rows on each side of those it shows a
-/// `list`'s layer is to hold after a frame in `mode`, having held `reach`
-/// before, `had_record` whether it held any.
-///
-/// The first frame painting the layer paints the whole overscan, which the
-/// frames compositing it pay back. A frame painting it afresh after that,
-/// for a change of its content, paints only the rows the list shows, as the
-/// list does without a layer: a view holding the list that is notified now
-/// and then, as a chat transcript is when it reaches its end, would
-/// otherwise rebuild five viewports of rows each time, and its layer be
-/// demoted for those spikes (see [`crate::fast::layers::work`]). The frames
-/// keeping the rows after it grow the overscan back a step at a time.
-fn overscan_reach(mode: Mode, reach: f32, had_record: bool) -> f32 {
-    match mode {
-        Mode::Extend => (reach + REACH_STEP_VIEWPORTS).min(paint::OVERSCAN_VIEWPORTS),
-        Mode::Repaint if had_record => 0.,
-        Mode::Repaint => paint::OVERSCAN_VIEWPORTS,
-    }
-}
 
 #[cfg(test)]
 thread_local! {
@@ -466,6 +438,86 @@ pub(crate) struct Rows(Option<RowPlan>);
 /// The rows `visible` and `overscan` rows on each side, of `item_count`.
 fn needed_rows(visible: &Range<usize>, overscan: usize, item_count: usize) -> Range<usize> {
     visible.start.saturating_sub(overscan).min(item_count)..(visible.end + overscan).min(item_count)
+}
+
+/// How many viewports of rows a frame keeping a list's rows may render, the
+/// rows it shows that the layer lacks and those it adds to the overscan
+/// together.
+///
+/// A list drawn without a layer renders the viewport's rows every frame: a
+/// frame growing the overscan renders no more than that, most of it on the
+/// side the list scrolls toward (see [`ahead`]), and a frame whose shown
+/// rows alone cost that adds no overscan. A scroll faster than the overscan grows, as a scrollbar's thumb
+/// dragged, renders on each frame the rows it shows, as the list does
+/// without its layer, instead of the whole overscan around them.
+///
+/// The frame promoting the layer paints the whole overscan, which the frames
+/// compositing it pay back. A frame painting it afresh for a change of its
+/// content, which costs more than drawing the rows directly (see
+/// [`crate::fast::layers::work::REPAINT_COST`]), paints only the rows the
+/// list shows, as the list does without a layer, and the frames keeping the
+/// rows after it grow the overscan back: a view holding the list that is
+/// notified now and then, as a chat transcript is when it reaches its end,
+/// does not render five viewports of rows each time.
+const RENDER_PER_FRAME_VIEWPORTS: f32 = 1.0;
+
+/// The rows of `limit`, around and including `visible`, that a uniform
+/// list's layer is to hold after a frame keeping the rows of `unrendered`:
+/// those it keeps cost nothing (the rows between the first it keeps and the
+/// last are taken for kept), and it renders at most
+/// [`RENDER_PER_FRAME_VIEWPORTS`] of a viewport's rows, those it shows
+/// first, growing the overscan on the side the list scrolls toward (see
+/// [`ahead`]).
+fn grown_rows(
+    unrendered: &BTreeSet<usize>,
+    visible: &Range<usize>,
+    limit: Range<usize>,
+    toward_end: Option<bool>,
+) -> Range<usize> {
+    let kept = match (unrendered.first(), unrendered.last()) {
+        (Some(first), Some(last)) => *first..*last + 1,
+        _ => 0..0,
+    };
+    let shown_kept = visible
+        .end
+        .min(kept.end)
+        .saturating_sub(visible.start.max(kept.start));
+    let shown_missing = visible.len() - shown_kept;
+    let allowed = (visible.len() as f32 * RENDER_PER_FRAME_VIEWPORTS).ceil() as usize;
+    let budget = allowed.saturating_sub(shown_missing);
+    let (mut start, mut end) = (visible.start.max(limit.start), visible.end.min(limit.end));
+    if kept.contains(&end) {
+        end = kept.end.min(limit.end);
+    }
+    if start > 0 && kept.contains(&(start - 1)) {
+        start = kept.start.max(limit.start);
+    }
+    let (share, _) = ahead(toward_end);
+    let below = ((budget as f32 * share).round() as usize).min(budget);
+    let above = (budget - below).min(start - limit.start);
+    let below = below.min(limit.end - end);
+    start - above..end + below
+}
+
+/// Whether a list's content, moved by `last` into window space in the last
+/// frame that drew its rows and by `now` in this one, scrolls toward its
+/// end (`Some(true)`), toward its start, or neither.
+fn scrolls_toward_end(last: Option<Point<ScaledPixels>>, now: Point<ScaledPixels>) -> Option<bool> {
+    let moved = now.y.0 - last?.y.0;
+    (moved != 0.).then_some(moved < 0.)
+}
+
+/// The shares of a frame's budget for rows that the side toward the list's
+/// end and the side toward its start get, when it scrolls toward its end
+/// (`toward_end` is `Some(true)`), toward its start, or neither: most for
+/// the rows the scroll brings, ahead of it, and some for those behind it,
+/// which show again when the scroll turns back.
+fn ahead(toward_end: Option<bool>) -> (f32, f32) {
+    match toward_end {
+        Some(true) => (0.75, 0.25),
+        Some(false) => (0.25, 0.75),
+        None => (0.5, 0.5),
+    }
 }
 
 /// The rows of `needed` that `held` lacks, in runs.
@@ -790,6 +842,7 @@ pub(crate) fn begin_uniform_list(
         .max(1.) as usize;
     let needed = needed_rows(visible, overscan, item_count);
     let layer = paint::layer_mut(window, id);
+    let promoting = layer.record.is_none();
     let extends = decision == Decision::Composite
         && layer.rows.list
         && !layer.rows.due_for_repaint(&needed)
@@ -817,6 +870,24 @@ pub(crate) fn begin_uniform_list(
         visible,
         &changed,
     );
+    let needed = match mode {
+        Mode::Extend => grown_rows(
+            &unrendered,
+            visible,
+            needed,
+            scrolls_toward_end(
+                window.fast_layers.layers[id].rows.last_translation,
+                translation,
+            ),
+        ),
+        // Promoted, the layer is painted over the whole overscan, which the
+        // frames compositing it pay back; painted afresh while it only
+        // scrolls, for having added too many rows, too, as the scroll goes
+        // on. Painted afresh for a change of its content, it is painted over
+        // the rows the list shows, as the list is drawn without it.
+        Mode::Repaint if promoting || decision == Decision::Composite => needed,
+        Mode::Repaint => visible.start.max(needed.start)..visible.end.min(needed.end),
+    };
     let (retain, carried) = match mode {
         Mode::Extend => {
             let retain = retained_rows(&unrendered, &needed);
@@ -1872,9 +1943,27 @@ pub(crate) fn end_list(
         .frame
         .as_ref()
         .map_or(Mode::Repaint, |frame| frame.mode);
-    let reach = overscan_reach(mode, layer.rows.reach, layer.record.is_some());
-    layer.rows.reach = reach;
-    let extent = viewport.size.height * reach;
+    // The frame promoting the layer paints the whole overscan, which the
+    // frames compositing it pay back; one painting the rows afresh after
+    // that paints only those the list shows; one keeping them adds rows
+    // around them within its budget (see [`RENDER_PER_FRAME_VIEWPORTS`]), the
+    // rows the layer holds for free.
+    let promoting = layer.record.is_none();
+    let toward_end = scrolls_toward_end(layer.rows.last_translation, frame_translation);
+    // The rows between the first the layer holds and the last are taken
+    // for held: a row among them it lacks is rendered all the same.
+    let held = match (
+        mode,
+        layer.rows.rows.first_key_value(),
+        layer.rows.rows.last_key_value(),
+    ) {
+        (Mode::Extend, Some((first, _)), Some((last, _))) => *first..*last + 1,
+        _ => 0..0,
+    };
+    let extent = match mode {
+        Mode::Repaint if !promoting => Pixels::ZERO,
+        _ => viewport.size.height * paint::OVERSCAN_VIEWPORTS,
+    };
     let (top, bottom) = (viewport.top() - extent, viewport.bottom() + extent);
     let available = crate::size(
         AvailableSpace::Definite(bounds.size.width),
@@ -1897,24 +1986,65 @@ pub(crate) fn end_list(
         rendered.insert(row, element);
         size.height
     };
-    let mut y = anchor_origin.y;
-    let mut row = anchor;
-    while row < item_count && y < bottom {
-        let height = height_of(row, window, cx, &mut rendered);
-        tops.insert(row, (y, height));
-        y += height;
-        row += 1;
+    let mut missing = Pixels::ZERO;
+    let (mut end, mut end_y) = (anchor, anchor_origin.y);
+    while end < item_count && end_y < viewport.bottom() {
+        let height = height_of(end, window, cx, &mut rendered);
+        tops.insert(end, (end_y, height));
+        if !held.contains(&end) {
+            missing += height;
+        }
+        end_y += height;
+        end += 1;
     }
-    let end = row;
-    let mut y = anchor_origin.y;
-    let mut row = anchor;
-    while row > 0 && y > top {
-        row -= 1;
-        let height = height_of(row, window, cx, &mut rendered);
-        y -= height;
-        tops.insert(row, (y, height));
+    let (mut start, mut start_y) = (anchor, anchor_origin.y);
+    while start > 0 && start_y > viewport.top() {
+        start -= 1;
+        let height = height_of(start, window, cx, &mut rendered);
+        start_y -= height;
+        tops.insert(start, (start_y, height));
+        if !held.contains(&start) {
+            missing += height;
+        }
     }
-    let needed = row..end;
+    let (end_budget, start_budget) = match mode {
+        Mode::Extend => {
+            let budget =
+                (viewport.size.height * RENDER_PER_FRAME_VIEWPORTS - missing).max(Pixels::ZERO);
+            let (end, start) = ahead(toward_end);
+            (budget * end, budget * start)
+        }
+        Mode::Repaint if promoting => (extent, extent),
+        Mode::Repaint => (Pixels::ZERO, Pixels::ZERO),
+    };
+    // A row the layer lacks is added only if it fits what is left.
+    let mut left = end_budget;
+    while end < item_count && end_y < bottom {
+        let height = height_of(end, window, cx, &mut rendered);
+        if !held.contains(&end) {
+            if height > left {
+                break;
+            }
+            left -= height;
+        }
+        tops.insert(end, (end_y, height));
+        end_y += height;
+        end += 1;
+    }
+    let mut left = start_budget;
+    while start > 0 && start_y > top {
+        let height = height_of(start - 1, window, cx, &mut rendered);
+        if !held.contains(&(start - 1)) {
+            if height > left {
+                break;
+            }
+            left -= height;
+        }
+        start -= 1;
+        start_y -= height;
+        tops.insert(start, (start_y, height));
+    }
+    let mut needed = start..end;
 
     // The rows the list shows: those it renders without a layer.
     let visible = shown_rows(&tops, bounds);
@@ -1956,18 +2086,24 @@ pub(crate) fn end_list(
             .collect(),
         Mode::Repaint => BTreeSet::new(),
     };
-    if frame.mode == Mode::Extend
-        && (due_for_repaint
-            || !held_rows_land_alike(
-                &layer.rows,
-                &kept,
-                &needed,
-                &tops,
-                frame.translation,
-                scale_factor,
-            ))
-    {
-        frame.mode = Mode::Repaint;
+    if frame.mode == Mode::Extend {
+        if due_for_repaint {
+            // Painted afresh for having added too many rows while it only
+            // scrolls: the scroll goes on, and the overscan is painted with it.
+            frame.mode = Mode::Repaint;
+        } else if !held_rows_land_alike(
+            &layer.rows,
+            &kept,
+            &needed,
+            &tops,
+            frame.translation,
+            scale_factor,
+        ) {
+            // The rows held would not land where they are painted: the rows
+            // shown are painted afresh, as for a change of the content.
+            frame.mode = Mode::Repaint;
+            needed = frame.visible.clone();
+        }
     }
     let (held, unrendered) = match frame.mode {
         Mode::Extend => (kept.clone(), kept),
@@ -2460,7 +2596,7 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
         mem::swap(&mut window.next_frame.scene, &mut paint.scene);
         window.content_mask_stack.pop();
     }
-    let rendered_rows = paint.spans.len();
+    let rendered_rows: Vec<usize> = paint.spans.iter().map(|span| span.row).collect();
     let rendered_operations = paint.scene.paint_operations.len();
     let painted = paint.scene;
 
@@ -2641,7 +2777,17 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
         .range(frame.visible.clone())
         .map(|(_, row)| row.part.scene.paint_operations.len())
         .sum();
-    let work = (rendered_rows as f32 / frame.visible.len().max(1) as f32)
+    // Rows are of any height, one of them filling the viewport or a few
+    // pixels tall: how much of the viewport the rows rendered would fill,
+    // and what they drew against what the rows shown draw, tell their cost
+    // apart, where their count does not.
+    let rendered_height: f32 = rendered_rows
+        .iter()
+        .filter_map(|row| rows.rows.get(row))
+        .map(|row| row.slot.size.height.0)
+        .sum();
+    let viewport_height = frame.viewport.size.height.0 * scale_factor;
+    let work = (rendered_height / viewport_height.max(1.))
         .max(rendered_operations as f32 / visible_operations.max(1) as f32);
 
     // The content: the rows in order.
@@ -2742,6 +2888,10 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
     if unchanged {
         policy::note_unchanged_repaint(window, id);
     }
+    let work = match frame.mode {
+        Mode::Repaint => work * crate::fast::layers::work::REPAINT_COST,
+        Mode::Extend => work,
+    };
     policy::note_work(window, id, work);
     paint::insert_layer(window, id, translation, dirtied);
 }

@@ -40,10 +40,6 @@ const PROMOTE_AFTER_SCROLLED_FRAMES: u8 = 2;
 /// A layer whose content changed on at least this many of the last 16
 /// frames is demoted. Include the halfway boundary at 120 Hz.
 const DEMOTE_AFTER_CHANGED_FRAMES: u32 = 8;
-/// Uniform lists rebuild about five viewports on content changes, so their
-/// frequency limit is lower even before the work budget is exhausted. A
-/// `list` rebuilds only the rows it shows, as it would without a layer.
-const LIST_DEMOTE_AFTER_CHANGED_FRAMES: u32 = 4;
 /// How many frames a demoted container's content must be stable for before
 /// it may get a layer again.
 const REPROMOTE_AFTER_STABLE_FRAMES: u64 = 60;
@@ -189,7 +185,20 @@ pub(crate) fn decide(
     let scrolled =
         noted && (invalidate::is_list(window, id) || policy.last_offset != Some(scroll_offset));
 
-    let streak = if !scrolled {
+    // A scroll past everything the layer holds shows none of it: the frame
+    // would render all it shows, as without a layer, and the layer's upkeep
+    // on top. A scrollbar's thumb dragged fast, or a jump to an item, is
+    // drawn without the layer, which is painted again on the next frame.
+    let jumped = layer
+        .record
+        .as_ref()
+        .is_some_and(|record| !shows_any(record, scroll_offset));
+    // Nor is a layer promoted while a scroll leaps by its viewport's
+    // extent a frame.
+    let leapt = policy
+        .last_offset
+        .is_some_and(|last| leaps(last, scroll_offset, bounds.size));
+    let streak = if !scrolled || leapt {
         0
     } else if policy
         .last_scrolled_frame
@@ -223,6 +232,7 @@ pub(crate) fn decide(
     let mut owner_animating = false;
     let decision = match &layer.record {
         _ if demoted_until.is_some() => Decision::Bypass,
+        _ if jumped => Decision::Bypass,
         _ if invalidate::owner_animating(window, id) => {
             owner_animating = true;
             Decision::Bypass
@@ -278,12 +288,7 @@ pub(crate) fn decide(
         .unwrap_or_default();
     if changed {
         history |= 1;
-        let changed_limit = if layer.rows.list && !layer.rows.repaints_shown_rows {
-            LIST_DEMOTE_AFTER_CHANGED_FRAMES
-        } else {
-            DEMOTE_AFTER_CHANGED_FRAMES
-        };
-        demote |= history.count_ones() >= changed_limit;
+        demote |= history.count_ones() >= DEMOTE_AFTER_CHANGED_FRAMES;
     }
     let decision = if demote { Decision::Bypass } else { decision };
 
@@ -335,7 +340,7 @@ pub(crate) fn decide(
     if changed_while_demoted {
         policy.stable_since = frame;
     }
-    if ineligible || owner_animating {
+    if ineligible || owner_animating || jumped {
         layer.record = None;
         policy.painted_in = None;
         if ineligible {
@@ -354,9 +359,25 @@ pub(crate) fn decide(
     decision
 }
 
-/// Records work completed for the layer in this frame. One unit is the
-/// work of drawing its visible content directly; overscan and rows rebuilt
-/// for hover count too. The next prepaint can fall back before doing more.
+/// Whether a scroll from `from` to `to` moved the content of a viewport of
+/// `size` by at least the viewport's extent on an axis.
+fn leaps(from: Point<Pixels>, to: Point<Pixels>, size: Size<Pixels>) -> bool {
+    let moved = |from: Pixels, to: Pixels, extent: Pixels| {
+        extent > Pixels::ZERO && (to - from).abs() >= extent
+    };
+    moved(from.x, to.x, size.width) || moved(from.y, to.y, size.height)
+}
+
+/// Whether any of what `record` painted shows in its viewport with the
+/// content scrolled by `scroll_offset`.
+fn shows_any(record: &LayerRecord, scroll_offset: Point<Pixels>) -> bool {
+    let painted = Bounds {
+        origin: record.painted_region.origin + scroll_offset - record.scroll_offset,
+        size: record.painted_region.size,
+    };
+    painted.intersects(&record.viewport)
+}
+
 /// Notes that the layer of `id`, painted afresh this frame for a change of
 /// its content, came out as it was: the frame does not count as one its
 /// content changed on (see [`DEMOTE_AFTER_CHANGED_FRAMES`]).
@@ -369,6 +390,9 @@ pub(crate) fn note_unchanged_repaint(window: &mut Window, id: &GlobalElementId) 
     }
 }
 
+/// Records work completed for the layer in this frame. One unit is the
+/// work of drawing its visible content directly; overscan and rows rebuilt
+/// for hover count too. The next prepaint can fall back before doing more.
 pub(crate) fn note_work(window: &mut Window, id: &GlobalElementId, work: f32) {
     let frame = window.fast_layers.frame;
     if let Some(layer) = window.fast_layers.layers.get_mut(id) {

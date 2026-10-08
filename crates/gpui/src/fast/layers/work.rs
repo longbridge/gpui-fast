@@ -6,11 +6,28 @@
 //! input rebuilds. This is a work estimate, not a CPU or GPU timing guarantee.
 
 const WINDOW: usize = 32;
+/// How many times what drawing content directly costs painting it into a
+/// layer afresh costs: it is laid out, prepainted and painted as it is
+/// without the layer, and besides, every tile it reaches is hashed and
+/// rasterized again, and its records are built anew. Painting a list's
+/// shown rows afresh every frame costs two to two and a half times drawing
+/// them without the layer, and a scrolling `div`'s content 1.7 times per
+/// viewport painted (gpui_perf's scroll and chat scenarios). Rows added to
+/// a layer that keeps the rest cost about what drawing them directly does.
+pub(crate) const REPAINT_COST: f32 = 2.;
 // Leave room for hashing, carrying records and rasterizing/compositing tiles.
 const FRAME_OVERHEAD: f32 = 0.25;
-// A changed frame rebuilding this much overscan creates a latency spike even
-// when sparse updates make its average work look cheap.
-const MAX_REFRESH_WORK: f32 = 2.;
+// A changed frame rebuilding more than two viewports creates a latency
+// spike even when sparse updates make its average work look cheap. A
+// refresh paints content afresh, its work counted at [`REPAINT_COST`].
+const MAX_REFRESH_WORK: f32 = 2. * REPAINT_COST;
+// A layer whose last this many frames cost more than drawing directly would
+// have, half of them or more each rebuilding more than drawing directly
+// does, is dropped without waiting for the whole window: a scroll too fast
+// for its overscan, or content refreshed on every other frame, does not pay
+// for it, and every frame it is kept costs more than drawing without it.
+// One broad refresh among cheap frames does not trip it.
+const RECENT: usize = 6;
 // Two such refreshes this many frames apart or closer make the spikes
 // recurring; further apart, the frames composited between them save far
 // more than the spikes cost, as a transcript notified now and then does.
@@ -75,7 +92,20 @@ impl WorkBudget {
             [Some(latest), Some(earlier)] => latest - earlier <= REFRESH_SPIKE_FRAMES,
             _ => false,
         };
-        spikes || (self.len == WINDOW && self.total >= WINDOW as f32)
+        spikes || (self.len == WINDOW && self.total >= WINDOW as f32) || self.recent_over()
+    }
+
+    /// Whether the last [`RECENT`] frames cost more than drawing directly
+    /// would have, half of them or more each rebuilding more than drawing
+    /// directly does.
+    fn recent_over(&self) -> bool {
+        if self.len < RECENT {
+            return false;
+        }
+        let direct = 1. + FRAME_OVERHEAD;
+        let recent = (1..=RECENT).map(|back| self.samples[(self.next + WINDOW - back) % WINDOW]);
+        let over = recent.clone().filter(|sample| *sample > direct).count();
+        over * 2 >= RECENT && recent.sum::<f32>() > direct * RECENT as f32
     }
 }
 
@@ -166,6 +196,40 @@ mod tests {
             budget.note(frame, 1.);
         }
         assert!(budget.over_budget());
+    }
+
+    #[test]
+    fn frames_each_rebuilding_more_than_a_viewport_fall_back_within_a_few_frames() {
+        let mut budget = WorkBudget::default();
+        budget.note(0, 5.);
+        for frame in 1..super::RECENT as u64 {
+            budget.note(frame, 1.1);
+            assert!(!budget.over_budget(), "frame {frame}");
+        }
+        budget.note(super::RECENT as u64, 1.1);
+        assert!(budget.over_budget());
+    }
+
+    #[test]
+    fn content_refreshed_every_other_frame_falls_back_within_a_few_frames() {
+        let mut budget = WorkBudget::default();
+        budget.note(0, 5.);
+        for frame in 1..super::RECENT as u64 {
+            budget.note(frame, if frame % 2 == 0 { 2. } else { 1. });
+            assert!(!budget.over_budget(), "frame {frame}");
+        }
+        budget.note(super::RECENT as u64, 2.);
+        assert!(budget.over_budget());
+    }
+
+    #[test]
+    fn one_broad_frame_among_cheap_ones_keeps_the_layer() {
+        let mut budget = WorkBudget::default();
+        budget.note(0, 5.);
+        for frame in 1..=64 {
+            budget.note(frame, if frame % 6 == 0 { 3. } else { 0.1 });
+            assert!(!budget.over_budget(), "frame {frame}");
+        }
     }
 
     #[test]

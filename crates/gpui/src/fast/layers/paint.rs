@@ -726,7 +726,7 @@ fn repaint(
     policy::note_work(
         window,
         &painting.id,
-        rendered_work as f32 / visible_work.max(1) as f32,
+        rendered_work as f32 / visible_work.max(1) as f32 * crate::fast::layers::work::REPAINT_COST,
     );
     let hashes = tile_hashes(&content, TILE_SIZE, region);
 

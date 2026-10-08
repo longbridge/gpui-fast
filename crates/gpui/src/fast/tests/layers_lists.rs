@@ -312,6 +312,79 @@ mod uniform {
         assert_eq!(decision(cx, window), Some(Decision::Repaint));
     }
 
+    /// How many rows a list without a layer renders: those the viewport
+    /// shows, one more when they straddle its edges.
+    const SHOWN_ROWS: usize = (VIEWPORT_HEIGHT / ROW_HEIGHT) as usize + 1;
+
+    /// A scroll leaping a viewport or more a frame, as a scrollbar's thumb
+    /// dragged fast, shows nothing the layer holds: the frames are drawn
+    /// without the layer, rendering only the rows they show, rather than
+    /// rendering them and the overscan around them into it, and the layer
+    /// comes back once the scroll slows down.
+    #[crate::test]
+    fn a_list_scrolled_by_viewports_a_frame_is_drawn_without_its_layer(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let (handle, log) = page(cx, 1000);
+        let window = handle.into();
+        promote(cx, window);
+        rendered_rows(&log);
+        for step in 0..20 {
+            wheel(cx, window, -VIEWPORT_HEIGHT * 6.);
+            assert_eq!(decision(cx, window), Some(Decision::Bypass), "step {step}");
+            let rendered: usize = rendered_rows(&log).iter().map(|rows| rows.len()).sum();
+            assert!(rendered <= SHOWN_ROWS, "step {step}: {rendered} rows");
+        }
+        wheel(cx, window, -ROW_HEIGHT);
+        wheel(cx, window, -ROW_HEIGHT);
+        assert_eq!(decision(cx, window), Some(Decision::Repaint));
+        wheel(cx, window, -ROW_HEIGHT);
+        assert_eq!(decision(cx, window), Some(Decision::Composite));
+    }
+
+    /// A change of the content paints the rows shown afresh, as the list is
+    /// drawn without a layer, not the overscan around them; the frames that
+    /// only scroll after it grow the overscan back, rendering no more rows
+    /// each than the list shows.
+    #[crate::test]
+    fn a_change_repaints_only_the_rows_shown(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let (handle, log) = page(cx, 1000);
+        let window = handle.into();
+        promote(cx, window);
+        for _ in 0..20 {
+            wheel(cx, window, -ROW_HEIGHT);
+        }
+        rendered_rows(&log);
+        handle
+            .update(cx, |page, _, cx| {
+                page.tint = !page.tint;
+                cx.notify();
+            })
+            .unwrap();
+        assert_eq!(decision(cx, window), Some(Decision::Repaint));
+        let rendered: usize = rendered_rows(&log).iter().map(|rows| rows.len()).sum();
+        assert!(
+            rendered <= SHOWN_ROWS,
+            "the repaint rendered {rendered} rows"
+        );
+        for step in 0..10 {
+            wheel(cx, window, -ROW_HEIGHT);
+            assert_eq!(
+                decision(cx, window),
+                Some(Decision::Composite),
+                "step {step}"
+            );
+            let rendered: usize = rendered_rows(&log).iter().map(|rows| rows.len()).sum();
+            assert!(rendered <= SHOWN_ROWS, "step {step}: {rendered} rows");
+        }
+        // Ten rows on each side of the five shown, as after a promotion.
+        assert!(held_rows(cx, window).len() >= 25);
+    }
+
     #[crate::test]
     fn uniform_list_with_expensive_quarter_rate_updates_falls_back(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {
@@ -358,8 +431,12 @@ mod uniform {
         assert!(!held_rows(cx, window).is_empty());
     }
 
+    /// A change of the content repaints only the rows shown, and the
+    /// frames after it grow the overscan back a viewport at a time: changes
+    /// every sixteen frames cost less than drawing the list without its
+    /// layer on every frame, and the layer is kept.
     #[crate::test]
-    fn uniform_list_with_sparse_broad_updates_stays_demoted(cx: &mut TestAppContext) {
+    fn uniform_list_with_sparse_updates_keeps_its_layer(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {
             return;
         }
@@ -377,10 +454,10 @@ mod uniform {
             }
             wheel(cx, window, -ROW_HEIGHT);
         }
-        assert_eq!(decision(cx, window), Some(Decision::Bypass));
+        assert_eq!(decision(cx, window), Some(Decision::Composite));
         assert_eq!(
             with_window(cx, window, |window, _| window.layout_stats().layers_demoted),
-            1
+            0
         );
     }
 
@@ -939,11 +1016,15 @@ mod list {
         }
         let extended = extended_frames();
         let composited = list_matches_layers_off_at_a_fractional_scale(cx, ListAlignment::Bottom);
-        assert!(composited > 480, "the layer was composited ({composited})");
+        // Near the end, rows held land half way between device pixels on
+        // many frames, which paint the rows shown afresh: the layer costs
+        // more than drawing the list without it there, and is dropped for a
+        // while.
+        assert!(composited > 300, "the layer was composited ({composited})");
         let extended = extended_frames() - extended;
         // Expensive extensions may fall back; the differential helper also
         // checks that the cached path renders fewer rows overall.
-        assert!(extended > 480, "frames kept the rows held ({extended})");
+        assert!(extended > 250, "frames kept the rows held ({extended})");
     }
 
     #[crate::test]
@@ -2800,16 +2881,18 @@ mod rows {
             .into();
         open_at(cx, window, 1.);
         // Far enough down that row 0, which the list renders alone to measure
-        // it, is not held.
-        for _ in 0..40 {
-            wheel(cx, window, -40.);
+        // it, is not held, in leaps the layer is not promoted on.
+        for _ in 0..4 {
+            wheel(cx, window, -400.);
         }
         let step = 5.;
-        wheel(cx, window, -step);
+        for _ in 0..3 {
+            wheel(cx, window, -step);
+        }
         assert_eq!(decision(cx, window), Some(Decision::Composite));
         // The wheel is turned with the pointer 20 px down the list.
         let hovered = |offset: f32| ((20. + offset) / 40.).floor() as usize;
-        let mut offset = 1600. + step;
+        let mut offset = 1600. + 3. * step;
         let mut held: BTreeSet<usize> = held_rows(cx, window).into_iter().collect();
         let mut crossings = 0;
         rendered.borrow_mut().clear();
@@ -3264,7 +3347,11 @@ mod animation {
         // frame after it stops; the next one paints the layer again.
         assert_eq!(stopped[0], Some(Decision::Bypass), "{decisions:?}");
         assert_eq!(stopped[1], Some(Decision::Repaint), "{decisions:?}");
-        assert_eq!(composited(&stopped[2..]), stopped.len() - 2, "{decisions:?}");
+        assert_eq!(
+            composited(&stopped[2..]),
+            stopped.len() - 2,
+            "{decisions:?}"
+        );
     }
 
     #[crate::test]
@@ -3278,9 +3365,7 @@ mod animation {
     }
 
     #[crate::test]
-    fn an_animation_element_beside_a_list_does_not_keep_it_off_for_long(
-        cx: &mut TestAppContext,
-    ) {
+    fn an_animation_element_beside_a_list_does_not_keep_it_off_for_long(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {
             return;
         }
