@@ -54,6 +54,37 @@ fn a_frame_with_empty_damage_shows_the_canvas() {
     assert_same_pixels(&second, &first);
 }
 
+/// A frame with nothing to draw is neither drawn nor presented, and the
+/// next frame's damage, relative to the skipped scene, draws partially over
+/// the canvas as before.
+#[test]
+fn frames_with_nothing_to_draw_are_skipped() {
+    let Some(mut harness) = Harness::new(device_size(WIDTH, HEIGHT), true) else {
+        return;
+    };
+    let tiles = Tiles::new(&harness);
+    assert!(!harness.skip(&scene(&tiles, Change::None, 1, 0, &[])), "no canvas yet");
+    harness.draw(&scene(&tiles, Change::None, 1, 0, &[]));
+    assert!(harness.skip(&scene(&tiles, Change::None, 1, 0, &[])), "the same scene");
+    assert!(harness.skip(&scene(&tiles, Change::None, 2, 1, &[])), "empty damage");
+    assert!(
+        !harness.skip(&scene(&tiles, Change::None, 3, 1, &[])),
+        "damage relative to a scene the canvas no longer holds"
+    );
+    let damage = [rect(40, 40, 120, 80), rect(210, 138, 80, 70)];
+    assert!(!harness.skip(&scene(&tiles, Change::Some, 3, 2, &damage)));
+    let partial = harness.draw(&scene(&tiles, Change::Some, 3, 2, &damage));
+    assert_eq!(harness.last_plan(), Plan::Partial(damage.to_vec()));
+    assert_same_pixels(&partial, &whole(&tiles, Change::Some, true));
+    assert_eq!(harness.renderer.fast_partial.skipped, 2);
+
+    harness.renderer.opaque = false;
+    assert!(
+        !harness.skip(&scene(&tiles, Change::Some, 4, 3, &[])),
+        "the canvas was cleared for an opaque window"
+    );
+}
+
 /// Several rectangles, one over the path only and one over the image only,
 /// are drawn in one pass over the canvas: the scene's one group of path
 /// batches is rasterized before it.
@@ -406,6 +437,11 @@ impl Harness {
                 .expect("target read back")
                 .into_raw()
         })
+    }
+
+    /// Whether `MetalRenderer::draw` would skip `scene`.
+    fn skip(&mut self, scene: &Scene) -> bool {
+        objc2::rc::autoreleasepool(|_| super::skip(&mut self.renderer, scene, self.size))
     }
 
     fn last_plan(&self) -> Plan {

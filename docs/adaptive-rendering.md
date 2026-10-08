@@ -229,9 +229,14 @@ A frame is drawn whole when:
 - on Windows, a graphics debugger is capturing (upstream's labeled loop then
   draws the frame).
 
-On macOS a scene drawn again (its number is the one the canvas holds) is
-shown as the canvas holds it; on either platform a frame whose damage is
-empty draws nothing and shows the canvas.
+A frame with nothing to draw, a scene drawn again (its number is the one
+the canvas holds) or one whose damage relative to it is empty, is neither
+drawn nor presented: the window keeps showing the frame presented last, a
+copy of the canvas, so neither the application's GPU nor the compositor
+does anything for it. On macOS this is decided before a drawable is taken.
+Scroll layer tiles are still rasterized for it, as their cache follows the
+scenes; the tiles it changes are off screen, as a changed tile on screen is
+damage.
 
 ### Drawing and presenting
 
@@ -246,8 +251,8 @@ cost vertex work only.
   and drawn through every rectangle (`RSSetScissorRects` per draw), and each
   path batch is rasterized into its 4× MSAA intermediate once, scissored to
   the rectangles' union, so a frame costs one full-texture clear and resolve
-  per path batch, as a whole frame does, however many rectangles. The canvas is lent to the renderer as
-  its render target view, so paths, which bind it again after their
+  per path batch, as a whole frame does, however many rectangles. The
+  canvas is lent to the renderer as its render target view, so paths, which bind it again after their
   intermediate pass, draw into it too. The whole canvas is then copied into
   the back buffer and presented with `Present1` and the damage as dirty
   rectangles, so DWM recomposes only those. (A flip-sequential back buffer
@@ -281,12 +286,35 @@ their own targets.
 - `GPUI_PARTIAL_REDRAW=0` turns all of it off: every frame is drawn whole,
   straight into the drawable or back buffer, and no canvas is created.
 - On Apple's tile-based GPUs a render pass that loads the canvas reads and
-  writes the whole attachment, which can cost as much as the fragment work it
-  saves; each path group starts another pass.
-- Neither has been measured on real hardware yet. CI checks their pixels
-  (see Verifying). Measure with `GPUI_RENDER_STATS=1`, which prints how many
-  frames were partial and why the others were not, and with the platform's
-  GPU tools (Instruments, PIX or GPUView).
+  writes the whole attachment, and the copy reads it again and writes the
+  drawable: a partial frame moves the window's pixels three times where a
+  whole frame moves them once. Each path group starts another pass.
+
+Measured on macOS (M4, a 1352×762 pt window at 2×, `gpui_perf --idle`, 15 s
+per scenario, 3 rounds alternating the modes, GPU time from each process's
+`accumulatedGPUTime` in `ioreg`), whole frames (`GPUI_PARTIAL_REDRAW=0`)
+against partial ones, before frames with nothing to draw were skipped:
+
+| Scenario | Process CPU | Application GPU ms/s | WindowServer GPU ms/s |
+| --- | --- | --- | --- |
+| CaretBlink | 1.89% → 1.89% | 9.8 → 7.5 (−24%) | 2.3 → 3.7 |
+| Clock | 1.53% → 1.58% | 5.0 → 3.3 (−33%) | 2.3 → 2.7 |
+| Hover | 3.62% → 3.71% | 14.4 → 11.2 (−22%) | 4.8 → 4.8 |
+| Quotes | 4.64% → 4.49% | 16.9 → 6.1 (−64%) | 6.3 → 9.3 |
+| Spinner | 47.7% → 51.2% | 501 → 389 (−22%) | 239 → 223 |
+| Scroll | 46.8% → 47.0% | 535 → 440 (−18%) | 213 → 207 |
+
+Every frame of the partial runs was partial. The application's GPU time
+drops in every scenario, but a partial frame that changes a caret (96
+pixels) still takes 75–80% of a whole frame's GPU time: loading, storing and
+copying the canvas cost about what drawing everything does. CPU time does
+not change (the GPU does the saving), and the window server, which
+composites every presented drawable whole, saves nothing. Quotes saves
+most, as many of its frames have empty damage; those frames are now
+skipped rather than drawn and presented, which also spares the window
+server. Windows has not been measured on real hardware. CI checks the
+pixels of both (see Verifying); measure with `GPUI_RENDER_STATS=1` and the
+platform's GPU tools (Instruments, PIX or GPUView).
 
 ## Controls
 
@@ -309,8 +337,9 @@ their own targets.
 - `GPUI_PARTIAL_REDRAW=0` (macOS, Windows): draw every frame whole, as
   upstream does, without the canvas.
 - On macOS and Windows, `GPUI_RENDER_STATS=1` prints, every second, each
-  window's `partial_frames`, `full_frames`, `partial_px` (the pixels the
-  partial frames drew) and `why_<reason>` counts of whole frames.
+  window's `partial_frames`, `full_frames`, `skipped_frames` (nothing to
+  draw, not presented), `partial_px` (the pixels the partial frames drew)
+  and `why_<reason>` counts of whole frames.
 
 ## Verifying
 

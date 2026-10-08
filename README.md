@@ -56,7 +56,7 @@ CPU use goes down too: drawing a few hundred pixels on the CPU costs less than r
 
 The benefit is keeping the GPU idle, which mainly saves power and heat. It is largest on laptops and discrete GPUs, where every wake-up raises the GPU's clocks. Adaptive rendering does not make an application faster. Frame rate, latency and scrolling are unchanged. The compositor still composites the window, so its GPU time drops only for animations. Power savings have not been measured yet.
 
-On macOS and Windows, GPUI Fast uses the same damage on the GPU instead: each frame redraws only its changed rectangles into a frame it keeps, and on Windows presents only those rectangles to DWM. The GPU still wakes for every frame, so the saving is smaller and has not been measured yet; CI checks that the pixels match whole frames exactly.
+On macOS and Windows, GPUI Fast uses the same damage on the GPU instead: each frame redraws only its changed rectangles into a frame it keeps, and on Windows presents only those rectangles to DWM. A frame with nothing to draw is not drawn or presented at all. On an M4 Mac this cuts the application's GPU time by 18–64%, less than on Linux, as keeping the frame costs a copy of the whole window every frame; CPU time and the window server's work stay the same. CI checks that the pixels match whole frames exactly.
 
 See [Adaptive rendering](docs/adaptive-rendering.md) for the full measurements, including X11, and for the environment variables.
 

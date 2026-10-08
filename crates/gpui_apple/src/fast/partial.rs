@@ -21,8 +21,14 @@
 //! texture whole, as in a whole frame, and composited through the scissor, so
 //! a pixel inside a rectangle comes out as a whole frame draws it.
 //!
-//! A scene drawn again (the number the canvas holds) is shown as the canvas
-//! holds it.
+//! A scene drawn again (the number the canvas holds), or one whose damage
+//! with the scene the canvas holds is empty, is neither drawn nor presented
+//! ([`skip`], before the drawable is taken): the layer keeps showing the
+//! drawable last presented, a copy of the canvas. Measured on an M4 with
+//! every frame copying the canvas, a partial frame still took 75–80% of a
+//! whole frame's GPU time (loading and storing the canvas and copying it
+//! cost about what drawing everything does), and the window server
+//! composites every presented frame whole.
 //!
 //! A frame is drawn whole when the canvas is missing or of another size, the
 //! scene is not numbered or its damage does not compare with the scene the
@@ -40,8 +46,8 @@
 //! Environment:
 //! - `GPUI_PARTIAL_REDRAW=0` draws as upstream does, without the canvas.
 //! - `GPUI_RENDER_STATS=1` prints, every second, each window's frames:
-//!   `gpui render stats: secs=… partial_frames=… full_frames=… partial_px=…
-//!   why_<reason>=…`.
+//!   `gpui render stats: secs=… partial_frames=… full_frames=…
+//!   skipped_frames=… partial_px=… why_<reason>=…`.
 
 use std::ffi::c_void;
 use std::mem;
@@ -294,6 +300,9 @@ pub(crate) struct PartialRedraw {
     /// The main passes over the canvas the last frame encoded, for tests.
     #[cfg(test)]
     pub(crate) main_passes: usize,
+    /// The frames [`skip`] skipped, for tests.
+    #[cfg(test)]
+    pub(crate) skipped: usize,
 }
 
 /// Forwarded to by `MetalRenderer::draw`: draws `scene` into the canvas, as
@@ -323,24 +332,9 @@ pub(crate) fn render_frame(
         this.canvas = None;
         this.canvas_opaque = renderer.opaque;
     }
-    let canvas_size = this.canvas.as_ref().map(|canvas| {
-        size(
-            DevicePixels(canvas.width() as i32),
-            DevicePixels(canvas.height() as i32),
-        )
-    });
-    let atlas_writes = renderer.sprite_atlas.fast_writes();
+    let (plan, canvas_size, atlas_writes) = plan(renderer, scene, viewport_size);
+    let this = &mut renderer.fast_partial;
     let damage = &scene.damage;
-    let plan = decide(&Frame {
-        canvas: canvas_size,
-        size: viewport_size,
-        last_drawn: this.last_drawn,
-        number: damage.frame,
-        since: damage.since,
-        damage: &damage.rects,
-        atlas_written: atlas_writes != this.atlas_writes,
-        has_surfaces: !scene.surfaces.is_empty(),
-    });
 
     if canvas_size != Some(viewport_size) {
         this.canvas = Some(new_canvas(&renderer.device, viewport_size));
@@ -382,6 +376,69 @@ pub(crate) fn render_frame(
         this.last_plan = Some(plan);
     }
     Ok(command_buffer)
+}
+
+/// Forwarded to by `MetalRenderer::draw` before it takes a drawable: whether
+/// `scene` shows exactly what the window shows already, the canvas as last
+/// presented, so the frame needs neither drawing nor presenting. The layer
+/// keeps showing its last drawable. Scroll layer tiles are still rasterized
+/// as for a drawn frame: the ones this scene changes are off screen (a
+/// changed tile on screen is damage), and their cache follows the scenes.
+pub(crate) fn skip(
+    renderer: &mut MetalRenderer,
+    scene: &Scene,
+    viewport_size: Size<DevicePixels>,
+) -> bool {
+    if !enabled()
+        || viewport_size.width.0 <= 0
+        || viewport_size.height.0 <= 0
+        || renderer.fast_partial.canvas_opaque != renderer.opaque
+    {
+        return false;
+    }
+    let (plan, _, _) = plan(renderer, scene, viewport_size);
+    if plan != Plan::Partial(Vec::new()) {
+        return false;
+    }
+    crate::fast::layers::raster::rasterize_tiles(renderer, scene);
+    let this = &mut renderer.fast_partial;
+    this.last_drawn = scene.damage.frame;
+    this.stats.skipped(Instant::now());
+    #[cfg(test)]
+    {
+        this.last_plan = None;
+        this.skipped += 1;
+    }
+    true
+}
+
+/// How to draw `scene` over the renderer's canvas, with the canvas's size and
+/// the atlas's writes now.
+fn plan(
+    renderer: &MetalRenderer,
+    scene: &Scene,
+    viewport_size: Size<DevicePixels>,
+) -> (Plan, Option<Size<DevicePixels>>, u64) {
+    let this = &renderer.fast_partial;
+    let canvas_size = this.canvas.as_ref().map(|canvas| {
+        size(
+            DevicePixels(canvas.width() as i32),
+            DevicePixels(canvas.height() as i32),
+        )
+    });
+    let atlas_writes = renderer.sprite_atlas.fast_writes();
+    let damage = &scene.damage;
+    let plan = decide(&Frame {
+        canvas: canvas_size,
+        size: viewport_size,
+        last_drawn: this.last_drawn,
+        number: damage.frame,
+        since: damage.since,
+        damage: &damage.rects,
+        atlas_written: atlas_writes != this.atlas_writes,
+        has_surfaces: !scene.surfaces.is_empty(),
+    });
+    (plan, canvas_size, atlas_writes)
 }
 
 /// Encodes the pending partial frame in place of a whole one, if there is
@@ -543,6 +600,7 @@ struct Stats {
     partial: u64,
     full: u64,
     partial_pixels: u64,
+    skipped: u64,
     reasons: [u64; FullReason::ALL.len()],
 }
 
@@ -561,6 +619,18 @@ impl Stats {
                 self.reasons[*reason as usize] += 1;
             }
         }
+        self.tick(now);
+    }
+
+    fn skipped(&mut self, now: Instant) {
+        if !stats_enabled() {
+            return;
+        }
+        self.skipped += 1;
+        self.tick(now);
+    }
+
+    fn tick(&mut self, now: Instant) {
         let start = *self.period_start.get_or_insert(now);
         let elapsed = now.saturating_duration_since(start);
         if elapsed < STATS_PERIOD {
@@ -575,10 +645,11 @@ impl Stats {
 
     fn summary(&self, elapsed: Duration) -> String {
         let mut line = format!(
-            "gpui render stats: secs={:.2} partial_frames={} full_frames={} partial_px={}",
+            "gpui render stats: secs={:.2} partial_frames={} full_frames={} skipped_frames={} partial_px={}",
             elapsed.as_secs_f64(),
             self.partial,
             self.full,
+            self.skipped,
             self.partial_pixels,
         );
         for reason in FullReason::ALL {

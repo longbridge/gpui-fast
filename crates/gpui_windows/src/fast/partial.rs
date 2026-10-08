@@ -32,14 +32,20 @@
 //! - a graphics debugger is capturing (upstream's labeled loop then draws);
 //! - `GPUI_PARTIAL_REDRAW=0`, which also keeps the old path without a canvas.
 //!
+//! A frame with nothing to draw, a scene drawn again or one with no damage
+//! relative to the scene the canvas holds, is neither drawn nor presented:
+//! the window keeps showing the frame presented last, which DWM then need
+//! not compose again.
+//!
 //! Windows that compose native content draw through `fast::composition`,
 //! straight into their swap chains: those frames do not touch the canvas, so
 //! the next frame here finds its damage relative to a scene the canvas does
 //! not hold and is drawn whole.
 //!
 //! With `GPUI_RENDER_STATS=1` each window prints, every second, a line of
-//! `key=value` pairs to stderr: partial and whole frames, the pixels the
-//! partial ones drew, and why frames were drawn whole (`why_<reason>`).
+//! `key=value` pairs to stderr: partial, whole and skipped frames, the
+//! pixels the partial ones drew, and why frames were drawn whole
+//! (`why_<reason>`).
 
 use std::slice;
 use std::sync::OnceLock;
@@ -305,6 +311,16 @@ pub(crate) fn draw(
         damage: &scene.damage.rects,
     });
 
+    if plan == Plan::Partial(Vec::new()) {
+        // Nothing to draw: the window keeps showing the frame presented
+        // last, a copy of the canvas. Layer tiles still follow the scenes.
+        crate::fast::layers::raster::rasterize_tiles(renderer, scene)?;
+        let partial = &mut renderer.fast_partial;
+        partial.last_drawn = scene.damage.frame;
+        partial.stats.frame(&plan, started.elapsed());
+        return Ok(());
+    }
+
     // `render` and the batches draw into the window's render target view,
     // which paths also bind again after their intermediate pass: lend it the
     // canvas's for the draw.
@@ -554,16 +570,9 @@ fn copy_canvas_to_back_buffer(renderer: &DirectXRenderer) -> Result<()> {
 /// the frame presented before (a pixel when nothing changed).
 fn present_dirty(renderer: &DirectXRenderer, rects: &[RECT]) -> Result<()> {
     let resources = renderer.resources.as_ref().context("resources missing")?;
+    // Never empty: a frame with nothing to draw is not presented, and no
+    // dirty rectangle would mean the whole frame to DXGI.
     let mut dirty: Vec<RECT> = rects.to_vec();
-    if dirty.is_empty() {
-        // No dirty rectangle means the whole frame to DXGI.
-        dirty.push(RECT {
-            left: 0,
-            top: 0,
-            right: 1,
-            bottom: 1,
-        });
-    }
     let parameters = DXGI_PRESENT_PARAMETERS {
         DirtyRectsCount: dirty.len() as u32,
         pDirtyRects: dirty.as_mut_ptr(),
@@ -586,6 +595,7 @@ struct Stats {
     partial: u64,
     whole: u64,
     partial_pixels: i64,
+    skipped: u64,
     time: Duration,
     reasons: [u64; Whole::ALL.len()],
 }
@@ -598,6 +608,7 @@ impl Stats {
         let now = Instant::now();
         let start = *self.period_start.get_or_insert(now);
         match plan {
+            Plan::Partial(rects) if rects.is_empty() => self.skipped += 1,
             Plan::Partial(rects) => {
                 self.partial += 1;
                 self.partial_pixels += rects.iter().map(area).sum::<i64>();
@@ -614,13 +625,14 @@ impl Stats {
         if elapsed < STATS_PERIOD {
             return;
         }
-        let frames = self.partial + self.whole;
+        let frames = self.partial + self.whole + self.skipped;
         let mut line = format!(
-            "gpui render stats: secs={:.2} partial_frames={} full_frames={} partial_px={} \
-             ms_mean={:.3}",
+            "gpui render stats: secs={:.2} partial_frames={} full_frames={} \
+             skipped_frames={} partial_px={} ms_mean={:.3}",
             elapsed.as_secs_f64(),
             self.partial,
             self.whole,
+            self.skipped,
             self.partial_pixels,
             self.time.as_secs_f64() * 1e3 / frames.max(1) as f64,
         );

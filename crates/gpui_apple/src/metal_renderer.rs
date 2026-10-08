@@ -495,6 +495,9 @@ impl MetalRenderer {
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
         );
+        if crate::fast::partial::skip(self, scene, viewport_size) {
+            return;
+        }
         let drawable = if let Some(drawable) = layer.next_drawable() {
             drawable
         } else {
