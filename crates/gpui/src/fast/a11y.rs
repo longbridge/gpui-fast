@@ -478,6 +478,25 @@ impl Window {
     }
 }
 
+/// Starts a frame of `window`, whether accessibility is active or not.
+#[inline]
+pub(crate) fn new_frame(window: &mut Window) {
+    #[cfg(any(test, feature = "test-support"))]
+    if forced_by_env() {
+        set_active_flag(&window.a11y, true);
+    }
+    A11yLog::new_frame(&mut window.a11y.nodes.fast);
+}
+
+/// Whether `GPUI_A11Y_ACTIVE=1` asks every window to build its
+/// accessibility tree as though assistive technology had asked for it, for
+/// benchmarks (`gpui_perf`) to measure frames drawn with it.
+#[cfg(any(test, feature = "test-support"))]
+fn forced_by_env() -> bool {
+    static FORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| std::env::var("GPUI_A11Y_ACTIVE").is_ok_and(|value| value == "1"))
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn set_active_flag(a11y: &A11y, active: bool) {
     a11y.active_flag

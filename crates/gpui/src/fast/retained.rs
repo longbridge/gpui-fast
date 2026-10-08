@@ -33,7 +33,7 @@ use std::{any::TypeId, cell::RefCell, mem, ops::Range, rc::Rc};
 #[inline(always)]
 pub(crate) fn begin_frame(window: &mut Window, cx: &App) {
     window.fast_layout.phase_times.begin();
-    crate::fast::a11y::A11yLog::new_frame(&mut window.a11y.nodes.fast);
+    crate::fast::a11y::new_frame(window);
     window.mark_changed_retained_views_dirty(cx);
 }
 
