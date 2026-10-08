@@ -2,10 +2,12 @@
 
 A performance-focused fork of [Zed's GPUI](https://gpui.rs) with incremental rendering and native window composition. [v0.1.0](https://github.com/longbridge/gpui-fast/releases/tag/v0.1.0) is available on crates.io. The project remains experimental.
 
-- **Retained Mode** reuses unchanged views, layout nodes and text measurements.
-- **Scroll layers** reuse cached GPU tiles and list rows while scrolling, on macOS, Linux and Windows.
-- **Window composition** embeds native content while keeping GPUI menus, popovers and dialogs above it.
-- **Adaptive rendering** draws frames that change little on the CPU, only where they change, without waking the GPU's render pipeline (Linux). See [Adaptive rendering](docs/adaptive-rendering.md).
+## Features
+
+- **[Retained Mode](#retained-mode)** reuses unchanged views, layout nodes and text measurements. Scroll layers reuse cached GPU tiles and list rows while scrolling, on macOS, Linux and Windows.
+- **[Window Composition](#window-composition)** embeds native content, such as web views, while keeping GPUI menus, popovers and dialogs above it, on macOS, Windows and Linux.
+- **[Adaptive rendering](#adaptive-rendering)** draws frames that change little on the CPU, only where they change, without waking the GPU (Linux).
+- **[Scene damage](docs/adaptive-rendering.md#scene-damage)** works out, for every frame, exactly which pixels it can change from the frame before, on every platform. Adaptive rendering is built on it.
 
 ## Retained Mode
 
