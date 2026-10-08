@@ -45,7 +45,7 @@ local rehearsal to test before creating that tag.
 ## Release-only changes
 
 `bun script/prepare-release.ts --tag v0.1.0` generates `target/release-workspace`.
-Only these generated copies receive package names, exact sibling versions,
+Only these generated copies receive package names, compatible sibling versions,
 registry dependency substitutions, repository/homepage URLs, descriptions,
 READMEs and license files. Original manifests and Rust source stay unchanged.
 Published metadata retains upstream authors and adds Longbridge;
@@ -58,6 +58,15 @@ depend on a sibling checkout directory.
 The core's Windows screen-capture feature constrains `windows-capture` to
 the registry version in `release.toml`; version 1.5 changed the constructor
 used by `zed-scap` and cannot compile that backend.
+
+Sibling dependencies use Cargo caret requirements such as `^0.1.6`. This allows
+`cargo update -p gpui-fast` to update the core and its required dependencies
+while compatible platform packages remain locked. For `0.1.x`, the requirement
+allows newer patch releases but excludes `0.2.0`; breaking changes must use a
+new compatibility series. Support snapshots (`gpui-pre-*`) remain exactly pinned.
+Versions already published with exact sibling requirements cannot be changed.
+Consumers must first update the full `gpui-fast-*` set to a release using caret
+requirements before subsequent core-only updates can work.
 
 Applications should alias the released libraries to their original names:
 
@@ -76,6 +85,7 @@ before their GPUI types can be mixed.
 Run from the repository root:
 
 ```sh
+bun test script/release.test.ts
 bun script/prepare-release.ts --tag v0.1.0
 bun script/publish-release.ts
 cargo check --manifest-path target/release-workspace/Cargo.toml --workspace --lib --all-features

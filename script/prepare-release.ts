@@ -36,7 +36,7 @@ export function dependency(key: string, input: any, workspace: Manifest, config:
   if ("path" in value) {
     delete value.path;
     Object.assign(value, config.crates.includes(key)
-      ? { package: fastName(key), version: "=" + version, path: "../" + key }
+      ? { package: fastName(key), version: "^" + version, path: "../" + key }
       : { package: snapshotName(key), version: "=" + config.snapshot_version });
   }
   if ("git" in value) {

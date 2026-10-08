@@ -10,6 +10,7 @@ on:
       - 'script/prepare-release.ts'
       - 'script/publish-release.ts'
       - 'script/release-common.ts'
+      - 'script/release.test.ts'
       - 'LICENSE'
       - 'docs/releasing.md'
   workflow_dispatch:
@@ -81,6 +82,9 @@ jobs:
 
       - name: Install Rust
         run: rustup show
+
+      - name: Test release dependency updates
+        run: bun test script/release.test.ts
 
       - uses: Swatinem/rust-cache@v2
         with:

@@ -43,7 +43,7 @@ export function validate(config: ReleaseConfig, dest = DEST): string {
           requireCondition(!("git" in dep) && !("workspace" in dep) && dep.version, `${crate}: unresolved dependency`);
           if ("path" in dep) {
             requireCondition(seen.has(dep.package), `${crate}: release order is not topological`);
-            requireCondition(dep.version === "=" + pkg.version, `${crate}: inconsistent sibling version`);
+            requireCondition(dep.version === "^" + pkg.version, `${crate}: inconsistent sibling version`);
           }
         }
       }
