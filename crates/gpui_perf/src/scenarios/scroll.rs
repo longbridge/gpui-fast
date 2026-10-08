@@ -17,7 +17,10 @@
 //! - `scroll-list`: a `list` of rows of varying height.
 //!
 //! Each runs again with a scrollbar over the content, drawn and driven as
-//! GPUI Kit's is (`scenarios::scrollbar`), as `<name>-scrollbar`, and the
+//! GPUI Kit's is (`scenarios::scrollbar`), as `<name>-scrollbar`, again with
+//! that scrollbar asking for an animation frame from its prepaint, as GPUI
+//! Kit's does while it fades, on every frame, as `<name>-animated-scrollbar`,
+//! and on 30 frames of every 100, as `<name>-fading-scrollbar`, and the
 //! three content kinds once more with the scrollbar's thumb dragged instead
 //! of the wheel turned, as `scrollbar-drag-*`.
 
@@ -356,13 +359,27 @@ pub struct Gallery {
     scrollbar: Option<Rc<Cell<scrollbar::State>>>,
 }
 
+/// The scrollbar a gallery draws over its content.
+#[derive(Clone, Copy, PartialEq)]
+enum Bar {
+    None,
+    Still,
+    /// One animating on this many frames of every 100.
+    Animated(u32),
+}
+
 impl Gallery {
-    fn new(content: Content, scrollbar: bool, cx: &mut Context<Self>) -> Self {
+    fn new(content: Content, bar: Bar, cx: &mut Context<Self>) -> Self {
+        let scrollbar = match bar {
+            Bar::None => None,
+            Bar::Still => Some(scrollbar::State::default()),
+            Bar::Animated(frames) => Some(scrollbar::State::animated(frames)),
+        };
         Self {
             sidebar: cx.new(|_| Sidebar),
             scroll: ScrollHandle::new(),
             content,
-            scrollbar: scrollbar.then(Rc::default),
+            scrollbar: scrollbar.map(|state| Rc::new(Cell::new(state))),
         }
     }
 
@@ -492,7 +509,7 @@ struct WheelScroll {
     name: &'static str,
     description: &'static str,
     content: fn(&mut App) -> Content,
-    scrollbar: bool,
+    scrollbar: Bar,
     drive: Drive,
 }
 
@@ -512,6 +529,13 @@ impl Scenario for WheelScroll {
     }
 
     fn step(&self, _: &AnyView, frame: usize, window: &mut Window, cx: &mut App) {
+        if matches!(self.scrollbar, Bar::Animated(_)) {
+            // The test platform draws a dirty window without running what
+            // was scheduled for the next frame, as a platform's frame
+            // callback does first: the animation frame the scrollbar asked
+            // for notifies the view drawing it here.
+            window.simulate_next_frame(cx);
+        }
         let event = match self.drive {
             Drive::Wheel => wheel(frame),
             Drive::Thumb => drag(frame),
@@ -548,7 +572,7 @@ pub fn scenarios() -> Vec<Box<dyn Scenario>> {
             name: leak(format!("scroll-{kind}")),
             description: leak(format!("{description}, scrolled by the wheel")),
             content,
-            scrollbar: false,
+            scrollbar: Bar::None,
             drive: Drive::Wheel,
         }));
     }
@@ -559,9 +583,26 @@ pub fn scenarios() -> Vec<Box<dyn Scenario>> {
                 "{description}, with a GPUI Kit scrollbar, scrolled by the wheel"
             )),
             content,
-            scrollbar: true,
+            scrollbar: Bar::Still,
             drive: Drive::Wheel,
         }));
+    }
+    for (kind, description, content) in KINDS {
+        for (name, frames, how) in [
+            ("animated", 100, "on every frame"),
+            ("fading", 30, "on 30 frames of every 100"),
+        ] {
+            scenarios.push(Box::new(WheelScroll {
+                name: leak(format!("scroll-{kind}-{name}-scrollbar")),
+                description: leak(format!(
+                    "{description}, with a GPUI Kit scrollbar animating {how}, scrolled by the \
+                     wheel"
+                )),
+                content,
+                scrollbar: Bar::Animated(frames),
+                drive: Drive::Wheel,
+            }));
+        }
     }
     for (kind, description, content) in KINDS {
         if kind == "same-view" {
@@ -573,7 +614,7 @@ pub fn scenarios() -> Vec<Box<dyn Scenario>> {
                 "{description}, scrolled by dragging a GPUI Kit scrollbar's thumb"
             )),
             content,
-            scrollbar: true,
+            scrollbar: Bar::Still,
             drive: Drive::Thumb,
         }));
     }

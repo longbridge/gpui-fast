@@ -84,7 +84,15 @@ each frame it then takes one of three paths (`fast::layers::policy::decide`):
   coordinates, for example:
   - the background under the viewport is not one opaque solid quad;
   - the content has deferred or anchored elements, a focused input, or
-    surfaces;
+    surfaces, or something in it (an element, or a view drawn in it) asked
+    for an animation frame this frame or the last;
+  - the view holding the container asked for an animation frame from
+    outside the content (a scrollbar fading beside a list, a pulsing
+    button): it renders again on every frame the animation runs, and
+    rendering the content again with it costs more than drawing it without
+    the layer. The layer is dropped but not demoted, and painted again as
+    soon as the animation stops. An animation in a view around the one
+    holding the container leaves the layer composited;
   - the content changes on at least eight of the last sixteen frames (demotion);
   - paths in the content are covered by something drawn after them.
 

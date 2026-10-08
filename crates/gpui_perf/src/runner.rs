@@ -135,6 +135,8 @@ pub struct PhaseAverages {
     pub views_reused: f64,
     /// Scroll containers drawn from a scroll layer's cached tiles.
     pub layer_frames_composited: f64,
+    /// Of those, the frames whose content was painted into the layer again.
+    pub layer_frames_repainted: f64,
     /// Scroll layer tiles repaints changed.
     pub tiles_dirtied: f64,
     /// Scroll layers painted again before an input event.
@@ -162,6 +164,7 @@ impl PhaseAverages {
             views_built: stats.views_built as f64 / n,
             views_reused: stats.views_reused as f64 / n,
             layer_frames_composited: stats.layer_frames_composited as f64 / n,
+            layer_frames_repainted: stats.layer_frames_repainted as f64 / n,
             tiles_dirtied: stats.tiles_dirtied as f64 / n,
             layer_rebuilds_for_input: stats.layer_rebuilds_for_input as f64 / n,
         }
@@ -784,7 +787,7 @@ pub fn format_reports(reports: &[ScenarioReport]) -> String {
         let _ = writeln!(out);
 
         type Row = (&'static str, fn(&RunReport) -> f64, usize);
-        let rows: [Row; 25] = [
+        let rows: [Row; 26] = [
             ("frame mean ms", |r| r.frame.mean_ms, 3),
             ("frame p50 ms", |r| r.frame.p50_ms, 3),
             ("frame p95 ms", |r| r.frame.p95_ms, 3),
@@ -807,6 +810,11 @@ pub fn format_reports(reports: &[ScenarioReport]) -> String {
             (
                 "layer frames composited",
                 |r| r.phases.layer_frames_composited,
+                2,
+            ),
+            (
+                "layer frames repainted",
+                |r| r.phases.layer_frames_repainted,
                 2,
             ),
             ("tiles dirtied", |r| r.phases.tiles_dirtied, 2),

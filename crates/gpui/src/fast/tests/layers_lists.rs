@@ -2666,3 +2666,300 @@ mod rows {
         });
     }
 }
+
+/// Animation frames asked for beside a list's content and inside it.
+mod animation {
+    use super::{
+        Decision, VIEWPORT_HEIGHT, VIEWPORT_WIDTH, decision, draw, expanded_quads, row_color,
+        with_window,
+    };
+    use crate::{
+        Animation, AnimationExt as _, AnyWindowHandle, AppContext as _, Entity, IntoElement,
+        ListAlignment, ListState, ParentElement as _, Render, Styled, TestAppContext, Window,
+        canvas, div, hsla, prelude::FluentBuilder as _, px, rgb,
+    };
+    use std::{cell::Cell, rc::Rc, time::Duration};
+
+    /// Where a page's animation is.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Animated {
+        /// A canvas beside the list, over the page, that asks for an
+        /// animation frame from its prepaint, as GPUI Kit's scrollbar does
+        /// while it fades.
+        OverlayPrepaint,
+        /// An element beside the list animated with `with_animation`, which
+        /// asks for an animation frame as it is laid out.
+        OverlayAnimationElement,
+        /// The canvas of `OverlayPrepaint`, in a view around the one holding
+        /// the list.
+        Ancestor,
+        /// The canvas of `OverlayPrepaint`, inside row 1.
+        Row,
+    }
+
+    /// How a page animates, shared by the two windows a test compares.
+    #[derive(Clone, Default)]
+    struct Clock {
+        /// The step the animation is at.
+        step: Rc<Cell<u32>>,
+        /// Whether the animation runs.
+        running: Rc<Cell<bool>>,
+    }
+
+    /// A white panel holding a list of 20 px rows, 100 px tall, at the top
+    /// left of the window, and what `animated` says beside it or in it.
+    struct AnimatedPage {
+        state: ListState,
+        animated: Animated,
+        clock: Clock,
+    }
+
+    /// A canvas that, while `clock` runs, asks for an animation frame from
+    /// its prepaint, and paints the colour of the step it is at.
+    fn ticker(clock: Clock) -> impl IntoElement + Styled {
+        canvas(
+            move |_, window, _| {
+                if clock.running.get() {
+                    window.request_animation_frame();
+                }
+                clock.step.get()
+            },
+            |bounds, step, window, _| {
+                window.paint_quad(crate::fill(
+                    bounds,
+                    hsla((step % 50) as f32 / 50., 0.5, 0.5, 1.),
+                ));
+            },
+        )
+    }
+
+    /// The 10 px wide strip beside the list, right of it.
+    fn beside() -> crate::Div {
+        div()
+            .absolute()
+            .left(px(VIEWPORT_WIDTH))
+            .top(px(0.))
+            .w(px(10.))
+            .h(px(VIEWPORT_HEIGHT))
+    }
+
+    impl Render for AnimatedPage {
+        fn render(&mut self, _: &mut Window, _: &mut crate::Context<Self>) -> impl IntoElement {
+            let clock = self.clock.clone();
+            let in_row = self.animated == Animated::Row;
+            let list = crate::list(self.state.clone(), move |row, _, _| {
+                div()
+                    .w(px(VIEWPORT_WIDTH))
+                    .h(px(20.))
+                    .bg(row_color(row))
+                    .when(in_row && row == 1, |this| {
+                        this.child(ticker(clock.clone()).size(px(10.)))
+                    })
+                    .into_any_element()
+            })
+            .w(px(VIEWPORT_WIDTH))
+            .h(px(VIEWPORT_HEIGHT));
+            let beside = match self.animated {
+                Animated::OverlayPrepaint => Some(
+                    beside()
+                        .child(ticker(self.clock.clone()).size_full())
+                        .into_any_element(),
+                ),
+                Animated::OverlayAnimationElement if self.clock.running.get() => Some(
+                    beside()
+                        .bg(rgb(0x888888))
+                        .with_animation(
+                            "pulse",
+                            Animation::new(Duration::from_secs(1)).repeat(),
+                            // What it draws does not depend on the time, for
+                            // the two windows compared to draw the same.
+                            |this, _| this,
+                        )
+                        .into_any_element(),
+                ),
+                Animated::OverlayAnimationElement => {
+                    Some(beside().bg(rgb(0x888888)).into_any_element())
+                }
+                Animated::Ancestor | Animated::Row => None,
+            };
+            div()
+                .relative()
+                .size_full()
+                .bg(rgb(0xffffff))
+                .child(list)
+                .children(beside)
+        }
+    }
+
+    /// A view around an [`AnimatedPage`], with the canvas of
+    /// [`Animated::OverlayPrepaint`] beside it.
+    struct AncestorPage {
+        page: Entity<AnimatedPage>,
+        clock: Clock,
+    }
+
+    impl Render for AncestorPage {
+        fn render(&mut self, _: &mut Window, _: &mut crate::Context<Self>) -> impl IntoElement {
+            div()
+                .relative()
+                .size_full()
+                .child(self.page.clone())
+                .child(beside().child(ticker(self.clock.clone()).size_full()))
+        }
+    }
+
+    fn page(cx: &mut TestAppContext, animated: Animated, clock: Clock) -> AnyWindowHandle {
+        let state = ListState::new(500, ListAlignment::Top, px(0.)).measure_all();
+        let window: AnyWindowHandle = if animated == Animated::Ancestor {
+            cx.add_window(move |_, cx| AncestorPage {
+                page: cx.new(|_| AnimatedPage {
+                    state,
+                    animated,
+                    clock: clock.clone(),
+                }),
+                clock,
+            })
+            .into()
+        } else {
+            cx.add_window(move |_, _| AnimatedPage {
+                state,
+                animated,
+                clock,
+            })
+            .into()
+        };
+        draw(cx, window);
+        draw(cx, window);
+        window
+    }
+
+    /// Delivers the animation frames `window` asked for, as the platform's
+    /// next frame does, scrolls it by `dy` with the wheel, and draws the
+    /// frame that takes both in.
+    fn animate_and_wheel(cx: &mut TestAppContext, window: AnyWindowHandle, dy: f32) {
+        with_window(cx, window, |window, cx| {
+            window.simulate_next_frame(cx);
+            window.dispatch_event(
+                crate::PlatformInput::ScrollWheel(crate::ScrollWheelEvent {
+                    position: crate::point(px(20.), px(20.)),
+                    delta: crate::ScrollDelta::Pixels(crate::point(px(0.), px(dy))),
+                    modifiers: Default::default(),
+                    touch_phase: crate::TouchPhase::Moved,
+                }),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    /// Scrolls a page with layers and one without by `dy` a frame, with the
+    /// animation running on the first `running` frames of `frames`,
+    /// delivering the animation frames they asked for with each scroll, and
+    /// checks they draw the same; returns what the page with layers decided
+    /// on each frame.
+    fn run(
+        cx: &mut TestAppContext,
+        animated: Animated,
+        dy: f32,
+        frames: usize,
+        running: usize,
+    ) -> Vec<Option<Decision>> {
+        let clock = Clock::default();
+        clock.running.set(running > 0);
+        let with_layers = page(cx, animated, clock.clone());
+        let without_layers = page(cx, animated, clock.clone());
+        with_window(cx, without_layers, |window, _| {
+            window.set_scroll_layers(false)
+        });
+        draw(cx, without_layers);
+        let mut decisions = Vec::new();
+        for frame in 0..frames {
+            clock.step.set(frame as u32);
+            clock.running.set(frame < running);
+            animate_and_wheel(cx, with_layers, dy);
+            animate_and_wheel(cx, without_layers, dy);
+            let quads = |cx: &mut TestAppContext, window| {
+                with_window(cx, window, |window, _| {
+                    expanded_quads(&window.rendered_frame.scene)
+                })
+            };
+            let expected = quads(cx, without_layers);
+            assert_eq!(quads(cx, with_layers), expected, "frame {frame}");
+            decisions.push(decision(cx, with_layers));
+        }
+        let demoted = with_window(cx, with_layers, |window, _| {
+            window.layout_stats().layers_demoted
+        });
+        assert_eq!(demoted, 0, "{decisions:?}");
+        decisions
+    }
+
+    fn composited(decisions: &[Option<Decision>]) -> usize {
+        decisions
+            .iter()
+            .filter(|decision| **decision == Some(Decision::Composite))
+            .count()
+    }
+
+    /// The view holding the list is rendered again on every frame its
+    /// animation beside the list runs, which rendering the rows the list
+    /// shows again would cost more than drawing them without the layer: the
+    /// list is drawn without it while the animation runs, and composited
+    /// again, without waiting as a demoted layer does, once it stops.
+    fn composited_once_the_owner_stops_animating(cx: &mut TestAppContext, animated: Animated) {
+        let decisions = run(cx, animated, -7., 40, 20);
+        let (running, stopped) = decisions.split_at(20);
+        // The frame after the first that asked for an animation frame on.
+        assert!(
+            running[1..].iter().all(|d| *d == Some(Decision::Bypass)),
+            "{decisions:?}"
+        );
+        // The animation frame asked for last notifies the view on the first
+        // frame after it stops; the next one paints the layer again.
+        assert_eq!(stopped[0], Some(Decision::Bypass), "{decisions:?}");
+        assert_eq!(stopped[1], Some(Decision::Repaint), "{decisions:?}");
+        assert_eq!(composited(&stopped[2..]), stopped.len() - 2, "{decisions:?}");
+    }
+
+    #[crate::test]
+    fn an_overlay_animating_from_its_prepaint_beside_a_list_does_not_keep_it_off_for_long(
+        cx: &mut TestAppContext,
+    ) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        composited_once_the_owner_stops_animating(cx, Animated::OverlayPrepaint);
+    }
+
+    #[crate::test]
+    fn an_animation_element_beside_a_list_does_not_keep_it_off_for_long(
+        cx: &mut TestAppContext,
+    ) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        composited_once_the_owner_stops_animating(cx, Animated::OverlayAnimationElement);
+    }
+
+    #[crate::test]
+    fn an_animation_in_a_view_around_the_list_keeps_it_composited(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        // The view around the one holding the list renders again on every
+        // frame; the one holding it does not.
+        let decisions = run(cx, Animated::Ancestor, -7., 30, 30);
+        assert_eq!(composited(&decisions[2..]), 28, "{decisions:?}");
+    }
+
+    #[crate::test]
+    fn a_row_animating_from_its_prepaint_keeps_the_list_off_its_layer(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        // Small scrolls, for row 1, and the canvas in it, to keep showing:
+        // every frame draws its new colour, which `run` checks.
+        let decisions = run(cx, Animated::Row, -1., 12, 12);
+        assert_eq!(composited(&decisions), 0, "{decisions:?}");
+    }
+}

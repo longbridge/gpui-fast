@@ -72,13 +72,36 @@ pub(crate) struct ScrollLog {
     /// its state's version counter, is scrolled to its end, for the reads of
     /// only that to be judged by it. See [`note_at_end_read`].
     list_ends: FxHashMap<usize, Option<bool>>,
-    /// The views that asked for an animation frame while this frame was
-    /// being drawn, and while the last one was. See [`note_animation_frame`].
-    animation_frames: RefCell<FxHashSet<EntityId>>,
-    animation_frames_before: FxHashSet<EntityId>,
+    /// The animation frames asked for while this frame was being drawn, and
+    /// while the last one was. See [`note_animation_frame`].
+    animation_frames: RefCell<FxHashSet<AnimationRequest>>,
+    animation_frames_before: FxHashSet<AnimationRequest>,
     /// Where anchored elements were prepainted this frame, by the id of the
     /// element around them. See [`note_anchored`].
     pub(crate) anchored: Vec<GlobalElementId>,
+}
+
+/// An animation frame asked for while a frame was drawn: by which view, and
+/// from where. See [`note_animation_frame`].
+#[derive(PartialEq, Eq, Hash)]
+struct AnimationRequest {
+    /// The view current when it was asked for, which it notifies.
+    view: EntityId,
+    /// The element id stack then: the id of the element that asked, or of the
+    /// nearest one around it with an id.
+    path: GlobalElementId,
+    /// The scroll container whose layer's content was being laid out,
+    /// prepainted or painted then, if any: a `list`'s rows have no id
+    /// starting with the list's (see [`crate::fast::layers::lists::content_prefix`]).
+    painting: Option<GlobalElementId>,
+}
+
+impl AnimationRequest {
+    /// Whether it was asked for from inside the content of the scroll
+    /// container `id`: by an element in it, or by a view drawn in it.
+    fn inside(&self, id: &GlobalElementId) -> bool {
+        self.painting.as_ref() == Some(id) || self.path.starts_with(id)
+    }
 }
 
 /// What [`ScrollLog`] keeps of a scroll container it saw painted.
@@ -677,33 +700,82 @@ fn owner_notified_otherwise(window: &Window, id: &GlobalElementId) -> bool {
     }
 }
 
-/// Whether the view holding the scroll container `id`, or a view drawn
-/// inside the container last frame, asked for an animation frame while this
-/// frame or the last was drawn: what it animates changes every frame.
+/// Whether the content of the scroll container `id` asked for an animation
+/// frame while this frame or the last was drawn: an element in it, or a view
+/// drawn inside the container last frame, did. What it animates changes
+/// every frame.
+///
+/// An animation frame asked for from outside the content — by the view
+/// holding the container as it renders, or by an element of it beside the
+/// container, a scrollbar fading or a button pulsing — does not change the
+/// content. It notifies the view that asked on the next frame, which is told
+/// apart as any other notification of it is: one asked for by a view the
+/// container is drawn inside, around the one holding it, leaves the layer
+/// composited; one asked for by the view holding it is seen by
+/// [`owner_animating`].
 pub(crate) fn animation_frame_requested(window: &Window, id: &GlobalElementId) -> bool {
     let scrolls = &window.fast_layers.scrolls;
     let requested = scrolls.animation_frames.borrow();
     if requested.is_empty() && scrolls.animation_frames_before.is_empty() {
         return false;
     }
+    let mut requests = requested.iter().chain(&scrolls.animation_frames_before);
+    if requests.any(|request| request.inside(id)) {
+        return true;
+    }
     let animating = |view: EntityId| {
-        requested.contains(&view) || scrolls.animation_frames_before.contains(&view)
+        requested
+            .iter()
+            .chain(&scrolls.animation_frames_before)
+            .any(|request| request.view == view)
     };
-    owner_view(window).is_some_and(animating)
-        || any_content_view(window, id, animating)
+    any_content_view(window, id, animating)
         || crate::fast::layers::lists::any_held_view(window, id, animating)
 }
 
+/// Whether the view holding the scroll container `id` asked for an animation
+/// frame from outside the container's content while this frame or the last
+/// was drawn: it is rendered again on every frame its animation runs, for a
+/// notification nothing tells apart from a change of what it hands the
+/// content.
+///
+/// The content does not change for it, but the layer cannot tell that:
+/// painting the content into it again, or rendering again the rows of a
+/// list it shows, costs more than drawing them without it. The container is
+/// drawn without its layer while the animation runs, and gets it back as
+/// soon as the animation stops, without waiting for its content to be stable
+/// for a while as a demoted layer does.
+pub(crate) fn owner_animating(window: &Window, id: &GlobalElementId) -> bool {
+    let scrolls = &window.fast_layers.scrolls;
+    let requested = scrolls.animation_frames.borrow();
+    if requested.is_empty() && scrolls.animation_frames_before.is_empty() {
+        return false;
+    }
+    let Some(owner) = owner_view(window) else {
+        return false;
+    };
+    requested
+        .iter()
+        .chain(&scrolls.animation_frames_before)
+        .any(|request| request.view == owner && !request.inside(id))
+}
+
 /// Notes that the view `view` asked for an animation frame, as
-/// [`Window::request_animation_frame`] does.
+/// [`Window::request_animation_frame`] does, and from where: the element
+/// being drawn, and the layer whose content it is drawn in, if any.
 pub(crate) fn note_animation_frame(window: &Window, view: EntityId) {
     if COMPILED {
+        let request = AnimationRequest {
+            view,
+            path: window.element_id_stack.global_id(),
+            painting: window.fast_layers.painting.as_ref().map(|p| p.id.clone()),
+        };
         window
             .fast_layers
             .scrolls
             .animation_frames
             .borrow_mut()
-            .insert(view);
+            .insert(request);
     }
 }
 
