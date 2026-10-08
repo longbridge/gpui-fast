@@ -15,16 +15,24 @@
 //!   the view that owns the `div`;
 //! - `scroll-uniform-list`: a `uniform_list`;
 //! - `scroll-list`: a `list` of rows of varying height.
+//!
+//! Each runs again with a scrollbar over the content, drawn and driven as
+//! GPUI Kit's is (`scenarios::scrollbar`), as `<name>-scrollbar`, and the
+//! three content kinds once more with the scrollbar's thumb dragged instead
+//! of the wheel turned, as `scrollbar-drag-*`.
+
+use std::{cell::Cell, rc::Rc};
 
 use std::borrow::Cow;
 
 use gpui::{
     AnyElement, AnyView, App, AssetSource, Context, Entity, FontWeight, Hsla, ListAlignment,
-    ListState, Modifiers, PlatformInput, Render, Result, ScrollDelta, ScrollHandle,
-    ScrollWheelEvent, SharedString, TouchPhase, UniformListScrollHandle, Window, div, hsla, list,
-    point, prelude::*, px, svg, uniform_list,
+    ListState, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, PlatformInput, Render,
+    Result, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, TouchPhase,
+    UniformListScrollHandle, Window, div, hsla, list, point, prelude::*, px, svg, uniform_list,
 };
 
+use super::scrollbar::{self, Scrolled, TRACK_WIDTH};
 use crate::Scenario;
 
 /// Sections of the gallery page.
@@ -37,6 +45,10 @@ const SIDEBAR_WIDTH: f32 = 240.;
 const WHEEL_STEP: f32 = 40.;
 /// Frames scrolled in one direction before turning back.
 const FRAMES_PER_SWEEP: usize = 50;
+/// How far the pointer drags the thumb each frame, in logical pixels.
+const DRAG_STEP: f32 = 8.;
+/// Where the thumb is grabbed: inside it while the content is at the top.
+const GRAB_Y: f32 = 6.;
 
 const ICONS: [&str; 6] = [
     "icons/check.svg",
@@ -128,6 +140,38 @@ fn accent() -> Hsla {
 /// runner's 1440 × 900 window.
 fn pointer() -> gpui::Point<gpui::Pixels> {
     point(px(SIDEBAR_WIDTH + 600.), px(450.))
+}
+
+/// Where the scrollbar's track is: along the window's right edge, in the
+/// runner's 1440-wide window.
+fn track_x() -> gpui::Pixels {
+    px(1440. - TRACK_WIDTH / 2.)
+}
+
+/// The event of frame `frame` that drags the thumb: pressed on it at frame
+/// 0, then moved `DRAG_STEP` a frame, `FRAMES_PER_SWEEP` frames down, as
+/// many back up, and again, with the button held.
+fn drag(frame: usize) -> PlatformInput {
+    if frame == 0 {
+        return PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position: point(track_x(), px(GRAB_Y)),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+    }
+    let sweep = frame % (2 * FRAMES_PER_SWEEP);
+    let travel = if sweep < FRAMES_PER_SWEEP {
+        sweep
+    } else {
+        2 * FRAMES_PER_SWEEP - sweep
+    };
+    PlatformInput::MouseMove(MouseMoveEvent {
+        position: point(track_x(), px(GRAB_Y + DRAG_STEP * travel as f32)),
+        pressed_button: Some(MouseButton::Left),
+        modifiers: Modifiers::default(),
+    })
 }
 
 /// The wheel event of frame `frame`: `FRAMES_PER_SWEEP` frames down, as many
@@ -308,14 +352,26 @@ pub struct Gallery {
     sidebar: Entity<Sidebar>,
     scroll: ScrollHandle,
     content: Content,
+    /// The scrollbar's state, when the content has one.
+    scrollbar: Option<Rc<Cell<scrollbar::State>>>,
 }
 
 impl Gallery {
-    fn new(content: Content, cx: &mut Context<Self>) -> Self {
+    fn new(content: Content, scrollbar: bool, cx: &mut Context<Self>) -> Self {
         Self {
             sidebar: cx.new(|_| Sidebar),
             scroll: ScrollHandle::new(),
             content,
+            scrollbar: scrollbar.then(Rc::default),
+        }
+    }
+
+    /// What the scrollbar scrolls.
+    fn scrolled(&self) -> Scrolled {
+        match &self.content {
+            Content::ChildView(_) | Content::SameView => Scrolled::Div(self.scroll.clone()),
+            Content::UniformList(_, handle) => Scrolled::UniformList(handle.clone()),
+            Content::List(state) => Scrolled::List(state.clone()),
         }
     }
 }
@@ -407,15 +463,37 @@ impl Render for Gallery {
             .bg(background())
             .text_color(text())
             .child(self.sidebar.clone())
-            .child(div().flex_1().h_full().min_w_0().child(content))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .h_full()
+                    .min_w_0()
+                    .child(content)
+                    .when_some(self.scrollbar.clone(), |this, state| {
+                        this.child(scrollbar::scrollbar(self.scrolled(), state))
+                    }),
+            )
     }
 }
 
-/// A scenario scrolling one kind of content with the wheel.
+/// How a scenario scrolls.
+#[derive(Clone, Copy, PartialEq)]
+enum Drive {
+    /// The wheel over the content.
+    Wheel,
+    /// The scrollbar's thumb, dragged.
+    Thumb,
+}
+
+/// A scenario scrolling one kind of content, by the wheel or by dragging the
+/// scrollbar's thumb.
 struct WheelScroll {
     name: &'static str,
     description: &'static str,
     content: fn(&mut App) -> Content,
+    scrollbar: bool,
+    drive: Drive,
 }
 
 impl Scenario for WheelScroll {
@@ -429,35 +507,75 @@ impl Scenario for WheelScroll {
 
     fn build(&self, _: &mut Window, cx: &mut App) -> AnyView {
         let content = (self.content)(cx);
-        cx.new(|cx| Gallery::new(content, cx)).into()
+        let scrollbar = self.scrollbar;
+        cx.new(|cx| Gallery::new(content, scrollbar, cx)).into()
     }
 
     fn step(&self, _: &AnyView, frame: usize, window: &mut Window, cx: &mut App) {
-        window.dispatch_event(wheel(frame), cx);
+        let event = match self.drive {
+            Drive::Wheel => wheel(frame),
+            Drive::Thumb => drag(frame),
+        };
+        window.dispatch_event(event, cx);
     }
 }
 
+/// The content kinds: name, description, content.
+const KINDS: [(&str, &str, fn(&mut App) -> Content); 4] = [
+    (
+        "child-view",
+        "A gallery page, a child view of 24 sections of buttons",
+        |cx| Content::ChildView(cx.new(|_| Page)),
+    ),
+    (
+        "same-view",
+        "A gallery page of 24 sections drawn by the scrolling view itself",
+        |_| Content::SameView,
+    ),
+    ("uniform-list", "A 10,000-row uniform_list", |_| {
+        Content::UniformList(10_000, UniformListScrollHandle::new())
+    }),
+    ("list", "A 2,000-row list of rows of varying height", |_| {
+        Content::List(ListState::new(2_000, ListAlignment::Top, px(200.)))
+    }),
+];
+
 pub fn scenarios() -> Vec<Box<dyn Scenario>> {
-    vec![
-        Box::new(WheelScroll {
-            name: "scroll-child-view",
-            description: "A gallery page, a child view of 24 sections of buttons, scrolled by the wheel",
-            content: |cx| Content::ChildView(cx.new(|_| Page)),
-        }),
-        Box::new(WheelScroll {
-            name: "scroll-same-view",
-            description: "A gallery page of 24 sections drawn by the scrolling view itself, scrolled by the wheel",
-            content: |_| Content::SameView,
-        }),
-        Box::new(WheelScroll {
-            name: "scroll-uniform-list",
-            description: "A 10,000-row uniform_list scrolled by the wheel",
-            content: |_| Content::UniformList(10_000, UniformListScrollHandle::new()),
-        }),
-        Box::new(WheelScroll {
-            name: "scroll-list",
-            description: "A 2,000-row list of rows of varying height scrolled by the wheel",
-            content: |_| Content::List(ListState::new(2_000, ListAlignment::Top, px(200.))),
-        }),
-    ]
+    let leak = |text: String| -> &'static str { Box::leak(text.into_boxed_str()) };
+    let mut scenarios: Vec<Box<dyn Scenario>> = Vec::new();
+    for (kind, description, content) in KINDS {
+        scenarios.push(Box::new(WheelScroll {
+            name: leak(format!("scroll-{kind}")),
+            description: leak(format!("{description}, scrolled by the wheel")),
+            content,
+            scrollbar: false,
+            drive: Drive::Wheel,
+        }));
+    }
+    for (kind, description, content) in KINDS {
+        scenarios.push(Box::new(WheelScroll {
+            name: leak(format!("scroll-{kind}-scrollbar")),
+            description: leak(format!(
+                "{description}, with a GPUI Kit scrollbar, scrolled by the wheel"
+            )),
+            content,
+            scrollbar: true,
+            drive: Drive::Wheel,
+        }));
+    }
+    for (kind, description, content) in KINDS {
+        if kind == "same-view" {
+            continue;
+        }
+        scenarios.push(Box::new(WheelScroll {
+            name: leak(format!("scrollbar-drag-{kind}")),
+            description: leak(format!(
+                "{description}, scrolled by dragging a GPUI Kit scrollbar's thumb"
+            )),
+            content,
+            scrollbar: true,
+            drive: Drive::Thumb,
+        }));
+    }
+    scenarios
 }
