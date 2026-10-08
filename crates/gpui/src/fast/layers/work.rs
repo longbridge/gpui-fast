@@ -22,11 +22,11 @@ const FRAME_OVERHEAD: f32 = 0.25;
 // refresh paints content afresh, its work counted at [`REPAINT_COST`].
 const MAX_REFRESH_WORK: f32 = 2. * REPAINT_COST;
 // A layer whose last this many frames cost more than drawing directly would
-// have, half of them or more each rebuilding more than drawing directly
-// does, is dropped without waiting for the whole window: a scroll too fast
-// for its overscan, or content refreshed on every other frame, does not pay
-// for it, and every frame it is kept costs more than drawing without it.
-// One broad refresh among cheap frames does not trip it.
+// have, their upkeep included, half of them or more each costing more, is
+// dropped without waiting for the whole window: a scroll too fast for its
+// overscan, or content refreshed on every other frame, does not pay for it,
+// and every frame it is kept costs more than drawing without it. One broad
+// refresh among cheap frames does not trip it.
 const RECENT: usize = 6;
 // Two such refreshes this many frames apart or closer make the spikes
 // recurring; further apart, the frames composited between them save far
@@ -96,13 +96,12 @@ impl WorkBudget {
     }
 
     /// Whether the last [`RECENT`] frames cost more than drawing directly
-    /// would have, half of them or more each rebuilding more than drawing
-    /// directly does.
+    /// would have, half of them or more each costing more.
     fn recent_over(&self) -> bool {
         if self.len < RECENT {
             return false;
         }
-        let direct = 1. + FRAME_OVERHEAD;
+        let direct = 1.;
         let recent = (1..=RECENT).map(|back| self.samples[(self.next + WINDOW - back) % WINDOW]);
         let over = recent.clone().filter(|sample| *sample > direct).count();
         over * 2 >= RECENT && recent.sum::<f32>() > direct * RECENT as f32
@@ -199,14 +198,14 @@ mod tests {
     }
 
     #[test]
-    fn frames_each_rebuilding_more_than_a_viewport_fall_back_within_a_few_frames() {
+    fn frames_each_rebuilding_a_viewport_fall_back_within_a_few_frames() {
         let mut budget = WorkBudget::default();
         budget.note(0, 5.);
         for frame in 1..super::RECENT as u64 {
-            budget.note(frame, 1.1);
+            budget.note(frame, 1.);
             assert!(!budget.over_budget(), "frame {frame}");
         }
-        budget.note(super::RECENT as u64, 1.1);
+        budget.note(super::RECENT as u64, 1.);
         assert!(budget.over_budget());
     }
 

@@ -445,9 +445,11 @@ fn needed_rows(visible: &Range<usize>, overscan: usize, item_count: usize) -> Ra
 /// together.
 ///
 /// A list drawn without a layer renders the viewport's rows every frame: a
-/// frame growing the overscan renders no more than that, most of it on the
-/// side the list scrolls toward (see [`ahead`]), and a frame whose shown
-/// rows alone cost that adds no overscan. A scroll faster than the overscan grows, as a scrollbar's thumb
+/// frame growing the overscan renders three quarters of that, most of it on
+/// the side the list scrolls toward (see [`ahead`]), and costs no more than
+/// drawing the list directly with the layer's upkeep (see
+/// [`crate::fast::layers::work`]); a frame whose shown rows alone cost that
+/// adds no overscan. A scroll faster than the overscan grows, as a scrollbar's thumb
 /// dragged, renders on each frame the rows it shows, as the list does
 /// without its layer, instead of the whole overscan around them.
 ///
@@ -459,7 +461,7 @@ fn needed_rows(visible: &Range<usize>, overscan: usize, item_count: usize) -> Ra
 /// rows after it grow the overscan back: a view holding the list that is
 /// notified now and then, as a chat transcript is when it reaches its end,
 /// does not render five viewports of rows each time.
-const RENDER_PER_FRAME_VIEWPORTS: f32 = 1.0;
+const RENDER_PER_FRAME_VIEWPORTS: f32 = 0.75;
 
 /// The rows of `limit`, around and including `visible`, that a uniform
 /// list's layer is to hold after a frame keeping the rows of `unrendered`:
@@ -483,7 +485,7 @@ fn grown_rows(
         .min(kept.end)
         .saturating_sub(visible.start.max(kept.start));
     let shown_missing = visible.len() - shown_kept;
-    let allowed = (visible.len() as f32 * RENDER_PER_FRAME_VIEWPORTS).ceil() as usize;
+    let allowed = (visible.len() as f32 * RENDER_PER_FRAME_VIEWPORTS) as usize;
     let budget = allowed.saturating_sub(shown_missing);
     let (mut start, mut end) = (visible.start.max(limit.start), visible.end.min(limit.end));
     if kept.contains(&end) {
@@ -2777,17 +2779,24 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
         .range(frame.visible.clone())
         .map(|(_, row)| row.part.scene.paint_operations.len())
         .sum();
-    // Rows are of any height, one of them filling the viewport or a few
-    // pixels tall: how much of the viewport the rows rendered would fill,
-    // and what they drew against what the rows shown draw, tell their cost
-    // apart, where their count does not.
+    // Rows are of any height, one of them taller than the viewport or a few
+    // pixels tall: how tall the rows rendered are against the rows shown,
+    // which the list renders whole without a layer, or against the viewport
+    // when they do not fill it, and what they drew against what the rows
+    // shown draw, tell their cost apart, where their count does not.
+    let height = |row: &Row| row.slot.size.height.0;
     let rendered_height: f32 = rendered_rows
         .iter()
         .filter_map(|row| rows.rows.get(row))
-        .map(|row| row.slot.size.height.0)
+        .map(height)
         .sum();
-    let viewport_height = frame.viewport.size.height.0 * scale_factor;
-    let work = (rendered_height / viewport_height.max(1.))
+    let shown_height = rows
+        .rows
+        .range(frame.visible.clone())
+        .map(|(_, row)| height(row))
+        .sum::<f32>()
+        .max(frame.viewport.size.height.0 * scale_factor);
+    let work = (rendered_height / shown_height.max(1.))
         .max(rendered_operations as f32 / visible_operations.max(1) as f32);
 
     // The content: the rows in order.

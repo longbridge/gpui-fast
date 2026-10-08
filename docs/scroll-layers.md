@@ -45,10 +45,10 @@ drawing as it does without layers, and how to verify and measure layers.
   - The first frame painting a list's layer paints the whole overscan. A
     frame painting it afresh after that, for a change of its content, paints
     only the rows the list shows, as the list does without a layer. A frame
-    that keeps the rows renders no more than a viewport of rows, those it
-    shows that the layer lacks first: the rest of that budget grows the
-    overscan, three quarters of it on the side the list scrolls toward
-    (`fast::layers::lists::RENDER_PER_FRAME_VIEWPORTS`). A view holding the
+    that keeps the rows renders no more than three quarters of a viewport of
+    rows, those it shows that the layer lacks first: the rest of that budget
+    grows the overscan, three quarters of it on the side the list scrolls
+    toward (`fast::layers::lists::RENDER_PER_FRAME_VIEWPORTS`). A view holding the
     list that is notified now and then, as a chat transcript is when it
     reaches its end, does not rebuild five viewports of rows each time, and a
     scroll faster than the overscan grows renders the rows it shows, not five
@@ -131,9 +131,9 @@ belongs in an entity the listener updates.
 
 The demotion policy also tracks rebuilding work over the last 32 completed
 layer frames (`fast::layers::work`), in units of drawing the visible content
-directly. Virtual lists count the rows they rendered, by the height they
-would fill of the viewport and by their paint operations against those of the
-rows shown; other scroll containers count painted primitives relative to
+directly. Virtual lists count the rows they rendered, by their height against
+that of the rows shown (or of the viewport, if taller) and by their paint
+operations against those of the rows shown; other scroll containers count painted primitives relative to
 those visible in the viewport. Scroll extensions, hover changes and input
 rebuilds count too. Painting content afresh costs about twice what drawing it
 directly does (its tiles are hashed and its records rebuilt besides), and a
@@ -141,8 +141,8 @@ repaint's work is counted at `REPAINT_COST` times. The initial cache build is
 excluded, and a quarter of each frame's budget is reserved for cache
 bookkeeping and tile rendering. A layer whose estimated work reaches direct
 drawing's budget falls back even if updates occur on fewer than half the
-frames, and one whose last six frames cost more than drawing directly, half of
-them each rebuilding more than a viewport, falls back at once, without waiting
+frames, and one whose last six frames cost more than drawing directly, their upkeep
+included, half of them each costing more, falls back at once, without waiting
 for the 32-frame average. Two content refreshes that each rebuild more than two
 visible regions within 120 frames of each other also trigger fallback: broad
 updates must not keep causing latency spikes. Refreshes further apart than
