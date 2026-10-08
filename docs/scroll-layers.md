@@ -102,7 +102,8 @@ each frame it then takes one of three paths (`fast::layers::policy::decide`):
     soon as the animation stops. An animation in a view around the one
     holding the container leaves the layer composited;
   - the content changes on at least eight of the last sixteen frames (demotion);
-  - paths in the content are covered by something drawn after them.
+  - a row of a list draws over the paths of a row before it, or over what
+    that row drew over its paths.
 
 The demotion policy also tracks rebuilding work over the last 32 completed
 layer frames. Virtual lists count the rows and paint operations they actually
@@ -128,8 +129,17 @@ layer held it does not count as a changed frame. After 1920 quiet frames the
 backoff resets. This is a work estimate, not a measurement of GPU
 time, and does not depend on the monitor's refresh rate.
 
-Paths are never rasterized into tiles, because odd translations change their
-antialiasing. When nothing covers them, they are drawn over the tiles in the
+Paths are never rasterized into tiles: the path shaders antialias with
+screen-space derivatives (`dpdx`/`dfdx`/`ddx`), taken within the 2×2 pixel
+quads the GPU shades together, so a tile composited at an odd translation can
+come out one level apart on a path's edge pixels. Instead the content is split
+(`fast::layers::overlay`): its paths, and everything drawn after a path or
+after such a primitive that overlaps it, are the layer's *overlay*, kept out
+of the tiles and drawn over them in the frame, in drawing order, wherever the
+layer is composited. On every pixel the primitives drawing it are then drawn
+in the same order as without a layer, and the paths are rasterized where they
+show. A table in a rounded frame, whose corner notches are paths under the
+frame's border, composites with only the paths and the border drawn each
 frame.
 
 ### Changes inside a list's rows

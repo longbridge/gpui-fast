@@ -263,8 +263,58 @@ fn render_row(
                     .push(format!("click {label} at {:?}", event.position()))
             }
         })
+        .when(row.id % 4 == 1, |this| this.child(framed(row.id)))
         .child(probe(label, log.clone()))
         .into_any_element()
+}
+
+/// A rounded frame as GPUI Kit draws a table's: paths filling its corner
+/// notches, painted under the frame's border, which its element paints
+/// after its children, and under a swatch drawn after the frame. Every
+/// other one has a path nothing draws over too.
+fn framed(id: u64) -> impl IntoElement {
+    div()
+        .relative()
+        .w(px(24.))
+        .h(px(10.))
+        .border_1()
+        .border_color(PALETTE[3])
+        .rounded(px(3.))
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    for (corner, x, y) in [
+                        (bounds.origin, 1., 1.),
+                        (bounds.top_right(), -1., 1.),
+                        (bounds.bottom_right(), -1., -1.),
+                    ] {
+                        let mut path = crate::Path::new(corner);
+                        path.line_to(corner + point(px(3. * x), px(0.)));
+                        path.curve_to(corner + point(px(0.), px(3. * y)), corner);
+                        path.line_to(corner);
+                        window.paint_path(path, PALETTE[4]);
+                    }
+                    if id % 8 == 1 {
+                        let origin = bounds.origin + point(px(8.), px(2.));
+                        let mut path = crate::Path::new(origin);
+                        path.line_to(origin + point(px(6.), px(0.)));
+                        path.line_to(origin + point(px(0.), px(5.)));
+                        window.paint_path(path, PALETTE[2]);
+                    }
+                },
+            )
+            .absolute()
+            .size_full(),
+        )
+        .child(
+            div()
+                .absolute()
+                .right_0()
+                .w(px(5.))
+                .h(px(4.))
+                .bg(PALETTE[0]),
+        )
 }
 
 /// Records, for every mouse down over it, where it happened and the bounds
@@ -822,6 +872,9 @@ struct Coverage {
     /// held, and rows they rendered again because their hovers changed.
     list_frames: usize,
     rows_rendered_for_hover: usize,
+    /// Frames that composited a layer drawing paths, and what was drawn
+    /// over them, over its tiles.
+    overlaid: usize,
 }
 
 /// Drives a window with layers and one without through one random history
@@ -882,6 +935,17 @@ fn run(
 
         let expected = draw(&mut cx, plain, &points);
         let actual = draw(&mut cx, layered, &points);
+        coverage.overlaid += cx
+            .update_window(layered.into(), |_, window, _| {
+                let composited = &window.rendered_frame.scene.layers.frames;
+                window.fast_layers.layers.values().any(|layer| {
+                    layer.record.as_ref().is_some_and(|record| {
+                        !record.overlay.is_empty()
+                            && composited.iter().any(|frame| frame.key == layer.key)
+                    })
+                })
+            })
+            .unwrap() as usize;
         let failure = if actual.log != expected.log {
             Some(format!(
                 "listeners saw different events {}",
@@ -956,6 +1020,7 @@ fn run_all(containers: Range<usize>, keep_turning: f64) -> Coverage {
             total.scrolled += coverage.scrolled;
             total.list_frames += coverage.list_frames;
             total.rows_rendered_for_hover += coverage.rows_rendered_for_hover;
+            total.overlaid += coverage.overlaid;
         }
     }
     total
@@ -978,6 +1043,10 @@ fn frames_drawn_through_scroll_layers_match_frames_drawn_without() {
             "no frame composited a scroll layer over {} scrolled frames",
             total.scrolled
         );
+        assert!(
+            total.overlaid > 0,
+            "no frame composited a layer with paths drawn over its tiles"
+        );
     }
 }
 
@@ -998,6 +1067,10 @@ fn list_frames_drawn_through_scroll_layers_match_frames_drawn_without() {
              for its hover ({})",
             total.list_frames,
             total.rows_rendered_for_hover
+        );
+        assert!(
+            total.overlaid > 0,
+            "no frame composited a list's layer with paths drawn over its tiles"
         );
     }
 }

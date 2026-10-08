@@ -2428,12 +2428,14 @@ mod rows {
     use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 
     /// What each row of a [`RowsPage`] holds besides its colour.
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, PartialEq)]
     enum RowKind {
         /// A scroll container of its own, taller inside than it shows.
         Scrolling,
-        /// A path, drawn over the row's colour.
+        /// A path, drawn over the row's colour, and a quad over the path.
         Path,
+        /// A path reaching into the next row, whose colour is drawn over it.
+        SpillingPath,
         /// A hover style, as a list's rows mostly have: a hitbox.
         Hover,
     }
@@ -2453,16 +2455,28 @@ mod rows {
                         .child(div().h(px(40.)).bg(row_color(ix + 13))),
                 )
                 .into_any_element(),
-            RowKind::Path => base
+            RowKind::Path | RowKind::SpillingPath => base
                 .child(
                     crate::canvas(
                         |_, _, _| {},
-                        |bounds, _, window, _| {
+                        move |bounds, _, window, _| {
                             let origin = bounds.origin;
+                            let reach = if kind == RowKind::SpillingPath {
+                                50.
+                            } else {
+                                30.
+                            };
                             let mut path = crate::Path::new(origin);
                             path.line_to(origin + crate::point(px(30.), px(0.)));
-                            path.line_to(origin + crate::point(px(0.), px(30.)));
+                            path.line_to(origin + crate::point(px(0.), px(reach)));
                             window.paint_path(path, crate::black());
+                            window.paint_quad(crate::fill(
+                                crate::Bounds::new(
+                                    origin + crate::point(px(2.), px(2.)),
+                                    crate::size(px(8.), px(8.)),
+                                ),
+                                crate::blue().opacity(0.5),
+                            ));
                         },
                     )
                     .h(px(40.))
@@ -2586,13 +2600,41 @@ mod rows {
     }
 
     #[crate::test]
-    fn a_list_whose_rows_paint_paths_is_kept_off_its_layer(cx: &mut TestAppContext) {
+    fn a_list_whose_rows_paint_paths_composites_with_them_over_its_tiles(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {
             return;
         }
         for uniform in [false, true] {
             let with_layers = page(cx, RowKind::Path, uniform);
             let without_layers = page(cx, RowKind::Path, uniform);
+            compare_with_layers_off(cx, with_layers, without_layers, &[-20., -20.], "promote");
+            assert_eq!(decision(cx, with_layers), Some(Decision::Repaint));
+            for step in 0..5 {
+                compare_with_layers_off(cx, with_layers, without_layers, &[-15.], "scroll");
+                assert_eq!(
+                    decision(cx, with_layers),
+                    Some(Decision::Composite),
+                    "uniform {uniform}, step {step}"
+                );
+            }
+            with_window(cx, with_layers, |window, _| {
+                let scene = &window.rendered_frame.scene;
+                assert_eq!(scene.layers.frames.len(), 1, "the tiles are composited");
+                assert!(!scene.paths.is_empty(), "the paths are drawn over them");
+            });
+        }
+    }
+
+    #[crate::test]
+    fn a_list_whose_rows_draw_over_paths_of_rows_before_is_kept_off_its_layer(
+        cx: &mut TestAppContext,
+    ) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        for uniform in [false, true] {
+            let with_layers = page(cx, RowKind::SpillingPath, uniform);
+            let without_layers = page(cx, RowKind::SpillingPath, uniform);
             // Promoted and painted once into the layer, then demoted: paths
             // composited from tiles would not land as drawn afresh.
             compare_with_layers_off(cx, with_layers, without_layers, &[-20., -20.], "promote");

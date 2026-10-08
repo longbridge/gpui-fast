@@ -1045,11 +1045,12 @@ mod tests {
     /// view, and what it paints moves.
     #[test]
     fn scroll_scenarios_scroll_with_the_wheel() {
-        const NAMES: [&str; 17] = [
+        const NAMES: [&str; 18] = [
             "scroll-child-view",
             "scroll-same-view",
             "scroll-uniform-list",
             "scroll-list",
+            "scroll-list-tables",
             "chat-scroll",
             "chat-scroll-no-button",
             "chat-scroll-plain",
