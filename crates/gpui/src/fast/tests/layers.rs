@@ -1620,7 +1620,7 @@ mod paint {
                 record.content.scene().unwrap().paths.is_empty(),
                 "the tiles hold no path"
             );
-            assert_eq!(record.paths.len(), 1, "the layer keeps the path apart");
+            assert_eq!(record.overlay.len(), 1, "the layer keeps the path apart");
             let scene = &window.rendered_frame.scene;
             assert!(!tile_quads(scene).is_empty(), "the tiles are composited");
             assert_eq!(scene.layers.frames.len(), 1);
@@ -2799,25 +2799,29 @@ mod policies {
     }
 
     #[crate::test]
-    fn an_animation_frame_requested_by_the_owner_makes_it_ineligible(cx: &mut TestAppContext) {
+    fn an_animation_frame_requested_inside_the_content_makes_it_ineligible(
+        cx: &mut TestAppContext,
+    ) {
         if !crate::fast::layers::COMPILED {
             return;
         }
         let handle = page(cx, false);
         let window = handle.into();
-        promote(cx, window);
-        assert_eq!(scroll(cx, window, -20.), Some(Decision::Composite));
-        frame_after(cx, window, |cx| {
-            handle
-                .update(cx, |page, _, cx| {
-                    page.animate = true;
-                    cx.notify();
-                })
-                .unwrap();
+        // Asks for an animation frame from its prepaint, inside the scroll
+        // container, without a view of its own.
+        with_extra(cx, handle, || {
+            canvas(
+                |_, window, _| window.request_animation_frame(),
+                |_, _, _, _| {},
+            )
+            .h(px(10.))
+            .into_any_element()
         });
-        assert_eq!(scroll(cx, window, -20.), Some(Decision::Bypass));
-        assert!(!has_record(cx, window));
-        assert_eq!(scroll(cx, window, -20.), Some(Decision::Bypass));
+        promote(cx, window);
+        for _ in 0..4 {
+            assert_eq!(scroll(cx, window, -5.), Some(Decision::Bypass));
+            assert!(!has_record(cx, window));
+        }
     }
 
     #[crate::test]
@@ -2932,7 +2936,9 @@ mod policies {
     }
 
     #[crate::test]
-    fn content_drawing_over_a_path_is_demoted(cx: &mut TestAppContext) {
+    fn content_drawing_over_a_path_composites_with_the_cover_over_the_tiles(
+        cx: &mut TestAppContext,
+    ) {
         if !crate::fast::layers::COMPILED {
             return;
         }
@@ -2940,11 +2946,30 @@ mod policies {
         let window = handle.into();
         with_path(cx, handle, true);
         promote(cx, window);
-        assert_eq!(scroll(cx, window, -20.), Some(Decision::Bypass));
-        assert_eq!(layers_demoted(cx, window), 1);
-        assert!(!has_record(cx, window));
-        assert_eq!(scroll(cx, window, -20.), Some(Decision::Bypass));
-        assert_eq!(scroll(cx, window, -20.), Some(Decision::Bypass));
+        assert_eq!(scroll(cx, window, -20.), Some(Decision::Composite));
+        crate::AppContext::update_window(cx, window, |_, window, _| {
+            let layer = window.fast_layers.layers.values().next().expect("a layer");
+            let record = layer.record.as_ref().expect("painted");
+            assert!(!record.has_paths);
+            let kinds: Vec<_> = record
+                .overlay
+                .iter()
+                .map(|primitive| matches!(primitive, crate::scene::Primitive::Path(_)))
+                .collect();
+            assert_eq!(kinds, [true, false], "the path and the quad over it");
+            let scene = &window.rendered_frame.scene;
+            assert_eq!(scene.paths.len(), 1, "the path is in the frame");
+            assert!(
+                scene
+                    .quads
+                    .iter()
+                    .any(|quad| quad.order > scene.paths[0].order),
+                "the quad is drawn over the path"
+            );
+        })
+        .unwrap();
+        assert_eq!(scroll(cx, window, -20.), Some(Decision::Composite));
+        assert_eq!(layers_demoted(cx, window), 0);
     }
 
     #[crate::test]

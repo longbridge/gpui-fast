@@ -158,6 +158,7 @@ pub(crate) fn decide(window: &mut Window, id: &GlobalElementId, decision: Decisi
 /// Called by [`Window::dispatch_event`] once it has taken in the event's
 /// position.
 pub(crate) fn before_dispatch(window: &mut Window, cx: &mut App, event: &PlatformInput) {
+    crate::fast::layers::wheel::begin_dispatch(window, cx, event);
     if !COMPILED || window.fast_layers.layers.is_empty() {
         return;
     }

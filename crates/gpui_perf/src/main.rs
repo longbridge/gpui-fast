@@ -26,6 +26,8 @@
 //!
 //! - `--demo`: scroll the sidebar, a page, the table and the list in turn,
 //!   for as long as it is open, to watch or record two GPUIs side by side.
+//!   It waits while the first page, Allsum's chat window, shows, for it to
+//!   be scrolled by hand.
 //! - `--auto`: run every scenario with retention on and off, print what each
 //!   cost, and quit.
 //! - `--only <scenario>`, `--retention on|off`, `--frames N`: narrow `--auto`

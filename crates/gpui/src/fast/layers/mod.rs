@@ -9,14 +9,17 @@ pub(crate) mod background;
 pub(crate) mod input;
 pub(crate) mod invalidate;
 pub(crate) mod lists;
+pub(crate) mod overlay;
 pub(crate) mod paint;
 pub(crate) mod policy;
 pub(crate) mod record;
 pub(crate) mod reuse;
 pub mod scene;
+pub(crate) mod scroll_to_bottom;
 pub(crate) mod tiles;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod verify;
+pub(crate) mod wheel;
 pub(crate) mod work;
 
 use crate::{App, GlobalElementId, Window};
@@ -55,6 +58,8 @@ pub(crate) struct WindowLayers {
     pub(crate) frame: u64,
     /// The window's size and scale factor the layers were painted at.
     pub(crate) window_size: Option<(crate::Size<crate::Pixels>, f32)>,
+    /// The wheel event being dispatched, if any.
+    pub(crate) wheel: wheel::WheelDispatch,
 }
 
 impl Default for WindowLayers {
@@ -70,6 +75,7 @@ impl Default for WindowLayers {
             forced_decision: None,
             frame: 0,
             window_size: None,
+            wheel: wheel::WheelDispatch::default(),
         }
     }
 }
@@ -118,7 +124,7 @@ pub(crate) fn active(window: &Window, cx: &App) -> bool {
         && window.retained_state.view_retention
         && !window.refreshing
         && !cx.has_active_drag()
-        && !window.a11y.is_active()
+        && !crate::fast::a11y::stale(&window.a11y)
         && !window.is_inspector_picking(cx)
 }
 
@@ -126,6 +132,7 @@ pub(crate) fn active(window: &Window, cx: &App) -> bool {
 /// layers not composited for long, or painted for another window size or
 /// scale factor, are dropped.
 pub(crate) fn finish_frame(window: &mut Window) {
+    scroll_to_bottom::drop_quiet_scrolls_to_bottom();
     policy::drop_layers_on_resize(window);
     let layers = &mut window.fast_layers;
     let frame = layers.frame;

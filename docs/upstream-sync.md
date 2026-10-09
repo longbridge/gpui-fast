@@ -202,3 +202,7 @@ commit our copy was taken from is `zed_commit` in `UPSTREAM`, and
    and the new vendor commit, and add or remove entries under `tracked` if zed
    added or removed crates we use.
 5. Run `script/check-upstream`, the tests and clippy.
+6. Check that `window/a11y.rs` still keeps the tree it last sent in
+   `A11yDebug::last_tree_update` in every build: `fast/a11y.rs` reads the
+   nodes it draws again from there
+   (`a11y_frame_keeps_the_tree_it_sent` fails if it stops).

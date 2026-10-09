@@ -108,6 +108,61 @@ fn a_path_over_a_composited_layer_equals_direct_drawing() {
     );
 }
 
+/// Paths something draws over stay out of the tiles: the core draws them,
+/// and what it draws over them, over the composited tiles
+/// (`gpui::fast::layers::overlay`), as without a layer. That holds at odd
+/// translations too, as the paths are rasterized where they show.
+#[test]
+fn covered_paths_drawn_over_the_tiles_equal_direct_drawing() {
+    let Some(mut harness) = Harness::new() else {
+        return;
+    };
+    let window = scrolled_window();
+    let width = window.size.width.0 as usize;
+    let tiles = [coord(0, 0), coord(1, 0), coord(0, 1), coord(1, 1)];
+    for (generation, translation) in [(37., -91.), (38., -92.), (3., 5.), (101., -233.)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut direct = Scene::default();
+        direct.insert_primitive(panel(&window));
+        add_content(&mut direct, &harness, translation, Some(window.viewport));
+        add_covered_paths(&mut direct, &harness, translation, window.viewport);
+        direct.insert_primitive(scrollbar());
+        direct.finish();
+        let expected = harness.render(&direct, window.size);
+
+        let layer = layer_frame(
+            LayerKey(7),
+            generation as u64 + 1,
+            content(&harness, (0., 0.), None),
+            &tiles,
+        );
+        let mut scene = Scene::default();
+        scene.insert_primitive(panel(&window));
+        scene.push_layer(window.viewport);
+        for &tile in &tiles {
+            scene.insert_primitive(tile_sprite(
+                layer.key,
+                &layer,
+                tile,
+                translation,
+                window.viewport,
+            ));
+        }
+        scene.pop_layer();
+        add_covered_paths(&mut scene, &harness, translation, window.viewport);
+        scene.insert_primitive(scrollbar());
+        scene.layers.frames.push(layer);
+        scene.finish();
+        let actual = harness.render(&scene, window.size);
+        assert_same_pixels(&actual, &expected, width);
+        // A frame that only scrolled draws the cached tiles again.
+        let actual = harness.render(&scene, window.size);
+        assert_same_pixels(&actual, &expected, width);
+    }
+}
+
 /// A repainted layer's next generation re-rasterizes its dirty tile, which
 /// then shows the new content.
 #[test]
@@ -628,6 +683,64 @@ fn add_path(scene: &mut Scene) {
     path.line_to(point(px(480.), px(300.)));
     path.content_mask = ContentMask {
         bounds: no_mask().bounds.map(|c| px(c.0)),
+    };
+    path.color = Hsla::from(rgba(0x8800ffcc)).into();
+    scene.insert_primitive(path.scale(1.));
+}
+
+/// What GPUI Kit draws for a table's rounded frame: paths filling corner
+/// notches, a bordered quad and a glyph drawn over them, and a path nothing
+/// covers, moved by `offset` and clipped to `clip`, in drawing order.
+fn add_covered_paths(
+    scene: &mut Scene,
+    harness: &Harness,
+    (ox, oy): (f32, f32),
+    clip: Bounds<ScaledPixels>,
+) {
+    let mask = ContentMask { bounds: clip };
+    for (x, y, dx, dy) in [
+        (200., 330., 1., 1.),
+        (330.5, 330., -1., 1.),
+        (200., 410.25, 1., -1.),
+    ] {
+        let corner = point(px(x + ox), px(y + oy));
+        let mut path = Path::new(corner);
+        path.line_to(corner + point(px(9. * dx), px(0.)));
+        path.curve_to(corner + point(px(0.), px(9. * dy)), corner);
+        path.line_to(corner);
+        path.content_mask = ContentMask {
+            bounds: clip.map(|c| px(c.0)),
+        };
+        path.color = Hsla::from(rgba(0x3366ccff)).into();
+        scene.insert_primitive(path.scale(1.));
+    }
+    scene.insert_primitive(Quad {
+        bounds: sp(200. + ox, 330. + oy, 130.5, 80.25),
+        content_mask: mask,
+        background: Hsla::from(rgba(0x00000000)).into(),
+        border_color: Hsla::from(rgba(0x222222ff)),
+        corner_radii: Corners::all(ScaledPixels(9.)),
+        border_widths: Edges::all(ScaledPixels(1.)),
+        ..Default::default()
+    });
+    scene.insert_primitive(MonochromeSprite {
+        order: 0,
+        pad: 0,
+        bounds: sp(204. + ox, 334. + oy, 16., 16.),
+        content_mask: mask,
+        color: Hsla::from(rgba(0xff8800ff)),
+        tile: glyph_tile(harness, 1),
+        transformation: TransformationMatrix::unit(),
+    });
+    let mut path = Path::new(point(px(250. + ox), px(360. + oy)));
+    path.line_to(point(px(290.5 + ox), px(372. + oy)));
+    path.curve_to(
+        point(px(255. + ox), px(400. + oy)),
+        point(px(300. + ox), px(395. + oy)),
+    );
+    path.line_to(point(px(250. + ox), px(360. + oy)));
+    path.content_mask = ContentMask {
+        bounds: clip.map(|c| px(c.0)),
     };
     path.color = Hsla::from(rgba(0x8800ffcc)).into();
     scene.insert_primitive(path.scale(1.));
