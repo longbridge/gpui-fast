@@ -27,7 +27,7 @@ pub(crate) struct SortScratch {
 /// The order to gather a kind of primitive in, and what working it out takes.
 #[derive(Default)]
 struct Permutation {
-    /// Where each primitive goes: the index of the one to put at each place.
+    /// The index of the primitive to put at each place.
     order: Vec<u32>,
     /// For each draw order, how many primitives have it, and then where the
     /// next of them goes.
@@ -47,10 +47,12 @@ const MAX_ORDERS_PER_PRIMITIVE: usize = 4;
 /// one draw order, as a stable sort does.
 ///
 /// A primitive's draw order is one past the greatest among the primitives
-/// before it that it overlaps, so a scene of thousands of primitives has a
-/// few dozen of them. They are counted rather than compared: one pass counts
-/// how many primitives have each order, the next puts each where its order's
-/// run is up to. A scene with no primitive out of order is left as it is.
+/// before it that it overlaps, or its layer's, so a scene of thousands of
+/// primitives has a few dozen of them. They are counted rather than compared:
+/// one pass counts how many primitives have each order, the next puts each
+/// where its order's run is up to. Orders spread wider than
+/// [`MAX_ORDERS_PER_PRIMITIVE`] allows are sorted as packed keys instead. A
+/// scene with no primitive out of order is left as it is.
 fn sort_by_draw_order<T: Clone>(
     items: &mut Vec<T>,
     permutation: &mut Permutation,
@@ -118,7 +120,8 @@ fn sort_by_draw_order<T: Clone>(
 ///
 /// The draw order, texture, tile and index of each sprite are packed into one
 /// integer, so the sort compares integers lying next to each other rather
-/// than reaching into a sprite for its key on every comparison.
+/// than reaching into a sprite for its key on every comparison. Sprites
+/// already in that order are left as they are.
 fn sort_sprites<T: Clone>(
     items: &mut Vec<T>,
     permutation: &mut Permutation,
@@ -139,6 +142,9 @@ fn sort_sprites<T: Clone>(
             | (u128::from(tile) << 32)
             | index as u128
     }));
+    if wide_keys.is_sorted() {
+        return;
+    }
     wide_keys.sort_unstable();
     order.clear();
     order.extend(wide_keys.iter().map(|&key| key as u32));
@@ -294,10 +300,13 @@ mod tests {
             let spread = match rng.random_range(0..4) {
                 0 => 1,
                 1 => rng.random_range(2..30),
-                2 => (len * MAX_ORDERS_PER_PRIMITIVE) as DrawOrder,
-                _ => rng.random_range(len * MAX_ORDERS_PER_PRIMITIVE + 1..100_000) as DrawOrder,
+                2 => (len * MAX_ORDERS_PER_PRIMITIVE + 1) as DrawOrder,
+                _ => rng.random_range(len * MAX_ORDERS_PER_PRIMITIVE + 2..100_000) as DrawOrder,
             };
             let mut case = items(rng, len, spread);
+            // The greatest order is the one that decides how they are sorted.
+            let greatest = rng.random_range(0..len);
+            case[greatest].order = spread - 1;
             if rng.random_ratio(1, 5) {
                 case.sort_by_key(|item| item.order);
             }
@@ -323,6 +332,61 @@ mod tests {
     }
 
     #[test]
+    fn draw_order_sort_counts_orders_unless_they_spread_too_wide() {
+        let mut rng = StdRng::seed_from_u64(13);
+        let mut gathered = Vec::new();
+        let (mut counted, mut packed) = (0, 0);
+        for mut case in cases(&mut rng) {
+            let mut permutation = Permutation::default();
+            let in_order = case.is_sorted_by_key(|item| item.order);
+            let greatest = case.iter().map(|item| item.order).max().unwrap_or(0) as usize;
+            sort_by_draw_order(&mut case, &mut permutation, &mut gathered, |item| {
+                item.order
+            });
+            let (counts, keys) = (permutation.counts.len(), permutation.keys.len());
+            if in_order {
+                assert_eq!((counts, keys), (0, 0), "sorting what is in order");
+            } else if greatest > case.len() * MAX_ORDERS_PER_PRIMITIVE {
+                assert_eq!((counts, keys), (0, case.len()), "orders up to {greatest}");
+                packed += 1;
+            } else {
+                assert_eq!((counts, keys), (greatest + 1, 0), "orders up to {greatest}");
+                counted += 1;
+            }
+        }
+        assert!(
+            counted > 0 && packed > 0,
+            "{counted} counted, {packed} packed"
+        );
+    }
+
+    #[test]
+    fn draw_order_sort_counts_orders_up_to_the_widest_spread_it_allows() {
+        let mut permutation = Permutation::default();
+        let mut gathered = Vec::new();
+        let item = |order, painted| Item {
+            order,
+            texture: 0,
+            tile: 0,
+            painted,
+        };
+        let widest = (2 * MAX_ORDERS_PER_PRIMITIVE) as DrawOrder;
+        let mut sorted = vec![item(widest, 0), item(0, 1)];
+        sort_by_draw_order(&mut sorted, &mut permutation, &mut gathered, |item| {
+            item.order
+        });
+        assert_eq!(sorted, [item(0, 1), item(widest, 0)]);
+        assert_eq!(permutation.counts.len(), widest as usize + 1);
+
+        let mut sorted = vec![item(widest + 1, 0), item(0, 1)];
+        sort_by_draw_order(&mut sorted, &mut permutation, &mut gathered, |item| {
+            item.order
+        });
+        assert_eq!(sorted, [item(0, 1), item(widest + 1, 0)]);
+        assert_eq!(permutation.keys.len(), 2);
+    }
+
+    #[test]
     fn sprite_sort_is_a_stable_sort_by_order_texture_and_tile() {
         let mut rng = StdRng::seed_from_u64(11);
         let mut permutation = Permutation::default();
@@ -335,6 +399,10 @@ mod tests {
                 (item.order, item.texture, item.tile)
             });
             assert_eq!(sorted, expected, "sorting {case:?}");
+            sort_sprites(&mut sorted, &mut permutation, &mut gathered, |item| {
+                (item.order, item.texture, item.tile)
+            });
+            assert_eq!(sorted, expected, "sorting {case:?} again");
         }
     }
 
