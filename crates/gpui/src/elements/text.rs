@@ -1037,7 +1037,6 @@ impl Element for InteractiveText {
 
                     let text_layout = text_layout.clone();
                     let mouse_down = interactive_state.mouse_down_index.clone();
-                    let fast_press = crate::fast::element_refresh::capture(window);
                     if let Some(mouse_down_index) = mouse_down.get() {
                         let hitbox = hitbox.clone();
                         let clickable_ranges = mem::take(&mut self.clickable_ranges);
@@ -1059,7 +1058,7 @@ impl Element for InteractiveText {
                                     }
 
                                     mouse_down.take();
-                                    crate::fast::element_refresh::refresh(fast_press, window);
+                                    window.refresh();
                                 }
                             },
                         );
@@ -1072,7 +1071,7 @@ impl Element for InteractiveText {
                                     text_layout.index_for_position(event.position)
                             {
                                 mouse_down.set(Some(mouse_down_index));
-                                crate::fast::element_refresh::refresh(fast_press, window);
+                                window.refresh();
                             }
                         });
                     }

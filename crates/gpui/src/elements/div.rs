@@ -2972,7 +2972,6 @@ impl Interactivity {
         }
 
         if let Some(element_state) = element_state {
-            let fast_press = crate::fast::element_refresh::capture(window);
             if !click_listeners.is_empty()
                 || !aux_click_listeners.is_empty()
                 || drag_listener.is_some()
@@ -3002,7 +3001,7 @@ impl Interactivity {
                             && hitbox.is_hovered(window)
                         {
                             *pending_mouse_down.borrow_mut() = Some(event.clone());
-                            crate::fast::element_refresh::refresh(fast_press, window);
+                            window.refresh();
                         }
                     }
                 });
@@ -3130,7 +3129,7 @@ impl Interactivity {
                             let mut pending_mouse_down = pending_mouse_down.borrow_mut();
                             if pending_mouse_down.is_some() && hitbox.is_hovered(window) {
                                 captured_mouse_down = pending_mouse_down.take();
-                                crate::fast::element_refresh::refresh(fast_press, window);
+                                window.refresh();
                             } else if pending_mouse_down.is_some() {
                                 // Clear the pending mouse down event (without firing click handlers)
                                 // if the hitbox is not being hovered.
@@ -3281,7 +3280,7 @@ impl Interactivity {
                 window.on_mouse_event(move |_: &MouseUpEvent, phase, window, _cx| {
                     if phase == DispatchPhase::Capture && active_state.borrow().is_clicked() {
                         *active_state.borrow_mut() = ElementClickedState::default();
-                        crate::fast::element_refresh::refresh(fast_press, window);
+                        window.refresh();
                     }
                 });
             }
@@ -3302,7 +3301,7 @@ impl Interactivity {
                                 group: group_hovered,
                                 element: element_hovered,
                             };
-                            crate::fast::element_refresh::refresh(fast_press, window);
+                            window.refresh();
                         }
                     }
                 });
