@@ -666,7 +666,7 @@ impl EntityAccessLog {
 
 impl EntityMap {
     /// Marks where the access log stands as a boundary between stretches.
-    fn mark_access_boundary(&mut self) {
+    pub(crate) fn mark_access_boundary(&mut self) {
         let log = &mut self.access_log;
         log.boundary.set(log.access_log.borrow().len());
     }
@@ -1228,14 +1228,6 @@ impl RenderDependencies {
             },
             ..self.clone()
         }
-    }
-
-    /// The same dependencies, up to date with every write `other`, recorded
-    /// later, is: those of a list's row kept through a frame that built the
-    /// list again around it, whose writes, the other rows' included, are
-    /// part of building the list.
-    pub(crate) fn written_up_to_those_of(&self, other: &Self) -> Self {
-        self.written_up_to(other.writes.to)
     }
 
     /// Both sets of dependencies at once, as of the earlier generation, so

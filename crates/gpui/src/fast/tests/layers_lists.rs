@@ -1731,8 +1731,8 @@ mod list {
         );
     }
 
-    /// A list whose rows read a model as they render, as rows whose text
-    /// finishes loading after they first show.
+    /// A list whose every eighth row reads a model as it renders, as rows
+    /// whose text finishes loading after they first show.
     struct LoadingPage {
         state: ListState,
         loaded: Entity<u32>,
@@ -1743,7 +1743,11 @@ mod list {
             let loaded = self.loaded.clone();
             div().size_full().bg(rgb(0xffffff)).child(
                 crate::list(self.state.clone(), move |row, _, cx| {
-                    let loaded = *loaded.read(cx) as usize;
+                    let loaded = if row % 8 == 0 {
+                        *loaded.read(cx) as usize
+                    } else {
+                        0
+                    };
                     div()
                         .w(px(VIEWPORT_WIDTH))
                         .h(px(row_height(row)))
@@ -2386,6 +2390,90 @@ mod list {
         );
         compare_with_layers_off(cx, window, without.into(), &[-25.; 12], "scroll down");
         compare_with_layers_off(cx, window, without.into(), &[25.; 24], "scroll up");
+    }
+
+    /// The width of a column every row of a [`ColumnPage`] is drawn at.
+    struct Column {
+        width: f32,
+    }
+
+    /// Whether row [`WIDE_ROW`] of a [`ColumnPage`] is wide.
+    struct Wide(bool);
+
+    /// The row of a [`ColumnPage`] that widens its column once it is wide.
+    const WIDE_ROW: usize = 3;
+
+    /// A page whose rows are drawn at the width of a column they share, which
+    /// a row widens as it renders, without notifying anyone, as a table
+    /// widens a column to fit the widest cell it draws.
+    struct ColumnPage {
+        state: ListState,
+        column: Entity<Column>,
+        wide: Entity<Wide>,
+    }
+
+    impl Render for ColumnPage {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let column = self.column.clone();
+            let wide = self.wide.clone();
+            div().size_full().bg(rgb(0xffffff)).child(
+                crate::list(self.state.clone(), move |row, _, cx| {
+                    if row == WIDE_ROW && wide.read(cx).0 && column.read(cx).width < 150. {
+                        column.update(cx, |column, _| column.width = 150.);
+                    }
+                    div()
+                        .h(px(row_height(row)))
+                        .child(
+                            div()
+                                .w(px(column.read(cx).width))
+                                .h_full()
+                                .bg(row_color(row)),
+                        )
+                        .into_any_element()
+                })
+                .w(px(VIEWPORT_WIDTH))
+                .h(px(VIEWPORT_HEIGHT)),
+            )
+        }
+    }
+
+    fn column_page(cx: &mut TestAppContext) -> WindowHandle<ColumnPage> {
+        let window = cx.add_window(|_, cx| ColumnPage {
+            state: ListState::new(1000, ListAlignment::Top, px(0.)).measure_all(),
+            column: cx.new(|_| Column { width: 50. }),
+            wide: cx.new(|_| Wide(false)),
+        });
+        open_at(cx, window.into(), 1.);
+        window
+    }
+
+    /// A row the layer holds, rendered again, widens the column the other
+    /// rows it holds are drawn at: they are drawn again at the new width on
+    /// the frames after, as without layers.
+    #[crate::test]
+    fn a_row_widening_what_the_rows_held_read_draws_them_again(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let with_layers = column_page(cx);
+        let without_layers = column_page(cx);
+        let (with, without) = (with_layers.into(), without_layers.into());
+        compare_with_layers_off(cx, with, without, &[-20., -20., -7.], "promote");
+        assert_eq!(decision(cx, with), Some(Decision::Composite));
+        assert!(held_rows(cx, with).contains(&WIDE_ROW));
+        for window in [with_layers, without_layers] {
+            window
+                .update(cx, |page, _, cx| {
+                    page.wide.update(cx, |wide, _| wide.0 = true)
+                })
+                .unwrap();
+        }
+        // The rows drawn before the wide row this frame are drawn at the
+        // width they read, with layers or without.
+        wheel(cx, with, -7.);
+        wheel(cx, without, -7.);
+        let composited = compare_with_layers_off(cx, with, without, &[-7.; 8], "widened");
+        assert!(composited > 0, "the layer was composited");
     }
 }
 

@@ -1030,6 +1030,8 @@ pub(crate) fn spanned_render_item(
     mut render_item: impl FnMut(usize, &mut Window, &mut App) -> AnyElement + 'static,
 ) -> Box<crate::RenderItemFn> {
     Box::new(move |ix, window, cx| {
+        // A row reading what the row before it read last notes it too.
+        cx.entities.mark_access_boundary();
         let start = reads_len();
         let element = render_item(ix, window, cx);
         RENDERED_ROW.set(Some((ix, start)));
@@ -2667,12 +2669,6 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
                 .count();
             let carried: BTreeSet<usize> = frame.carried.iter().copied().collect();
             rows.rows.retain(|row, _| carried.contains(row));
-            // What the list wrote as it was built again, its rows included,
-            // is part of building it, not a change of the rows it kept,
-            // which were checked as it began.
-            for row in rows.rows.values_mut() {
-                row.dependencies = row.dependencies.written_up_to_those_of(&frame.dependencies);
-            }
             if rows.rerendered {
                 for row in rows.rows.values_mut() {
                     row.suspect = true;
