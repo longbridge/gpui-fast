@@ -75,8 +75,10 @@ gets the nested view's new nodes), and the focus is asked again, so the
 focused node is the one focused now. The listeners for accessibility actions
 an element registers as it paints are moved from the last frame as mouse
 listeners are. The tree is the one drawing from scratch builds; the oracle
-compares the two on every frame with accessibility forced on
-(`Window::set_a11y_active_for_tests`, test-support only).
+compares the two on every frame with accessibility forced on. To measure
+frames drawn with accessibility active, set `GPUI_A11Y_ACTIVE=1` (honored
+with the `test-support` feature): every window then builds its tree as
+though assistive technology had asked for it.
 
 A notified view marks the views around it dirty, because they have to be
 walked to reach it. A view that is dirty only for that reason — it was not

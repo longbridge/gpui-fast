@@ -66,6 +66,11 @@ pub(crate) struct A11yLog {
     recording: bool,
     /// Whether the last frame was logged, so it can be drawn again from.
     previous_recorded: bool,
+    /// Whether a stretch drawn again this frame logged other ops than it
+    /// did last frame (a node id pushed twice is not pushed), so that the
+    /// indices of the stretches after it do not point at their ops: the
+    /// next frame does not draw again from this one.
+    diverged: bool,
     ops: Vec<Op>,
     previous_ops: Vec<Op>,
     /// The accessibility action listeners registered while painting, in
@@ -134,7 +139,7 @@ impl A11yLog {
 
     /// Starts a frame, whether accessibility is active or not.
     pub(crate) fn new_frame(log: &mut Self) {
-        log.previous_recorded = log.recording;
+        log.previous_recorded = log.recording && !mem::take(&mut log.diverged);
         log.recording = false;
     }
 }
@@ -266,6 +271,7 @@ fn replay(window: &mut Window, source: &Source, delta: Point<Pixels>) {
         }
         node
     };
+    let logged = window.a11y.nodes.fast.ops.len();
     for op in source.ops {
         match *op {
             Op::Push(id) => {
@@ -327,6 +333,8 @@ fn replay(window: &mut Window, source: &Source, delta: Point<Pixels>) {
             Op::ActiveDescendant(node) => window.a11y.set_active_descendant(node),
         }
     }
+    let log = &mut window.a11y.nodes.fast;
+    log.diverged |= log.ops.len() - logged != source.ops.len();
 }
 
 /// Moves the accessibility action listeners last frame's paint of `range`
@@ -468,11 +476,11 @@ pub(crate) fn layer_needs_repaint(window: &Window, stretch: Option<&A11yStretch>
     window.a11y.is_active() && stretch.is_none_or(|stretch| stretch.placed_synthetic)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 impl Window {
     /// Makes the window build its accessibility tree from the next frame on
     /// as though assistive technology had asked for it, or stop.
-    pub fn set_a11y_active_for_tests(&mut self, active: bool) {
+    pub(crate) fn set_a11y_active_for_tests(&mut self, active: bool) {
         crate::fast::a11y::set_active_flag(&self.a11y, active);
         self.refresh();
     }
