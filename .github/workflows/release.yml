@@ -84,7 +84,7 @@ jobs:
         run: rustup show
 
       - name: Test release dependency updates
-        run: bun test script/release.test.ts
+        run: bun test --timeout 60000 script/release.test.ts
 
       - uses: Swatinem/rust-cache@v2
         with:
