@@ -181,3 +181,78 @@ fn scrolling_a_handle_to_its_bottom_where_it_is_changes_nothing(cx: &mut TestApp
     draw(cx, window);
     assert_eq!(handle.offset().y, -handle.max_offset().y);
 }
+
+/// A uniform list of forty 20 px rows, 100 px tall, and a view beside it
+/// that shows whether the list is scrolled to its end.
+struct UniformPage {
+    handle: crate::UniformListScrollHandle,
+    reader: Entity<AtEndReader>,
+}
+
+impl Render for UniformPage {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .child(
+                crate::uniform_list("list", 40, |range, _, _| {
+                    range
+                        .map(|row| div().h(px(20.)).bg(rgb(0x100000 + row as u32 * 0x10)))
+                        .collect::<Vec<_>>()
+                })
+                .track_scroll(&self.handle)
+                .w(px(200.))
+                .h(px(100.)),
+            )
+            .child(self.reader.clone())
+    }
+}
+
+/// A view that shows whether a uniform list is scrolled to its end,
+/// counting its renders.
+struct AtEndReader {
+    handle: crate::UniformListScrollHandle,
+    renders: Rc<Cell<usize>>,
+}
+
+impl Render for AtEndReader {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.renders.set(self.renders.get() + 1);
+        let at_end = self.handle.is_scrolled_to_end() == Some(true);
+        div().w(px(10.)).h(px(if at_end { 20. } else { 10. }))
+    }
+}
+
+#[crate::test]
+fn a_view_asking_whether_a_uniform_list_is_at_its_end_is_built_again_only_when_it_gets_there(
+    cx: &mut TestAppContext,
+) {
+    if !crate::fast::layers::COMPILED {
+        return;
+    }
+    let handle = crate::UniformListScrollHandle::new();
+    let renders = Rc::new(Cell::new(0));
+    let window: AnyWindowHandle = cx
+        .add_window({
+            let handle = handle.clone();
+            let renders = renders.clone();
+            move |_, cx| UniformPage {
+                handle: handle.clone(),
+                reader: cx.new(|_| AtEndReader { handle, renders }),
+            }
+        })
+        .into();
+    draw(cx, window);
+    draw(cx, window);
+    let before = renders.get();
+    // 800 px of rows in a 100 px viewport: 700 px to its end.
+    for _ in 0..5 {
+        wheel(cx, window, -40.);
+    }
+    assert_eq!(handle.is_scrolled_to_end(), Some(false));
+    assert_eq!(renders.get(), before, "not at its end yet");
+    wheel(cx, window, -1000.);
+    assert_eq!(handle.is_scrolled_to_end(), Some(true));
+    assert_eq!(renders.get(), before + 1, "at its end now");
+    draw(cx, window);
+    assert_eq!(renders.get(), before + 1, "and is reused once it is");
+}

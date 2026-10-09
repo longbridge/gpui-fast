@@ -312,6 +312,71 @@ mod uniform {
         assert_eq!(decision(cx, window), Some(Decision::Repaint));
     }
 
+    /// A list whose rows are coloured by state outside entities, which only
+    /// `window.refresh()` tells the framework changed.
+    struct UntrackedPage {
+        shift: Rc<std::cell::Cell<usize>>,
+    }
+
+    impl Render for UntrackedPage {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let shift = self.shift.clone();
+            div().size_full().bg(rgb(0xffffff)).child(
+                crate::uniform_list("list", 1000, move |range: Range<usize>, _, _| {
+                    range
+                        .map(|row| {
+                            div()
+                                .w(px(VIEWPORT_WIDTH))
+                                .h(px(ROW_HEIGHT))
+                                .bg(row_color(row + shift.get()))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .w(px(VIEWPORT_WIDTH))
+                .h(px(VIEWPORT_HEIGHT)),
+            )
+        }
+    }
+
+    /// State outside entities that a layer's rows read changes, and the
+    /// application says so with `window.refresh()`: the frames after it,
+    /// composited or not, show the new state, never the tiles painted
+    /// before it.
+    #[crate::test]
+    fn a_refresh_reaches_rows_a_layer_holds(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let shifts = [
+            Rc::new(std::cell::Cell::new(0)),
+            Rc::new(std::cell::Cell::new(0)),
+        ];
+        let windows: Vec<AnyWindowHandle> = shifts
+            .iter()
+            .map(|shift| {
+                let shift = shift.clone();
+                let window = cx.add_window(move |_, _| UntrackedPage { shift });
+                open_at(cx, window.into(), 1.);
+                window.into()
+            })
+            .collect();
+        let (with_layers, without_layers) = (windows[0], windows[1]);
+        let deltas = [-7., -9., -11., -6., -8., -5., -9., -7.];
+        let composited =
+            compare_with_layers_off(cx, with_layers, without_layers, &deltas, "before");
+        assert!(composited > 0, "the layer composites before the refresh");
+        for (shift, window) in shifts.iter().zip(&windows) {
+            shift.set(5);
+            with_window(cx, *window, |window, _| window.refresh());
+            draw(cx, *window);
+        }
+        let composited = compare_with_layers_off(cx, with_layers, without_layers, &deltas, "after");
+        assert!(
+            composited > 0,
+            "the layer composites again after the refresh"
+        );
+    }
+
     /// How many rows a list without a layer renders: those the viewport
     /// shows, one more when they straddle its edges.
     const SHOWN_ROWS: usize = (VIEWPORT_HEIGHT / ROW_HEIGHT) as usize + 1;
