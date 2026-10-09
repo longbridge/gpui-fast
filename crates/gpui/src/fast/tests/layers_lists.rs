@@ -3459,3 +3459,111 @@ mod animation {
         assert_eq!(composited(&decisions), 0, "{decisions:?}");
     }
 }
+
+/// A page switched while its scroll container holds a layer: the container
+/// keeps its id, but what it holds is another page's.
+mod page_switch {
+    use super::{compare_with_layers_off, draw, open_at, row_color, with_window};
+    use crate::{
+        AnyWindowHandle, Context, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+        ScrollHandle, StatefulInteractiveElement as _, Styled as _, TestAppContext, Window,
+        WindowHandle, div, px, rgb,
+    };
+
+    struct Pages {
+        page: usize,
+        list: bool,
+        handle: ScrollHandle,
+        state: crate::ListState,
+    }
+
+    impl Render for Pages {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let page = self.page;
+            let content = if self.list {
+                crate::list(self.state.clone(), move |row, _, _| {
+                    div()
+                        .w(px(200.))
+                        .h(px(20. + (row % 3) as f32 * 7.))
+                        .bg(row_color(row * 7 + page * 31))
+                        .into_any_element()
+                })
+                .w(px(200.))
+                .h(px(100.))
+                .into_any_element()
+            } else {
+                div()
+                    .id("scroller")
+                    .overflow_y_scroll()
+                    .track_scroll(&self.handle)
+                    .w(px(200.))
+                    .h(px(100.))
+                    .children((0..80).map(move |row| {
+                        div()
+                            .h(px(20. + ((row + page) % 3) as f32 * 5.))
+                            .bg(row_color(row * 5 + page * 31))
+                    }))
+                    .into_any_element()
+            };
+            div().size_full().bg(rgb(0xffffff)).child(content)
+        }
+    }
+
+    fn open(cx: &mut TestAppContext, list: bool) -> WindowHandle<Pages> {
+        let window = cx.add_window(move |_, _| Pages {
+            page: 0,
+            list,
+            handle: ScrollHandle::new(),
+            state: crate::ListState::new(200, crate::ListAlignment::Top, px(100.)),
+        });
+        open_at(cx, window.into(), 1.);
+        window
+    }
+
+    fn switch(cx: &mut TestAppContext, window: WindowHandle<Pages>, page: usize) {
+        window
+            .update(cx, |pages, _, cx| {
+                pages.page = page;
+                cx.notify();
+            })
+            .unwrap();
+        draw(cx, window.into());
+    }
+
+    fn run(cx: &mut TestAppContext, list: bool) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let a = open(cx, list);
+        let b = open(cx, list);
+        let (with_layers, without_layers): (AnyWindowHandle, AnyWindowHandle) =
+            (a.into(), b.into());
+        let down = [-9., -11., -7., -13., -8., -10., -12., -6.];
+        let label = if list { "list" } else { "div" };
+        let mut composited = compare_with_layers_off(cx, with_layers, without_layers, &down, label);
+        for page in [1, 2, 0, 1] {
+            switch(cx, a, page);
+            switch(cx, b, page);
+            let same = with_window(cx, with_layers, |window, _| {
+                super::expanded_quads(&window.rendered_frame.scene)
+            }) == with_window(cx, without_layers, |window, _| {
+                super::expanded_quads(&window.rendered_frame.scene)
+            });
+            assert!(same, "{label}: the frame switching to page {page}");
+            composited += compare_with_layers_off(cx, with_layers, without_layers, &down, label);
+            let up = [9., 11., 7., 13., 8., 10.];
+            composited += compare_with_layers_off(cx, with_layers, without_layers, &up, label);
+        }
+        assert!(composited > 0, "{label}: some frames composite");
+    }
+
+    #[crate::test]
+    fn a_scrolling_div_switched_to_another_page_shows_the_new_page(cx: &mut TestAppContext) {
+        run(cx, false);
+    }
+
+    #[crate::test]
+    fn a_list_switched_to_another_page_shows_the_new_page(cx: &mut TestAppContext) {
+        run(cx, true);
+    }
+}
