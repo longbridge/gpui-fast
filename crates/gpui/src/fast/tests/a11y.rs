@@ -313,6 +313,24 @@ fn turning_accessibility_on_builds_every_view(cx: &mut TestAppContext) {
     .unwrap();
 }
 
+/// A frame drawn with accessibility active keeps the tree it sent in
+/// `A11yDebug::last_tree_update`, which views drawn again read their
+/// finished nodes from.
+#[crate::test]
+fn a11y_frame_keeps_the_tree_it_sent(cx: &mut TestAppContext) {
+    let window = cx.add_window(|_, cx| ListView {
+        items: Vec::new(),
+        focus: cx.focus_handle(),
+        title: 0,
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        crate::fast::a11y::set_active_flag(&window.a11y, true);
+        window.draw(cx).clear(cx);
+        assert!(crate::fast::a11y::last_tree(window).is_some());
+    })
+    .unwrap();
+}
+
 /// A page scrolling rows, some of them holding views, with accessibility
 /// nodes.
 struct ScrollPage {

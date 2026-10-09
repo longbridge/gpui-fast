@@ -24,7 +24,7 @@ use std::rc::Rc;
 
 use crate::{
     Bounds, ScaledPixels, Scene,
-    fast::layers::scene::visible_bounds,
+    fast::layers::{background::draw_order, scene::visible_bounds},
     point,
     scene::{PaintOperation, Primitive},
 };
@@ -42,20 +42,6 @@ pub(crate) fn reach(primitive: &Primitive) -> Bounds<ScaledPixels> {
             )
         }
         _ => visible,
-    }
-}
-
-/// The draw order the scene gave `primitive`.
-fn order(primitive: &Primitive) -> u32 {
-    match primitive {
-        Primitive::Shadow(p) => p.order,
-        Primitive::Quad(p) => p.order,
-        Primitive::Path(p) => p.order,
-        Primitive::Underline(p) => p.order,
-        Primitive::MonochromeSprite(p) => p.order,
-        Primitive::SubpixelSprite(p) => p.order,
-        Primitive::PolychromeSprite(p) => p.order,
-        Primitive::Surface(p) => p.order,
     }
 }
 
@@ -94,7 +80,7 @@ pub(crate) fn split(
         .enumerate()
         .filter_map(|(ix, operation)| match operation {
             PaintOperation::Primitive(primitive) => {
-                Some(((order(primitive), rank(primitive), ix), primitive))
+                Some(((draw_order(primitive), rank(primitive), ix), primitive))
             }
             _ => None,
         })
@@ -102,13 +88,16 @@ pub(crate) fn split(
     sequence.sort_unstable_by_key(|(key, _)| *key);
     let mut in_overlay = vec![false; operations.len()];
     let mut reaches: Vec<Bounds<ScaledPixels>> = Vec::new();
+    let mut union: Option<Bounds<ScaledPixels>> = None;
     let mut overlay = Vec::new();
     for ((_, _, ix), primitive) in sequence {
         let reach = reach(primitive);
         if matches!(primitive, Primitive::Path(_))
-            || reaches.iter().any(|earlier| earlier.intersects(&reach))
+            || union.is_some_and(|union| union.intersects(&reach))
+                && reaches.iter().any(|earlier| earlier.intersects(&reach))
         {
             in_overlay[ix] = true;
+            union = Some(union.map_or(reach, |union| union.union(&reach)));
             reaches.push(reach);
             overlay.push(primitive.clone());
         }

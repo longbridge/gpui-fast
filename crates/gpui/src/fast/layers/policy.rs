@@ -7,8 +7,9 @@
 //! composited on frames that only scrolled it and painted again on the
 //! others. A layer is demoted — dropped, the container kept on today's path
 //! until its content has been stable for a while — when its content keeps
-//! changing, when it paints paths, or when its visible tiles alone exceed
-//! the budget. Content holding what a layer cannot composite otherwise
+//! changing, when a list row draws over the paths of a row before it (see
+//! [`crate::fast::layers::overlay`]), or when its visible tiles alone
+//! exceed the budget. Content holding what a layer cannot composite otherwise
 //! (spec §6.5) keeps the container on today's path only while it does: the
 //! layer is dropped and painted again a few frames later, to see whether it
 //! still does. Layers are dropped when the window is resized or rescaled,
@@ -407,7 +408,8 @@ pub(crate) fn note_work(window: &mut Window, id: &GlobalElementId, work: f32) {
 }
 
 /// Whether the content `record` holds can ever be composited from a layer:
-/// it painted no path, and the tiles covering its viewport fit the budget.
+/// its overlay can be drawn over its tiles (see [`LayerRecord::has_paths`]),
+/// and the tiles covering its viewport fit the budget.
 /// A layer whose content does not is demoted.
 fn fits(window: &Window, record: &LayerRecord) -> bool {
     let scale_factor = window.scale_factor();
