@@ -69,6 +69,10 @@ pub(crate) struct ScrollLog {
     /// frame was drawn, for having scrolled a container it painted. See also
     /// [`crate::fast::layers::wheel`].
     pub(crate) scroll_notifies: FxHashMap<EntityId, u64>,
+    /// Whether each list about to be laid out this frame, by the address of
+    /// its state's version counter, is scrolled to its end, for the reads of
+    /// only that to be judged by it. See [`note_at_end_read`].
+    list_ends: FxHashMap<usize, Option<bool>>,
     /// The animation frames asked for while this frame was being drawn, and
     /// while the last one was. See [`note_animation_frame`].
     animation_frames: RefCell<FxHashSet<AnimationRequest>>,
@@ -171,6 +175,7 @@ impl ScrollLog {
         self.scrolled.clear();
         self.scrolled_sources.clear();
         self.scroll_notifies.clear();
+        self.list_ends.clear();
         self.animation_frames_before = std::mem::take(self.animation_frames.get_mut());
         self.anchored.clear();
         self.containers
@@ -303,9 +308,6 @@ pub(crate) fn scrolled(window: &Window, id: &GlobalElementId) -> bool {
 struct OffsetReadLog {
     recordings: usize,
     reads: Vec<OffsetRead>,
-    /// Where the log was last told to end, before which reads are not
-    /// merged into the last one: they would move into a stretch taken.
-    sealed: std::cell::Cell<usize>,
     /// How many times the log was emptied, which starts its positions over.
     epoch: u64,
 }
@@ -320,15 +322,12 @@ pub(crate) struct OffsetRead {
 }
 
 /// What was read of an offset.
-#[derive(Clone)]
+#[derive(Clone, Copy, PartialEq)]
 enum Read {
     /// The offset, or anything that moves with it.
     Offset,
-    /// Only the answer to a question about it, as the log holds it. See
-    /// [`crate::fast::layers::answers`].
-    Answer(crate::fast::layers::answers::Answer),
-    /// Only the answers to questions about it, as a record holds them.
-    Answers(crate::fast::layers::answers::AnswerSet),
+    /// Only whether a list is scrolled to its end, and what that was.
+    AtEnd(Option<bool>),
 }
 
 thread_local! {
@@ -359,8 +358,8 @@ pub(crate) fn note_list_built() {
     if !COMPILED {
         return;
     }
-    let offsets =
-        OFFSET_READS.with_borrow(|log| (log.recordings > 0).then_some((log.epoch, log.len())));
+    let offsets = OFFSET_READS
+        .with_borrow(|log| (log.recordings > 0).then_some((log.epoch, log.reads.len())));
     let built = offsets
         .zip(crate::fast::dependencies::read_log_lengths())
         .map(
@@ -410,56 +409,19 @@ pub(crate) fn note_offset_read(version: &StateVersion) {
     note_read(version, Read::Offset);
 }
 
-/// Records, for any recording that is open, that a question about the
-/// offset of the scroll state `version` counts changes of was asked, and
-/// what it was answered: what read only that is unchanged by a scroll that
-/// leaves the answer as it was.
-pub(crate) fn note_answer_read(
-    version: &StateVersion,
-    answer: crate::fast::layers::answers::Answer,
-) {
-    note_read(version, Read::Answer(answer));
-}
-
-/// Merges an answer read of the scroll state `version` counts changes of
-/// into the last read in the log with `merge`, if that is an answer read of
-/// the same state and no recording was told where the log ends since.
-pub(crate) fn merge_answer_read(
-    version: &StateVersion,
-    merge: impl FnOnce(&mut crate::fast::layers::answers::Answer) -> bool,
-) -> bool {
-    OFFSET_READS.with_borrow_mut(|log| {
-        let sealed = log.sealed.get();
-        let len = log.reads.len();
-        log.recordings > 0
-            && len > sealed
-            && log.reads.last_mut().is_some_and(|last| {
-                last.version.id() == version.id()
-                    && match &mut last.read {
-                        Read::Answer(last) => merge(last),
-                        _ => false,
-                    }
-            })
-    })
-}
-
-impl OffsetReadLog {
-    /// Where the log ends, as told to a recording.
-    fn len(&self) -> usize {
-        let len = self.reads.len();
-        self.sealed.set(len);
-        len
-    }
-}
-
-/// Whether a recording of offset reads is open.
-pub(crate) fn recording_offset_reads() -> bool {
-    OFFSET_READS.with_borrow(|log| log.recordings > 0)
+/// Records, for any recording that is open, that whether the list whose
+/// state `version` counts changes of is scrolled to its end was read, and
+/// was `at_end`: what read only that is unchanged by a scroll after which
+/// the list is as much at its end as it was, as a "back to bottom" button
+/// beside a transcript is.
+#[inline]
+pub(crate) fn note_at_end_read(version: &StateVersion, at_end: Option<bool>) {
+    note_read(version, Read::AtEnd(at_end));
 }
 
 #[inline]
 fn note_read(version: &StateVersion, read: Read) {
-    if !COMPILED || crate::fast::layers::answers::answering() {
+    if !COMPILED {
         return;
     }
     OFFSET_READS.with_borrow_mut(|log| {
@@ -473,17 +435,28 @@ fn note_read(version: &StateVersion, read: Read) {
     });
 }
 
+/// Notes whether the list whose state `version` counts changes of, about to
+/// be laid out, is scrolled to its end, for what read only that to be told
+/// apart from what read its offset while its layer is decided on.
+pub(crate) fn note_list_at_end(window: &mut Window, version: &StateVersion, at_end: Option<bool>) {
+    window
+        .fast_layers
+        .scrolls
+        .list_ends
+        .insert(version.id(), at_end);
+}
+
 /// Opens a recording of offset reads, returning where in the log it starts.
 pub(crate) fn begin_offset_reads() -> usize {
     OFFSET_READS.with_borrow_mut(|log| {
         log.recordings += 1;
-        log.len()
+        log.reads.len()
     })
 }
 
 /// Where the offset read log ends.
 pub(crate) fn offset_reads_len() -> usize {
-    OFFSET_READS.with_borrow(|log| log.len())
+    OFFSET_READS.with_borrow(|log| log.reads.len())
 }
 
 /// The offsets read in `range` of the log, and those read in it outside the
@@ -508,12 +481,7 @@ pub(crate) fn offset_reads_in<'a>(
         if range.end > cursor {
             own.extend_from_slice(&log.reads[cursor..range.end]);
         }
-        let own = if own.len() == range.len() {
-            all.clone()
-        } else {
-            OffsetReads::of(&own)
-        };
-        (all, own)
+        (all, OffsetReads::of(&own))
     })
 }
 
@@ -524,7 +492,6 @@ pub(crate) fn end_offset_reads() {
         log.recordings = log.recordings.saturating_sub(1);
         if log.recordings == 0 {
             log.reads.clear();
-            log.sealed.set(0);
             log.epoch += 1;
         }
     });
@@ -535,21 +502,21 @@ pub(crate) fn end_offset_reads() {
 /// the log they took up.
 pub(crate) fn replay_offset_reads(reads: &OffsetReads) -> Range<usize> {
     OFFSET_READS.with_borrow_mut(|log| {
-        let start = log.len();
+        let start = log.reads.len();
         if log.recordings > 0
             && let Some(reads) = &reads.0
         {
             log.reads.extend(reads.iter().cloned());
         }
-        start..log.len()
+        start..log.reads.len()
     })
 }
 
 /// The scroll offsets a retained subtree read, once each, at the earliest
 /// version read. Most subtrees read none, which takes no allocation.
 ///
-/// The answers read of a state are kept together; a question answered two
-/// ways counts as a read of its offset.
+/// A state read more than one way counts as its offset read, unless every
+/// read only asked whether a list is at its end and got the same answer.
 #[derive(Clone, Default)]
 pub(crate) struct OffsetReads(Option<Rc<[OffsetRead]>>);
 
@@ -558,63 +525,18 @@ impl OffsetReads {
         if reads.is_empty() {
             return OffsetReads(None);
         }
-        let mut unique: smallvec::SmallVec<[OffsetRead; 4]> = smallvec::SmallVec::new();
-        // The answers read of each state, by where it is in `unique`.
-        let mut answers: smallvec::SmallVec<[(usize, crate::fast::layers::answers::Gather); 2]> =
-            smallvec::SmallVec::new();
+        let mut unique: Vec<OffsetRead> = Vec::with_capacity(reads.len());
         for read in reads {
-            let id = read.version.id();
-            if let Read::Offset = read.read {
-                if !unique
-                    .iter()
-                    .any(|other| other.version.id() == id && matches!(other.read, Read::Offset))
-                {
-                    unique.push(read.clone());
-                }
-                continue;
-            }
-            let gathering = answers
+            match unique
                 .iter_mut()
-                .find(|(index, _)| unique[*index].version.id() == id);
-            match (gathering, &read.read) {
-                (Some((_, gather)), Read::Answer(answer)) => gather.add_answer(answer),
-                (Some((_, gather)), Read::Answers(set)) => gather.add_set(set),
-                (None, Read::Answer(answer)) => {
-                    answers.push((
-                        unique.len(),
-                        crate::fast::layers::answers::Gather::of_answer(answer),
-                    ));
-                    unique.push(read.clone());
-                }
-                (None, Read::Answers(set)) => {
-                    answers.push((
-                        unique.len(),
-                        crate::fast::layers::answers::Gather::of_set(set),
-                    ));
-                    unique.push(read.clone());
-                }
-                (_, Read::Offset) => {}
-            }
-        }
-        // Answers read of a state whose offset was read too add nothing.
-        for (index, gather) in answers.into_iter().rev() {
-            let id = unique[index].version.id();
-            if unique
-                .iter()
-                .any(|other| other.version.id() == id && matches!(other.read, Read::Offset))
+                .find(|other| other.version.id() == read.version.id())
             {
-                unique.remove(index);
-                continue;
+                Some(other) if other.read != read.read => other.read = Read::Offset,
+                Some(_) => {}
+                None => unique.push(read.clone()),
             }
-            unique[index].read = match crate::fast::layers::answers::Gather::finish(gather) {
-                Some(set) => Read::Answers(set),
-                None => Read::Offset,
-            };
         }
-        if unique.is_empty() {
-            return OffsetReads(None);
-        }
-        OffsetReads(Some(Rc::from(unique.as_slice())))
+        OffsetReads(Some(unique.into()))
     }
 
     fn iter(&self) -> impl Iterator<Item = &OffsetRead> {
@@ -626,7 +548,6 @@ impl OffsetReads {
         match (&self.0, &other.0) {
             (_, None) => self.clone(),
             (None, _) => other.clone(),
-            (Some(a), Some(b)) if Rc::ptr_eq(a, b) => self.clone(),
             (Some(a), Some(b)) => {
                 let mut reads = a.to_vec();
                 reads.extend(b.iter().cloned());
@@ -643,7 +564,7 @@ pub(crate) fn render_read_offset(dependencies: &RenderDependencies, source: &Scr
         ScrollSource::Handle(id) => dependencies
             .offset_reads
             .iter()
-            .any(|read| matches!(read.read, Read::Offset) && read.version.id() == *id),
+            .any(|read| read.version.id() == *id),
         ScrollSource::Container(_) => false,
     }
 }
@@ -653,8 +574,10 @@ pub(crate) fn render_read_offset(dependencies: &RenderDependencies, source: &Scr
 /// A view that read an offset is built again when it scrolls, as it would
 /// be for any other state it read.
 ///
-/// A question about an offset changed when asked again it is answered
-/// otherwise (see [`crate::fast::layers::answers`]).
+/// A read of only whether a list is scrolled to its end changed when the
+/// list, about to be laid out, is no longer as much at its end. Where that
+/// is not known this frame — the list's layer is not being decided on — it
+/// is taken for a read of the offset.
 pub(crate) fn offset_read_changed(window: &Window, dependencies: &RenderDependencies) -> bool {
     if !COMPILED {
         return false;
@@ -662,14 +585,10 @@ pub(crate) fn offset_read_changed(window: &Window, dependencies: &RenderDependen
     let scrolls = &window.fast_layers.scrolls;
     let scrolled = &scrolls.scrolled_sources;
     dependencies.offset_reads.iter().any(|read| {
-        match &read.read {
-            Read::Offset => {}
-            Read::Answer(answer) => {
-                let set = crate::fast::layers::answers::Gather::of_answer(answer);
-                return crate::fast::layers::answers::Gather::finish(set)
-                    .is_none_or(|set| set.changed(&read.version));
-            }
-            Read::Answers(set) => return set.changed(&read.version),
+        if let Read::AtEnd(at_end) = read.read
+            && let Some(now) = scrolls.list_ends.get(&read.version.id())
+        {
+            return *now != at_end;
         }
         read.version.get() != read.read_at
             || (!scrolled.is_empty() && scrolled.contains(&ScrollSource::of_state(&read.version)))
