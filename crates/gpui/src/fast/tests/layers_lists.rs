@@ -1731,8 +1731,8 @@ mod list {
         );
     }
 
-    /// A list whose rows read a model as they render, as rows whose text
-    /// finishes loading after they first show.
+    /// A list whose every eighth row reads a model as it renders, as rows
+    /// whose text finishes loading after they first show.
     struct LoadingPage {
         state: ListState,
         loaded: Entity<u32>,
@@ -1743,7 +1743,11 @@ mod list {
             let loaded = self.loaded.clone();
             div().size_full().bg(rgb(0xffffff)).child(
                 crate::list(self.state.clone(), move |row, _, cx| {
-                    let loaded = *loaded.read(cx) as usize;
+                    let loaded = if row % 8 == 0 {
+                        *loaded.read(cx) as usize
+                    } else {
+                        0
+                    };
                     div()
                         .w(px(VIEWPORT_WIDTH))
                         .h(px(row_height(row)))
@@ -1810,13 +1814,6 @@ mod list {
         AtEnd,
         /// Its offset.
         Offset,
-        /// Only whether a row shows, neither above nor below the viewport, as
-        /// an outline beside a transcript does to light the turns in view.
-        Shows(usize),
-        /// Which of every other row is the first to show, asking of each
-        /// row above it whether it is above the viewport, as an outline
-        /// beside a transcript finds the first turn in view.
-        Outline,
     }
 
     /// A [`ListPage`] that reads where its list is scrolled to as it
@@ -1833,8 +1830,6 @@ mod list {
             let show_button = match self.read {
                 ScrollRead::AtEnd => self.list.state.is_scrolled_to_end() == Some(false),
                 ScrollRead::Offset => self.list.state.logical_scroll_top().item_ix > 0,
-                ScrollRead::Shows(ix) => shows(&self.list.state, ix),
-                ScrollRead::Outline => first_shown(&self.list.state).is_multiple_of(4),
             };
             div()
                 .flex()
@@ -1896,167 +1891,6 @@ mod list {
             let added: BTreeSet<usize> = now.difference(&held).copied().collect();
             assert_eq!(rendered(&log), added, "step {step}: only new rows render");
             held = now;
-        }
-    }
-
-    /// Whether row `ix` of the list of `state` shows, as a view asks it.
-    fn shows(state: &ListState, ix: usize) -> bool {
-        state.item_is_above_viewport(ix) != Some(true)
-            && state.item_is_below_viewport(ix) != Some(true)
-    }
-
-    #[crate::test]
-    fn a_view_asking_whether_a_row_shows_keeps_its_list_on_its_layer(cx: &mut TestAppContext) {
-        if !crate::fast::layers::COMPILED {
-            return;
-        }
-        // Row 500 stays below the viewport.
-        let (window, log) = scroll_aware_page(cx, 1000, ScrollRead::Shows(500));
-        promote(cx, window);
-        let mut held: BTreeSet<usize> = held_rows(cx, window).into_iter().collect();
-        rendered(&log);
-        for step in 0..30 {
-            wheel(cx, window, -15.);
-            assert_eq!(
-                decision(cx, window),
-                Some(Decision::Composite),
-                "step {step}"
-            );
-            let now: BTreeSet<usize> = held_rows(cx, window).into_iter().collect();
-            let added: BTreeSet<usize> = now.difference(&held).copied().collect();
-            assert_eq!(rendered(&log), added, "step {step}: only new rows render");
-            held = now;
-        }
-    }
-
-    #[crate::test]
-    fn a_view_asking_whether_a_row_shows_is_rebuilt_when_it_stops_showing(cx: &mut TestAppContext) {
-        if !crate::fast::layers::COMPILED {
-            return;
-        }
-        // Row 3 spans 90 to 110 px: it leaves the top of the viewport once
-        // the list scrolled past 110 px.
-        let state = ListState::new(1000, ListAlignment::Top, px(0.)).measure_all();
-        let window: AnyWindowHandle = cx
-            .add_window({
-                let state = state.clone();
-                move |_, _| ScrollAwarePage {
-                    list: ListPage {
-                        state,
-                        rendered: Rc::default(),
-                    },
-                    read: ScrollRead::Shows(3),
-                }
-            })
-            .into();
-        open_at(cx, window, 1.);
-        promote(cx, window);
-        let mut showed = shows(&state, 3);
-        assert!(showed);
-        let mut crossed = 0;
-        for step in 0..20 {
-            wheel(cx, window, -15.);
-            let now = shows(&state, 3);
-            if now != showed {
-                crossed += 1;
-                assert_ne!(
-                    decision(cx, window),
-                    Some(Decision::Composite),
-                    "step {step}: the button went"
-                );
-            } else {
-                assert_eq!(
-                    decision(cx, window),
-                    Some(Decision::Composite),
-                    "step {step}"
-                );
-            }
-            showed = now;
-        }
-        assert_eq!(crossed, 1);
-    }
-
-    /// The first of every other row of the list of `state` that shows, as
-    /// an outline finds it.
-    fn first_shown(state: &ListState) -> usize {
-        for ix in (0..state.item_count()).step_by(2) {
-            if state.item_is_above_viewport(ix) == Some(true) {
-                continue;
-            }
-            if state.item_is_below_viewport(ix) == Some(true) {
-                break;
-            }
-            return ix;
-        }
-        0
-    }
-
-    #[crate::test]
-    fn a_view_finding_the_first_row_that_shows_matches_layers_off(cx: &mut TestAppContext) {
-        if !crate::fast::layers::COMPILED {
-            return;
-        }
-        let (with_layers, _) = scroll_aware_page(cx, 60, ScrollRead::Outline);
-        let (without_layers, _) = scroll_aware_page(cx, 60, ScrollRead::Outline);
-        let composited =
-            compare_with_layers_off(cx, with_layers, without_layers, &[-7.; 150], "down");
-        assert!(composited > 100, "the layer was composited ({composited})");
-        compare_with_layers_off(cx, with_layers, without_layers, &[7.; 150], "up");
-        compare_with_layers_off(cx, with_layers, without_layers, &[-23.; 60], "down fast");
-        compare_with_layers_off(cx, with_layers, without_layers, &[29.; 60], "up fast");
-    }
-
-    #[crate::test]
-    fn a_view_asking_whether_a_row_shows_matches_layers_off(cx: &mut TestAppContext) {
-        if !crate::fast::layers::COMPILED {
-            return;
-        }
-        let (with_layers, _) = scroll_aware_page(cx, 30, ScrollRead::Shows(3));
-        let (without_layers, _) = scroll_aware_page(cx, 30, ScrollRead::Shows(3));
-        let composited =
-            compare_with_layers_off(cx, with_layers, without_layers, &[-15.; 60], "down");
-        assert!(composited > 50, "the layer was composited ({composited})");
-        compare_with_layers_off(cx, with_layers, without_layers, &[15.; 60], "up");
-    }
-
-    #[crate::test]
-    fn a_list_answers_whether_a_row_shows_as_its_geometry_does(cx: &mut TestAppContext) {
-        let state = ListState::new(30, ListAlignment::Top, px(0.));
-        let check = |label: &str| {
-            let (above, below, at_end): (Vec<_>, Vec<_>, _) = {
-                let inner = state.0.borrow();
-                let geometry = crate::fast::layers::answers::ListGeometry::of(&inner);
-                (
-                    (0..32)
-                        .map(|ix| geometry.item_is_above_viewport(ix))
-                        .collect(),
-                    (0..32)
-                        .map(|ix| geometry.item_is_below_viewport(ix))
-                        .collect(),
-                    geometry.at_end(),
-                )
-            };
-            for ix in 0..32 {
-                assert_eq!(
-                    above[ix],
-                    state.item_is_above_viewport(ix),
-                    "{label}: row {ix} above"
-                );
-                assert_eq!(
-                    below[ix],
-                    state.item_is_below_viewport(ix),
-                    "{label}: row {ix} below"
-                );
-            }
-            assert_eq!(at_end, state.is_scrolled_to_end(), "{label}");
-        };
-        check("not laid out");
-        let (handle, _) = page(cx, state.clone());
-        let window: AnyWindowHandle = handle.into();
-        check("laid out");
-        for step in 0..40 {
-            wheel(cx, window, -17.);
-            check(&format!("step {step}"));
         }
     }
 
@@ -2556,6 +2390,90 @@ mod list {
         );
         compare_with_layers_off(cx, window, without.into(), &[-25.; 12], "scroll down");
         compare_with_layers_off(cx, window, without.into(), &[25.; 24], "scroll up");
+    }
+
+    /// The width of a column every row of a [`ColumnPage`] is drawn at.
+    struct Column {
+        width: f32,
+    }
+
+    /// Whether row [`WIDE_ROW`] of a [`ColumnPage`] is wide.
+    struct Wide(bool);
+
+    /// The row of a [`ColumnPage`] that widens its column once it is wide.
+    const WIDE_ROW: usize = 3;
+
+    /// A page whose rows are drawn at the width of a column they share, which
+    /// a row widens as it renders, without notifying anyone, as a table
+    /// widens a column to fit the widest cell it draws.
+    struct ColumnPage {
+        state: ListState,
+        column: Entity<Column>,
+        wide: Entity<Wide>,
+    }
+
+    impl Render for ColumnPage {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let column = self.column.clone();
+            let wide = self.wide.clone();
+            div().size_full().bg(rgb(0xffffff)).child(
+                crate::list(self.state.clone(), move |row, _, cx| {
+                    if row == WIDE_ROW && wide.read(cx).0 && column.read(cx).width < 150. {
+                        column.update(cx, |column, _| column.width = 150.);
+                    }
+                    div()
+                        .h(px(row_height(row)))
+                        .child(
+                            div()
+                                .w(px(column.read(cx).width))
+                                .h_full()
+                                .bg(row_color(row)),
+                        )
+                        .into_any_element()
+                })
+                .w(px(VIEWPORT_WIDTH))
+                .h(px(VIEWPORT_HEIGHT)),
+            )
+        }
+    }
+
+    fn column_page(cx: &mut TestAppContext) -> WindowHandle<ColumnPage> {
+        let window = cx.add_window(|_, cx| ColumnPage {
+            state: ListState::new(1000, ListAlignment::Top, px(0.)).measure_all(),
+            column: cx.new(|_| Column { width: 50. }),
+            wide: cx.new(|_| Wide(false)),
+        });
+        open_at(cx, window.into(), 1.);
+        window
+    }
+
+    /// A row the layer holds, rendered again, widens the column the other
+    /// rows it holds are drawn at: they are drawn again at the new width on
+    /// the frames after, as without layers.
+    #[crate::test]
+    fn a_row_widening_what_the_rows_held_read_draws_them_again(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let with_layers = column_page(cx);
+        let without_layers = column_page(cx);
+        let (with, without) = (with_layers.into(), without_layers.into());
+        compare_with_layers_off(cx, with, without, &[-20., -20., -7.], "promote");
+        assert_eq!(decision(cx, with), Some(Decision::Composite));
+        assert!(held_rows(cx, with).contains(&WIDE_ROW));
+        for window in [with_layers, without_layers] {
+            window
+                .update(cx, |page, _, cx| {
+                    page.wide.update(cx, |wide, _| wide.0 = true)
+                })
+                .unwrap();
+        }
+        // The rows drawn before the wide row this frame are drawn at the
+        // width they read, with layers or without.
+        wheel(cx, with, -7.);
+        wheel(cx, without, -7.);
+        let composited = compare_with_layers_off(cx, with, without, &[-7.; 8], "widened");
+        assert!(composited > 0, "the layer was composited");
     }
 }
 

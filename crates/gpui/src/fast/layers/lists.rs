@@ -1030,6 +1030,8 @@ pub(crate) fn spanned_render_item(
     mut render_item: impl FnMut(usize, &mut Window, &mut App) -> AnyElement + 'static,
 ) -> Box<crate::RenderItemFn> {
     Box::new(move |ix, window, cx| {
+        // A row reading what the row before it read last notes it too.
+        cx.entities.mark_access_boundary();
         let start = reads_len();
         let element = render_item(ix, window, cx);
         RENDERED_ROW.set(Some((ix, start)));
@@ -1637,9 +1639,7 @@ pub(crate) fn begin_list(
     let viewport = window.content_mask().bounds.intersect(&bounds);
     let scroll_top = state.scroll_top(&state.logical_scroll_top());
     let scroll_offset = paint::snap_scroll_offset(window, point(px(0.), -scroll_top));
-    // What the view holding the list asked of it is asked again of the list
-    // as it is before it lays its rows out.
-    let _prepainting = crate::fast::layers::answers::ListPrepainting::begin(state);
+    invalidate::note_list_at_end(window, &version, scrolled_to_end(state));
     // A view rendering again and splicing its list moves its rows to other
     // indices: they are not only rendered again, but painted afresh.
     let item_count = state.items.summary().count;
@@ -1707,6 +1707,13 @@ pub(crate) fn begin_list(
     }
 }
 
+/// Notes that whether the `list` of `state` is scrolled to its end was read,
+/// as [`crate::ListState::is_scrolled_to_end`] reads it, and what it was (see
+/// [`invalidate::note_at_end_read`]).
+pub(crate) fn note_at_end_read(state: &crate::StateInner) {
+    invalidate::note_at_end_read(&state.version, scrolled_to_end(state));
+}
+
 /// Marks the state of a `list` changed if scrolling it to its end moves it.
 /// A view that keeps its list at its end calls
 /// [`crate::ListState::scroll_to_end`] every time it renders, which changes
@@ -1721,7 +1728,19 @@ pub(crate) fn note_scrolled_to_end(state: &crate::StateInner) {
 /// cannot scroll or the height of a row is not known yet, as
 /// [`crate::ListState::is_scrolled_to_end`] answers.
 pub(crate) fn scrolled_to_end(state: &crate::StateInner) -> Option<bool> {
-    crate::fast::layers::answers::ListGeometry::of(state).at_end()
+    let bounds = state.last_layout_bounds?;
+    let summary = state.items.summary();
+    if summary.has_unknown_height {
+        return None;
+    }
+    let padding = state.last_padding.unwrap_or_default();
+    let content_height = summary.height + padding.top + padding.bottom;
+    let scroll_max = (content_height - bounds.size.height).max(px(0.));
+    if scroll_max <= px(0.) {
+        return None;
+    }
+    let scroll_top = state.scroll_top(&state.logical_scroll_top());
+    Some(scroll_top >= scroll_max)
 }
 
 /// Whether a `list`, whose state `version` counts changes of, laying out the
@@ -2657,12 +2676,6 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
                 .count();
             let carried: BTreeSet<usize> = frame.carried.iter().copied().collect();
             rows.rows.retain(|row, _| carried.contains(row));
-            // What the list wrote as it was built again, its rows included,
-            // is part of building it, not a change of the rows it kept,
-            // which were checked as it began.
-            for row in rows.rows.values_mut() {
-                row.dependencies = row.dependencies.written_up_to_those_of(&frame.dependencies);
-            }
             if rows.rerendered {
                 for row in rows.rows.values_mut() {
                     row.suspect = true;

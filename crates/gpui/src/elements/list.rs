@@ -489,7 +489,7 @@ impl ListState {
     /// not scrollable or the total content height is not yet known.
     pub fn is_scrolled_to_end(&self) -> Option<bool> {
         let state = self.0.borrow();
-        crate::fast::layers::answers::note_list_at_end(self);
+        crate::fast::layers::lists::note_at_end_read(&state);
         let bounds = state.last_layout_bounds?;
         let summary = state.items.summary();
         if summary.has_unknown_height {
@@ -829,7 +829,6 @@ impl ListState {
     /// itself to zero height), so returning `None` in that case would make
     /// the answer oscillate from frame to frame.
     pub fn item_is_above_viewport(&self, ix: usize) -> Option<bool> {
-        let _answering = crate::fast::layers::answers::note_list_item_above(self, ix);
         let viewport_bounds = self.0.borrow().last_layout_bounds?;
 
         let scroll_top = self.logical_scroll_top();
@@ -849,7 +848,6 @@ impl ListState {
     /// See [`Self::item_is_above_viewport`] for why a zero-height viewport
     /// still yields a definitive answer.
     pub fn item_is_below_viewport(&self, ix: usize) -> Option<bool> {
-        let _answering = crate::fast::layers::answers::note_list_item_below(self, ix);
         let viewport_bounds = self.0.borrow().last_layout_bounds?;
 
         let scroll_top = self.logical_scroll_top();
