@@ -172,6 +172,18 @@ impl Patterns {
     }
 }
 
+/// Every pattern, as Allsum's chat page has them (`chat-scroll-allsum`).
+const ALLSUM: Patterns = Patterns {
+    reads_offset: true,
+    reads_at_end: true,
+    notifies: true,
+    animates: true,
+    sticks: true,
+    parent_writes: true,
+    chrome: true,
+    trackpad: true,
+};
+
 /// A message of the session: whether an assistant sent it.
 struct Message {
     assistant: bool,
@@ -639,6 +651,7 @@ impl Render for ChatView {
                     .when(self.scroll_to_bottom_opacity > 0., |this| {
                         this.child(
                             div()
+                                .id("scroll-to-bottom")
                                 .absolute()
                                 .bottom_3()
                                 .left(px(360.))
@@ -647,7 +660,13 @@ impl Render for ChatView {
                                 .border_1()
                                 .border_color(border())
                                 .bg(gpui::white())
-                                .opacity(self.scroll_to_bottom_opacity),
+                                .opacity(self.scroll_to_bottom_opacity)
+                                // Clicking it follows the end again.
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.stick_to_bottom = true;
+                                    this.list_state.scroll_to_end();
+                                    cx.notify();
+                                })),
                         )
                     }),
             )
@@ -819,6 +838,31 @@ fn scroll_events(up: bool, starts: bool, trackpad: bool) -> Vec<PlatformInput> {
         .collect()
 }
 
+/// The root view of a scenario with `patterns`: the chat view, or Allsum's
+/// `ChatApp` holding it.
+fn build(patterns: Patterns, cx: &mut App) -> AnyView {
+    let chat = cx.new(|cx| ChatView::new(patterns, cx));
+    if patterns.parent_writes {
+        let preview_split = cx.new(|_| PreviewSplit {
+            chat: chat.clone(),
+            active: false,
+        });
+        cx.new(|_| ChatApp {
+            chat,
+            preview_split,
+        })
+        .into()
+    } else {
+        chat.into()
+    }
+}
+
+/// Allsum's chat window as `chat-scroll-allsum` builds it, every pattern
+/// included, for the showcase's Chat page to scroll by hand.
+pub fn allsum_chat_window(cx: &mut App) -> AnyView {
+    build(ALLSUM, cx)
+}
+
 struct RealChatScroll {
     name: &'static str,
     description: &'static str,
@@ -836,21 +880,7 @@ impl Scenario for RealChatScroll {
     }
 
     fn build(&self, _: &mut Window, cx: &mut App) -> AnyView {
-        let patterns = self.patterns;
-        let chat = cx.new(|cx| ChatView::new(patterns, cx));
-        if patterns.parent_writes {
-            let preview_split = cx.new(|_| PreviewSplit {
-                chat: chat.clone(),
-                active: false,
-            });
-            cx.new(|_| ChatApp {
-                chat,
-                preview_split,
-            })
-            .into()
-        } else {
-            chat.into()
-        }
+        build(self.patterns, cx)
     }
 
     fn step(&self, root: &AnyView, frame: usize, window: &mut Window, cx: &mut App) {
@@ -882,16 +912,7 @@ impl Scenario for RealChatScroll {
 
 pub fn scenarios() -> Vec<Box<dyn Scenario>> {
     let none = Patterns::default();
-    let allsum = Patterns {
-        reads_offset: true,
-        reads_at_end: true,
-        notifies: true,
-        animates: true,
-        sticks: true,
-        parent_writes: true,
-        chrome: true,
-        trackpad: true,
-    };
+    let allsum = ALLSUM;
     let variants: [(&'static str, &'static str, Patterns); 11] = [
         (
             "chat-scroll-plain",
