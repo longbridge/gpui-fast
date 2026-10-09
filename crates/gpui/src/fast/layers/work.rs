@@ -21,7 +21,7 @@ const FRAME_OVERHEAD: f32 = 0.25;
 // spike even when sparse updates make its average work look cheap. A
 // refresh paints content afresh, its work counted at [`REPAINT_COST`].
 const MAX_REFRESH_WORK: f32 = 2. * REPAINT_COST;
-// A layer whose last this many frames cost more than drawing directly would
+// A layer whose last this many drawn frames cost more than drawing directly would
 // have, their upkeep included, half of them or more each costing more, is
 // dropped without waiting for the whole window: a scroll too fast for its
 // overscan, or content refreshed on every other frame, does not pay for it,

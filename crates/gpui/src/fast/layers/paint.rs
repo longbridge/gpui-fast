@@ -390,7 +390,8 @@ pub(crate) fn composite_at(
 /// Composites the layer of the container `id` into the frame at
 /// `translation`, `dirtied` of its tiles new this frame: its tile quads
 /// over the viewport, the current content mask, and its [`LayerFrame`].
-/// Content holding paths is drawn into the frame instead.
+/// Content whose overlay cannot be drawn over its tiles
+/// ([`LayerRecord::has_paths`]) is drawn into the frame instead.
 pub(crate) fn insert_layer(
     window: &mut Window,
     id: &GlobalElementId,

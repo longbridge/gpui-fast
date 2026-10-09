@@ -2028,12 +2028,16 @@ pub(crate) fn end_list(
         Mode::Repaint if promoting => (extent, extent),
         Mode::Repaint => (Pixels::ZERO, Pixels::ZERO),
     };
-    // A row the layer lacks is added only if it fits what is left.
+    // A row the layer lacks is added only if it fits what is left, or was
+    // rendered to learn its height: that is paid for already.
     let mut left = end_budget;
     while end < item_count && end_y < bottom {
+        if !held.contains(&end) && left <= Pixels::ZERO {
+            break;
+        }
         let height = height_of(end, window, cx, &mut rendered);
         if !held.contains(&end) {
-            if height > left {
+            if height > left && !rendered.contains_key(&end) {
                 break;
             }
             left -= height;
@@ -2044,9 +2048,12 @@ pub(crate) fn end_list(
     }
     let mut left = start_budget;
     while start > 0 && start_y > top {
+        if !held.contains(&(start - 1)) && left <= Pixels::ZERO {
+            break;
+        }
         let height = height_of(start - 1, window, cx, &mut rendered);
         if !held.contains(&(start - 1)) {
-            if height > left {
+            if height > left && !rendered.contains_key(&(start - 1)) {
                 break;
             }
             left -= height;
