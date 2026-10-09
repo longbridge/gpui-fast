@@ -1307,6 +1307,65 @@ mod list {
         }
     }
 
+    /// A [`ListPage`] drawn after a backdrop of its parent's, as a page is
+    /// drawn after a sidebar.
+    struct BackdropPage {
+        list: Entity<ListPage>,
+    }
+
+    impl Render for BackdropPage {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().bg(rgb(0xeeeeee)).child(self.list.clone())
+        }
+    }
+
+    /// A list view drawn from last frame while its parent renders again, after
+    /// the parent has drawn something of its own, keeps its layer's ranges,
+    /// which count from the layer's own scene and not the window's, and draws
+    /// as it does without layers.
+    #[crate::test]
+    fn a_list_view_drawn_again_after_its_parents_backdrop_keeps_its_layer(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let open = |cx: &mut TestAppContext| {
+            let window = cx.add_window(|_, cx| BackdropPage {
+                list: cx.new(|_| ListPage {
+                    state: ListState::new(1000, ListAlignment::Top, px(0.)).measure_all(),
+                    rendered: Rc::new(RefCell::new(Vec::new())),
+                }),
+            });
+            open_at(cx, window.into(), 1.);
+            window
+        };
+        let with_layers = open(cx);
+        let without_layers = open(cx);
+        with_window(cx, without_layers.into(), |window, _| {
+            window.set_scroll_layers(false)
+        });
+        draw(cx, without_layers.into());
+        promote(cx, with_layers.into());
+        wheel(cx, without_layers.into(), -20.);
+        wheel(cx, without_layers.into(), -20.);
+        for frame in 0..40 {
+            if frame % 4 == 0 {
+                for window in [with_layers, without_layers] {
+                    window.update(cx, |_, _, cx| cx.notify()).unwrap();
+                }
+            }
+            wheel(cx, with_layers.into(), -10.);
+            wheel(cx, without_layers.into(), -10.);
+            let expected = with_window(cx, without_layers.into(), |window, _| {
+                expanded_quads(&window.rendered_frame.scene)
+            });
+            let actual = with_window(cx, with_layers.into(), |window, _| {
+                expanded_quads(&window.rendered_frame.scene)
+            });
+            assert_eq!(actual, expected, "frame {frame}");
+        }
+        assert_eq!(decision(cx, with_layers.into()), Some(Decision::Composite));
+    }
+
     /// A caret drawn by a component, which reads whether it shows as the
     /// component renders, when the element it is laid out, as an input reads
     /// its blinking cursor.
