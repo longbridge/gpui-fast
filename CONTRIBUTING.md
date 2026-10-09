@@ -96,6 +96,24 @@ screen locked, no frames are drawn and `--auto` waits.
 To profile one scenario, run it for longer under a profiler, for instance
 `samply record ./target/release/gpui_perf --auto --only ScrollPage --frames 5000`.
 
+### Window composition
+
+`--composition` composes the showcase's window the way one embedding a
+webview does: an empty native surface over the top right of the page, between
+GPUI's content and its overlays. A window cannot stop composing once it has
+started, so what composition costs is the difference between two runs:
+
+```sh
+cargo run -p gpui_perf --release -- --auto
+cargo run -p gpui_perf --release -- --auto --composition
+```
+
+The `present` column, and `Present` in the status bar, is the time per frame
+spent handing the frame to the platform, which with composition includes
+splitting the scene into one per surface. It is wall time, so a present that
+waits for the GPU counts that wait; `cpu p50` says whether the main thread
+did more work.
+
 ### Comparing with upstream GPUI
 
 The `upstream` feature builds the same showcase against upstream GPUI, the

@@ -7,8 +7,8 @@
 use std::time::Duration;
 
 pub use imp::{
-    GPUI, UPSTREAM, frame_counter, frame_times, frames, reset_stats, set_view_retention,
-    view_retention,
+    GPUI, UPSTREAM, enable_composition, frame_counter, frame_times, frames, reset_stats,
+    set_view_retention, view_retention,
 };
 
 /// What gpui-fast's counters say the frames drawn so far took.
@@ -18,6 +18,9 @@ pub struct FrameTimes {
     pub prepaint: Duration,
     pub layout: Duration,
     pub paint: Duration,
+    /// Handing frames to the platform, which splits them per surface once
+    /// the window composes.
+    pub present: Duration,
     pub views_built: u64,
     pub views_reused: u64,
     /// Scroll containers drawn from a scroll layer's cached tiles.
@@ -30,7 +33,9 @@ pub struct FrameTimes {
 
 #[cfg(not(feature = "upstream"))]
 mod imp {
-    use gpui::{AnyElement, Window};
+    use std::any::Any;
+
+    use gpui::{AnyElement, Bounds, Pixels, Window};
 
     use super::FrameTimes;
 
@@ -59,6 +64,7 @@ mod imp {
             prepaint: stats.prepaint_time,
             layout: stats.compute_layout_time,
             paint: stats.paint_time,
+            present: stats.present_time,
             views_built: stats.views_built,
             views_reused: stats.views_reused,
             layer_frames_composited: stats.layer_frames_composited,
@@ -77,6 +83,27 @@ mod imp {
         window.set_view_retention(enabled);
     }
 
+    /// Composes the window as one embedding a webview does: an empty native
+    /// surface at `bounds` between GPUI's content and its overlays. Returns
+    /// what keeps the surface, to be held as long as the window.
+    pub fn enable_composition(
+        window: &mut Window,
+        bounds: Bounds<Pixels>,
+    ) -> Result<Box<dyn Any>, String> {
+        let bounds = bounds.to_device_pixels(window.scale_factor());
+        let composition = window
+            .enable_window_composition()
+            .map_err(|error| format!("{error:#}"))?;
+        let surface = composition
+            .create_native_surface()
+            .map_err(|error| format!("{error:#}"))?;
+        surface
+            .platform_surface()
+            .and_then(|platform_surface| platform_surface.set_bounds(bounds))
+            .map_err(|error| format!("{error:#}"))?;
+        Ok(Box::new(surface))
+    }
+
     /// An element counting the frames drawn, where GPUI does not count them:
     /// gpui-fast does.
     pub fn frame_counter() -> Option<AnyElement> {
@@ -86,9 +113,12 @@ mod imp {
 
 #[cfg(feature = "upstream")]
 mod imp {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::{
+        any::Any,
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
-    use gpui::{AnyElement, IntoElement as _, Styled as _, Window, canvas};
+    use gpui::{AnyElement, Bounds, IntoElement as _, Pixels, Styled as _, Window, canvas};
 
     use super::FrameTimes;
 
@@ -122,6 +152,11 @@ mod imp {
 
     /// Upstream has no retained views to switch.
     pub fn set_view_retention(_: &mut Window, _: bool) {}
+
+    /// Upstream has no window composition.
+    pub fn enable_composition(_: &mut Window, _: Bounds<Pixels>) -> Result<Box<dyn Any>, String> {
+        Err("upstream GPUI has no window composition".into())
+    }
 
     /// An element for the root view that counts the frames drawn. Upstream
     /// builds the whole window every frame it draws, so an element in the

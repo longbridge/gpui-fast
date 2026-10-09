@@ -56,6 +56,9 @@ pub struct LayoutStats {
     pub prepaint_time: Duration,
     /// Time spent in the paint walk, turning laid-out elements into the scene.
     pub paint_time: Duration,
+    /// Time spent presenting frames: handing the scene to the platform, which
+    /// splits it into a scene per surface first once the window composes.
+    pub present_time: Duration,
     /// Time spent inside Taffy's own layout computation. Kept only once the
     /// stats have been reset.
     pub compute_layout_time: Duration,
@@ -98,6 +101,7 @@ pub(crate) struct FramePhaseTimes {
     build: Duration,
     prepaint: Duration,
     paint: Duration,
+    present: Duration,
     /// When the phase being timed began.
     phase_started_at: Option<scheduler::Instant>,
 }
@@ -128,6 +132,13 @@ impl FramePhaseTimes {
         self.paint += lap;
     }
 
+    /// Adds the time a frame took to present, which
+    /// [`LayoutStats::present_time`] reports. Presenting comes after the
+    /// frame is drawn, outside the phases timed one after the other.
+    pub(crate) fn add_present(&mut self, time: Duration) {
+        self.present += time;
+    }
+
     /// The time since the phase being timed began, starting the next one.
     fn lap(&mut self) -> Duration {
         let now = scheduler::Instant::now();
@@ -141,6 +152,7 @@ impl FramePhaseTimes {
         self.build = Duration::ZERO;
         self.prepaint = Duration::ZERO;
         self.paint = Duration::ZERO;
+        self.present = Duration::ZERO;
     }
 }
 
@@ -230,6 +242,7 @@ impl Window {
             build_time: phases.build,
             prepaint_time: phases.prepaint,
             paint_time: phases.paint,
+            present_time: phases.present,
             lines_shaped,
             shape_time,
             ..self.layout_engine.as_ref().unwrap().stats()

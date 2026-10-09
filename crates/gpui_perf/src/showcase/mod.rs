@@ -29,6 +29,11 @@
 //! the scenarios instead. On macOS it holds the CPU's clock up while it
 //! measures; see `clock.rs`.
 //!
+//! With `--composition`, the window composes the way one embedding a webview
+//! does, with an empty native surface between GPUI's content and its
+//! overlays, so that `--auto` with and without it measures what window
+//! composition costs.
+//!
 //! Built with the `upstream` feature it runs on upstream GPUI, the
 //! `gpui-pre` snapshot GPUI Kit pins, for comparison; see `backend.rs`.
 
@@ -46,6 +51,7 @@ mod workspace;
 mod example_support;
 
 use std::{
+    any::Any,
     cell::RefCell,
     rc::Rc,
     time::{Duration, Instant},
@@ -234,8 +240,8 @@ const DEMO_STEP: Duration = Duration::from_secs(6);
 /// Opens the showcase. With `auto`, it runs every scenario and quits; with
 /// `demo`, it scrolls the sidebar, a page, the table and the list in turn,
 /// for as long as it is open, for recording or watching two GPUIs side by
-/// side.
-pub fn run(auto: bool, demo: bool) {
+/// side. With `composition`, the window composes around a native surface.
+pub fn run(auto: bool, demo: bool, composition: bool) {
     if auto && std::env::args().any(|arg| arg == "--list") {
         auto::list();
         return;
@@ -275,7 +281,14 @@ pub fn run(auto: bool, demo: bool) {
             },
             |window, cx| {
                 Theme::follow(window, cx);
-                cx.new(|cx| Showcase::new(auto, demo, window, cx))
+                let composition = composition.then(|| {
+                    backend::enable_composition(window, composition_surface_bounds())
+                        .unwrap_or_else(|error| {
+                            eprintln!("--composition: {error}");
+                            std::process::exit(2);
+                        })
+                });
+                cx.new(|cx| Showcase::new(auto, demo, composition, window, cx))
             },
         )
         .unwrap();
@@ -298,6 +311,8 @@ pub struct Showcase {
     /// What scrolls, as the toolbar shows it; the driver does the scrolling.
     scroll: Scroll,
     driver: Rc<RefCell<Driver>>,
+    /// The native surface the window composes around, with `--composition`.
+    _composition: Option<Box<dyn Any>>,
     _appearance: Subscription,
 }
 
@@ -328,6 +343,12 @@ pub struct Handles {
 /// A page of the gallery.
 pub struct Story {
     name: SharedString,
+}
+
+/// Where `--composition` puts its native surface, where a webview would be:
+/// over the top right of the page.
+fn composition_surface_bounds() -> Bounds<Pixels> {
+    Bounds::new(point(px(920.), px(96.)), size(px(320.), px(200.)))
 }
 
 /// How far each frame scrolls: as fast as a wheel spun hard.
@@ -448,7 +469,13 @@ fn step(
 }
 
 impl Showcase {
-    fn new(auto: bool, demo: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        auto: bool,
+        demo: bool,
+        composition: Option<Box<dyn Any>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let container = cx.new(|cx| {
             let mut container = Container::new(BUTTON_PAGE, cx);
             container.title = page_name(BUTTON_PAGE).into();
@@ -521,10 +548,11 @@ impl Showcase {
             driver: Rc::new(RefCell::new(Driver {
                 scroll: Scroll::Off,
                 direction: 1.,
-                auto: auto.then(AutoRun::new),
+                auto: auto.then(|| AutoRun::new(composition.is_some())),
                 demo: demo.then(Instant::now),
                 running: false,
             })),
+            _composition: composition,
             _appearance: appearance,
         };
         if auto || demo {

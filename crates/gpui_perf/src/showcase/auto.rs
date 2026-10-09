@@ -4,6 +4,9 @@
 //!
 //! The trading workspace's scenarios stream quotes into it while the user
 //! does nothing, scrolls the watchlist, or moves the pointer over its rows.
+//!
+//! A window cannot stop composing once it has started, so what window
+//! composition costs is measured by two runs, one with `--composition`.
 
 use std::time::Duration;
 
@@ -125,13 +128,17 @@ pub struct AutoRun {
     results: Vec<Result>,
     /// Holds the CPU's clock up while the scenarios run.
     clock: ClockHold,
+    /// Whether the window composes around a native surface, which the
+    /// report says.
+    composition: bool,
 }
 
 impl AutoRun {
     /// Every scenario with retention on, then off; `--only <scenario>` and
     /// `--retention on|off` narrow that down, and `--frames <n>` sets how
-    /// many frames each is measured over.
-    pub fn new() -> Self {
+    /// many frames each is measured over. `composition` is whether the
+    /// window composes, for the report.
+    pub fn new(composition: bool) -> Self {
         let only = flag("--only").map(|only| only.to_lowercase());
         let retention = flag("--retention").map(|retention| retention.to_lowercase());
         let modes: &[Option<bool>] = if cfg!(feature = "upstream") {
@@ -172,6 +179,7 @@ impl AutoRun {
             last_instructions: None,
             results: Vec::new(),
             clock: ClockHold::start(),
+            composition,
         }
     }
 
@@ -306,7 +314,15 @@ impl AutoRun {
             return;
         }
         println!(
-            "\n{:<16} {:>9} {:>6} {:>9} {:>9} {:>9} {:>7} {:>7} {:>8} {:>8} {:>9} {:>8} {:>8} {:>6} {:>6} {:>6} {:>6} {:>8}",
+            "\nwindow composition: {}",
+            if self.composition {
+                "on, around an empty native surface (--composition)"
+            } else {
+                "off"
+            }
+        );
+        println!(
+            "\n{:<16} {:>9} {:>6} {:>9} {:>9} {:>9} {:>7} {:>7} {:>8} {:>8} {:>9} {:>8} {:>8} {:>8} {:>6} {:>6} {:>6} {:>6} {:>8}",
             "scenario",
             "retention",
             "fps",
@@ -320,6 +336,7 @@ impl AutoRun {
             "prepaint",
             "layout",
             "paint",
+            "present",
             "built",
             "reused",
             "layers",
@@ -333,7 +350,7 @@ impl AutoRun {
             let cost = &result.cost;
             let phases = cost.phases;
             println!(
-                "{:<16} {:>9} {:>6.0} {:>7.2}ms {:>7.2}ms {:>9} {:>6.0}% {:>7} {:>8} {:>8} {:>9} {:>8} {:>8} {:>6} {:>6} {:>6} {:>6} {:>8}",
+                "{:<16} {:>9} {:>6.0} {:>7.2}ms {:>7.2}ms {:>9} {:>6.0}% {:>7} {:>8} {:>8} {:>9} {:>8} {:>8} {:>8} {:>6} {:>6} {:>6} {:>6} {:>8}",
                 format!("{:?}", result.scenario),
                 match result.retention {
                     Some(true) => "on",
@@ -355,6 +372,7 @@ impl AutoRun {
                 ms(phases.map(|p| p.prepaint_ms)),
                 ms(phases.map(|p| p.layout_ms)),
                 ms(phases.map(|p| p.paint_ms)),
+                ms(phases.map(|p| p.present_ms)),
                 count(phases.map(|p| p.views_built)),
                 count(phases.map(|p| p.views_reused)),
                 count2(phases.map(|p| p.layer_frames_composited)),
@@ -367,6 +385,9 @@ impl AutoRun {
              frame, which unlike CPU time do not depend on the core or the clock the thread got. \
              proc: the whole process, render threads included. p-cores: the share of the \
              process's CPU time on performance cores. memory: the process's memory at the end, resident on Linux, its footprint on macOS. build, prepaint, paint: per frame; layout is Taffy's share of prepaint. \
+             present: handing the frame to the platform, per frame, which with window composition \
+             splits it into a scene per surface; wall time, so a present that waits for the GPU \
+             counts that wait. \
              built, reused: views per frame. layers: scroll containers drawn from a scroll \
              layer's cached tiles, tiles: scroll layer tiles repainted, rebuilds: scroll layers \
              painted again before an input event, per frame. \"-\": not counted by upstream GPUI."
