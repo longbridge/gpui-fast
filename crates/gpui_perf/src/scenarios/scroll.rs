@@ -19,19 +19,17 @@
 //!   frame whose corners are paths drawn under its border, as GPUI Kit's
 //!   markdown tables are.
 //!
-//! Each runs again with a scrollbar over the content, drawn and driven as
-//! GPUI Kit's is (`scenarios::scrollbar`), as `<name>-scrollbar`, again with
-//! that scrollbar asking for an animation frame from its prepaint, as GPUI
-//! Kit's does while it fades, on every frame, as `<name>-animated-scrollbar`,
-//! and on 30 frames of every 100, as `<name>-fading-scrollbar`; with it,
-//! turned by three wheel events a frame, as a trackpad sends them, as
-//! `<name>-scrollbar-burst`; and the three content kinds once more with the
-//! scrollbar's thumb dragged instead of the wheel turned, as
-//! `scrollbar-drag-*`.
+//! The four content kinds run again with a scrollbar over the content, drawn
+//! and driven as GPUI Kit's is (`scenarios::scrollbar`), as
+//! `<name>-scrollbar`. The two lists also run with that scrollbar asking for
+//! an animation frame from its prepaint on 30 frames of every 100, as GPUI
+//! Kit's does while it fades, as `<name>-fading-scrollbar`, and turned by
+//! three wheel events a frame, as a trackpad sends them, as
+//! `<name>-scrollbar-burst`; and the three content kinds other than
+//! `same-view` once more with the scrollbar's thumb dragged instead of the
+//! wheel turned, as `scrollbar-drag-*`.
 
-use std::{cell::Cell, rc::Rc};
-
-use std::borrow::Cow;
+use std::{borrow::Cow, cell::Cell, rc::Rc};
 
 use gpui::{
     AnyElement, AnyView, App, AssetSource, Context, Entity, FontWeight, Hsla, ListAlignment,
@@ -702,21 +700,19 @@ pub fn scenarios() -> Vec<Box<dyn Scenario>> {
         }));
     }
     for (kind, description, content) in KINDS {
-        for (name, frames, how) in [
-            ("animated", 100, "on every frame"),
-            ("fading", 30, "on 30 frames of every 100"),
-        ] {
-            scenarios.push(Box::new(WheelScroll {
-                name: leak(format!("scroll-{kind}-{name}-scrollbar")),
-                description: leak(format!(
-                    "{description}, with a GPUI Kit scrollbar animating {how}, scrolled by the \
-                     wheel"
-                )),
-                content,
-                scrollbar: Bar::Animated(frames),
-                drive: Drive::Wheel,
-            }));
+        if kind != "list" && kind != "uniform-list" {
+            continue;
         }
+        scenarios.push(Box::new(WheelScroll {
+            name: leak(format!("scroll-{kind}-fading-scrollbar")),
+            description: leak(format!(
+                "{description}, with a GPUI Kit scrollbar animating on 30 frames of every 100, \
+                 scrolled by the wheel"
+            )),
+            content,
+            scrollbar: Bar::Animated(30),
+            drive: Drive::Wheel,
+        }));
         scenarios.push(Box::new(WheelScroll {
             name: leak(format!("scroll-{kind}-scrollbar-burst")),
             description: leak(format!(

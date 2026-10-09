@@ -271,11 +271,10 @@ re-rasterizes one or two tiles, not the layer.
 - Paths are never composited from tiles: `fs_path_rasterization` derives its
   antialiasing from `dpdx`/`dpdy`, which pair pixels in 2×2 quads, so a path
   rasterized into a tile and moved by an odd number of device pixels differs
-  from a direct draw by one level on some edge pixels. The core keeps paths,
-  and whatever is drawn over them, out of the tiles and draws them over the
-  composited tiles each frame (`fast::layers::overlay`); the renderer's tile
-  path support (a tile-sized intermediate) exists only so its pixel tests can
-  pin this down.
+  from a direct draw by one level on some edge pixels. Content that paints a
+  path makes its container ineligible (§6.5); the renderer's tile path
+  support (a tile-sized intermediate) exists only so its pixel tests can pin
+  this down.
 - Composite: a polychrome batch whose texture id decodes to a layer tile
   (§5.1) is drawn with the existing polychrome-sprite pipeline, the tile's
   texture bound through `BindGroupCache::texture` in place of the atlas

@@ -327,7 +327,8 @@ pub struct Transcript {
     /// The composer's input state, which rendering writes its options into.
     composer: Entity<ComposerInput>,
     /// Whether the transcript shows, which the window holding it writes
-    /// into it as it renders. See [`ChatApp`].
+    /// into it as it renders. See [`SidebarChatApp`]. Always true: it exists
+    /// so the window's write has something the transcript reads.
     active: bool,
 }
 
@@ -609,15 +610,16 @@ pub struct RecentChats {
     rows_drawn: usize,
 }
 
-/// A chat client's window: a sidebar of recent chats it renders itself, and
-/// the transcript of the chat selected, mounted as a cached view.
-pub struct ChatApp {
+/// A generic chat client's window: a sidebar of recent chats it renders
+/// itself, and the transcript of the chat selected, mounted as a cached view.
+/// `chat_patterns::ChatApp` is the one mirroring Allsum's window.
+pub struct SidebarChatApp {
     sidebar: ListState,
     recent: Entity<RecentChats>,
     transcript: Entity<Transcript>,
 }
 
-impl ChatApp {
+impl SidebarChatApp {
     fn new(cx: &mut Context<Self>) -> Self {
         Self {
             sidebar: ListState::new(RECENT_CHATS, ListAlignment::Top, px(200.)),
@@ -649,7 +651,7 @@ impl ChatApp {
     }
 }
 
-impl Render for ChatApp {
+impl Render for SidebarChatApp {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Written on every render, as the window hands its panes what they
         // show, without notifying them.
@@ -716,11 +718,11 @@ impl Scenario for ChatAppSidebarScroll {
     }
 
     fn build(&self, _: &mut Window, cx: &mut App) -> AnyView {
-        cx.new(ChatApp::new).into()
+        cx.new(SidebarChatApp::new).into()
     }
 
     fn step(&self, root: &AnyView, frame: usize, window: &mut Window, cx: &mut App) {
-        if let Ok(app) = root.clone().downcast::<ChatApp>() {
+        if let Ok(app) = root.clone().downcast::<SidebarChatApp>() {
             let bodies = app.read(cx).transcript.read(cx).bodies.clone();
             for body in bodies {
                 if body.read(cx).rendered && !body.read(cx).parsed {

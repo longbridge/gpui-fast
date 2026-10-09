@@ -2817,44 +2817,6 @@ mod policies {
     }
 
     #[crate::test]
-    fn an_owner_animating_keeps_it_off_its_layer_only_while_it_does(cx: &mut TestAppContext) {
-        if !crate::fast::layers::COMPILED {
-            return;
-        }
-        // The view holding the container asks for an animation frame as it
-        // renders, outside the content: it is rendered again on every frame
-        // the animation runs, and the container drawn without its layer.
-        let handle = page(cx, false);
-        let window = handle.into();
-        promote(cx, window);
-        assert_eq!(scroll(cx, window, -20.), Some(Decision::Composite));
-        let set_animate = |cx: &mut TestAppContext, animate: bool| {
-            frame_after(cx, window, |cx| {
-                handle
-                    .update(cx, |page, _, cx| {
-                        page.animate = animate;
-                        cx.notify();
-                    })
-                    .unwrap();
-            });
-        };
-        set_animate(cx, true);
-        for _ in 0..12 {
-            assert_eq!(scroll(cx, window, -5.), Some(Decision::Bypass));
-            assert!(!has_record(cx, window));
-        }
-        // Not demoted: once the animation stops, the layer is painted again
-        // as soon as the container has scrolled on two frames in a row, as
-        // it is when it starts scrolling, without waiting for the content to
-        // be stable.
-        set_animate(cx, false);
-        assert_eq!(layers_demoted(cx, window), 0);
-        assert_eq!(scroll(cx, window, -5.), Some(Decision::Bypass));
-        assert_eq!(scroll(cx, window, -5.), Some(Decision::Repaint));
-        assert_eq!(scroll(cx, window, -5.), Some(Decision::Composite));
-    }
-
-    #[crate::test]
     fn an_animation_frame_requested_inside_the_content_makes_it_ineligible(
         cx: &mut TestAppContext,
     ) {

@@ -1,8 +1,9 @@
-//! Scrolling a chat transcript the way real chat views scroll it: each
-//! `chat-scroll-*` scenario here adds one pattern of a real application that
-//! keeps a `list` from being composited from its scroll layer, so a framework
-//! fix for it can be measured and locked in, and `chat-scroll-allsum` puts
-//! them all together as Allsum's chat page has them.
+//! Scrolling a chat transcript the way real chat views scroll it, with the
+//! patterns of real applications that keep a `list` from being composited
+//! from its scroll layer: `chat-scroll-plain` has none of them,
+//! `chat-scroll-animates` and `chat-scroll-trackpad` one each, and
+//! `chat-scroll-allsum` puts them all together as Allsum's chat page has
+//! them.
 //!
 //! The code mirrored, cited as `path:line`:
 //!
@@ -42,11 +43,11 @@
 //!
 //! The patterns, one flag each (`Patterns`):
 //!
-//! - `chat-scroll-reads-offset`: after building the list, `render` works out
+//! - `reads_offset`: after building the list, `render` works out
 //!   which turns the outline highlights (`view.rs:6526`), with
 //!   `outline::visible_turn_range` (`outline.rs:884`): `item_is_above_viewport`
 //!   and `item_is_below_viewport` per turn, then `logical_scroll_top`;
-//! - `chat-scroll-reads-at-end`: the list has height hints instead of being
+//! - `reads_at_end`: the list has height hints instead of being
 //!   measured up front (`reset_with_uniform_height(n, 160px)`,
 //!   `view.rs:3170`, and `restore_list_height_hints` when its width changes,
 //!   `view.rs:3180`), and before building the list `render` asks whether the
@@ -56,28 +57,28 @@
 //!   else `max_offset_for_scrollbar` + `scroll_px_offset_for_scrollbar`,
 //!   `view.rs:4096`), and fades it a 0.12 step a frame by an `on_next_frame`
 //!   loop that notifies the view (`view.rs:4392`);
-//! - `chat-scroll-notifies`: the list is wrapped in a `ScrollBounce`, as on
+//! - `notifies`: the list is wrapped in a `ScrollBounce`, as on
 //!   macOS (`view.rs:6462`), whose wheel listener reads the list's offset
 //!   before and after the list scrolls and, when a wheel pushes past an edge,
 //!   pulls the content and notifies the view (`scroll_bounce.rs:276-401`);
 //!   the pull settles over the next frames, each requesting another
 //!   (`scroll_bounce.rs:244`). The sweep stays at the end for `DWELL_FRAMES`
 //!   frames of wheel events, so it pushes past it;
-//! - `chat-scroll-animates`: an outline jump lands every `JUMP_EVERY_FRAMES`
+//! - `animates` (`chat-scroll-animates`): an outline jump lands every `JUMP_EVERY_FRAMES`
 //!   frames and highlights its turn for 1800 ms (`outline.rs:1064`, 108
 //!   frames at 60 Hz, counted in frames here), the row reading the highlight
 //!   and `render` requesting an animation frame while it shows
 //!   (`sync_outline_highlight`, `view.rs:4365`);
-//! - `chat-scroll-sticks`: before building the list, `render` calls
+//! - `sticks`: before building the list, `render` calls
 //!   `scroll_to_end` every time while following the end (`view.rs:6428`),
 //!   and the sweep stays at the end for `DWELL_FRAMES` frames of wheel events;
-//! - `chat-scroll-parent-writes`: the view is held as Allsum holds it:
+//! - `parent_writes`: the view is held as Allsum holds it:
 //!   `ChatApp`, whose render writes the chat view (`set_active`,
 //!   `render.rs:86`) and the preview split (`render.rs:72`) and draws the
 //!   session sidebar inline, holds `PreviewSplit` as a plain child
 //!   (`render.rs:259`), which holds the chat view `.cached()`
 //!   (`preview_split.rs:186`);
-//! - `chat-scroll-chrome`: what `ChatView` draws besides: it writes its
+//! - `chrome`: what `ChatView` draws besides: it writes its
 //!   composer's state as it renders (`view.rs:6590`), draws a bottom fade
 //!   (`view.rs:6668`) and a GPUI Kit scrollbar (`view.rs:6676`), and
 //!   measures itself with a canvas that defers an update of the view every
@@ -85,7 +86,7 @@
 //!   listener notifies the view whenever the offset moved since the
 //!   scrollbar was last prepainted (`scrollbar.rs:1645`), which a second
 //!   wheel event in one frame finds;
-//! - `chat-scroll-trackpad`: scrolled by a trackpad, four 10 px events a
+//! - `trackpad` (`chat-scroll-trackpad`): scrolled by a trackpad, four 10 px events a
 //!   frame, instead of a mouse wheel's one 40 px event;
 //! - `chat-scroll-allsum`: all of the above, scrolled by a trackpad;
 //!   `chat-scroll-allsum-wheel` scrolls it by a mouse wheel.
@@ -913,65 +914,17 @@ impl Scenario for RealChatScroll {
 pub fn scenarios() -> Vec<Box<dyn Scenario>> {
     let none = Patterns::default();
     let allsum = ALLSUM;
-    let variants: [(&'static str, &'static str, Patterns); 11] = [
+    let variants: [(&'static str, &'static str, Patterns); 5] = [
         (
             "chat-scroll-plain",
-            "A 200-message transcript shaped like ai-chat's ChatView, with none of the patterns of the other chat-scroll-* scenarios, scrolled by the wheel",
+            "A 200-message transcript shaped like ai-chat's ChatView, with none of the patterns of chat-scroll-allsum, scrolled by the wheel",
             none,
-        ),
-        (
-            "chat-scroll-reads-offset",
-            "chat-scroll-plain whose render works out the outline's visible turns from the list after building it, as ChatView does",
-            Patterns {
-                reads_offset: true,
-                ..none
-            },
-        ),
-        (
-            "chat-scroll-reads-at-end",
-            "chat-scroll-plain with height hints, asking before building the list whether it is at its end to fade a back-to-bottom button by an on_next_frame loop, as ChatView does",
-            Patterns {
-                reads_at_end: true,
-                ..none
-            },
-        ),
-        (
-            "chat-scroll-notifies",
-            "chat-scroll-plain wrapped in a ScrollBounce that notifies the view when the wheel pushes past the end, and settles by animation frames",
-            Patterns {
-                notifies: true,
-                ..none
-            },
         ),
         (
             "chat-scroll-animates",
             "chat-scroll-plain where an outline jump's highlight lands on a row every 240 frames and animates for 108 frames by request_animation_frame",
             Patterns {
                 animates: true,
-                ..none
-            },
-        ),
-        (
-            "chat-scroll-sticks",
-            "chat-scroll-plain calling scroll_to_end every render while following the end, the sweep staying at the end for 30 frames",
-            Patterns {
-                sticks: true,
-                ..none
-            },
-        ),
-        (
-            "chat-scroll-parent-writes",
-            "chat-scroll-plain held cached by Allsum's ChatApp and PreviewSplit, ChatApp writing the chat view every render",
-            Patterns {
-                parent_writes: true,
-                ..none
-            },
-        ),
-        (
-            "chat-scroll-chrome",
-            "chat-scroll-plain with ChatView's composer write, bottom fade, GPUI Kit scrollbar and measuring canvas",
-            Patterns {
-                chrome: true,
                 ..none
             },
         ),
@@ -985,7 +938,7 @@ pub fn scenarios() -> Vec<Box<dyn Scenario>> {
         ),
         (
             "chat-scroll-allsum",
-            "Allsum's chat page: every pattern of the other chat-scroll-* scenarios with ChatView's composer, fade, scrollbar and measuring canvas, scrolled by a trackpad",
+            "Allsum's chat page: an outline read, a back-to-bottom fade, a ScrollBounce, outline-jump highlights, sticking to the end, Allsum's ChatApp and PreviewSplit, and ChatView's composer, fade, scrollbar and measuring canvas, scrolled by a trackpad",
             allsum,
         ),
         (

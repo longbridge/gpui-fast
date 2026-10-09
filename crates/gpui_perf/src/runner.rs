@@ -1045,7 +1045,7 @@ mod tests {
     /// view, and what it paints moves.
     #[test]
     fn scroll_scenarios_scroll_with_the_wheel() {
-        const NAMES: [&str; 18] = [
+        const NAMES: [&str; 12] = [
             "scroll-child-view",
             "scroll-same-view",
             "scroll-uniform-list",
@@ -1054,13 +1054,7 @@ mod tests {
             "chat-scroll",
             "chat-scroll-no-button",
             "chat-scroll-plain",
-            "chat-scroll-reads-offset",
-            "chat-scroll-reads-at-end",
-            "chat-scroll-notifies",
             "chat-scroll-animates",
-            "chat-scroll-sticks",
-            "chat-scroll-parent-writes",
-            "chat-scroll-chrome",
             "chat-scroll-trackpad",
             "chat-scroll-allsum",
             "chat-scroll-allsum-wheel",
