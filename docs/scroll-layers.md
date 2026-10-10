@@ -137,7 +137,11 @@ Rows keep their layout nodes: each row the layer holds keeps the keys its
 layout claimed (and only its own, though a `list` lays out every row it shows
 before it prepaints the first), and a row's nodes outlive it for 240 frames
 after it leaves, so scrolling back over it reuses them and the measurements
-they carry instead of shaping its text again.
+they carry instead of shaping its text again. That holds for the nodes of a
+view in the row too, which a row that moved lays out again as the list
+prepaints it, outside the row's own layout: `chat-drag`, dragging a
+transcript's scrollbar back over rows it showed moments before, lays none of
+them out afresh.
 
 ## Keeping pixels and coordinates true
 

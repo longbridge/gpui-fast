@@ -226,11 +226,14 @@ struct RetainedNode {
     /// The sizes Taffy has taken from the node since it was last dirtied,
     /// for a new measurement to be checked against. See [`MeasureLog`].
     measure_log: Option<Rc<MeasureLog>>,
-    /// Whether the node was last claimed laying out a list row, and is kept
-    /// for [`LIST_ROW_NODE_LINGER_FRAMES`] after it goes unclaimed. A list
-    /// lays out only the rows it shows, or, on a scroll layer, those it
-    /// paints ahead of the viewport, so a row scrolled out and back in again
-    /// would otherwise be laid out, and its text shaped, from scratch.
+    /// Whether the node was claimed laying out a list row, and is kept for
+    /// [`LIST_ROW_NODE_LINGER_FRAMES`] after it goes unclaimed. A list lays
+    /// out only the rows it shows, or, on a scroll layer, those it paints
+    /// ahead of the viewport, so a row scrolled out and back in again would
+    /// otherwise be laid out, and its text shaped, from scratch. It stays
+    /// set when the node is claimed again elsewhere: a view in a row that
+    /// moved is laid out again as the list prepaints the row, outside the
+    /// row's own layout, and its nodes are still the row's.
     lingers: bool,
 }
 
@@ -389,7 +392,7 @@ impl TaffyLayoutEngine {
             return Claim::Unkeyed;
         }
         node.claimed_in_frame = frame;
-        node.lingers = retention.list_rows > 0;
+        node.lingers |= retention.list_rows > 0;
         retention.claimed_this_frame += 1;
         retention.stats.nodes_reused += 1;
         if retention.open_key_recordings > 0 {

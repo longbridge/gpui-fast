@@ -26,6 +26,14 @@
 //!   to its end, to show a "back to bottom" button, which it fades in and
 //!   out a step a frame; `chat-scroll-no-button` has no button, to tell what
 //!   it costs.
+//!
+//! `chat-drag` drags the transcript's scrollbar instead, as a user drags it
+//! through a long session: from the end to the top and back, in
+//! [`DRAG_FRAMES`] frames each way, so every frame jumps hundreds of pixels.
+//! It does what a scrollbar component does on every pointer move: sets the
+//! list's offset from the scrollbar and notifies the view the scrollbar is
+//! drawn in, the one holding the list. Its list measures only the rows it
+//! shows, estimating the others' heights, as the desktop client's does.
 
 use gpui::{
     AnyElement, AnyView, App, Context, Entity, FontWeight, Hsla, ListAlignment, ListState,
@@ -46,6 +54,12 @@ const FRAMES_PER_SWEEP: usize = 120;
 /// How often the view holding the transcript is notified for something
 /// else, in frames: every two seconds at 60 frames a second.
 const NOTIFY_EVERY_FRAMES: usize = 120;
+/// Frames `chat-drag` takes to drag the scrollbar from one end to the other:
+/// a second and a half at 60 frames a second.
+const DRAG_FRAMES: usize = 90;
+/// The height `chat-drag`'s list gives a row it has not measured, as the
+/// desktop client's does.
+const MESSAGE_HEIGHT_HINT: f32 = 160.;
 
 fn color(hue: f32, saturation: f32, lightness: f32) -> Hsla {
     hsla(hue / 360., saturation, lightness, 1.)
@@ -318,8 +332,15 @@ pub struct ComposerInput {
 const FADE_STEP: f32 = 0.125;
 
 impl Transcript {
-    fn new(back_to_bottom: bool, cx: &mut Context<Self>) -> Self {
-        let list_state = ListState::new(MESSAGES, ListAlignment::Top, px(OVERDRAW)).measure_all();
+    /// A transcript whose list measures every row, or, with `measure_all`
+    /// off, only the rows it shows, estimating the others' heights.
+    fn new(back_to_bottom: bool, measure_all: bool, cx: &mut Context<Self>) -> Self {
+        let list_state = ListState::new(MESSAGES, ListAlignment::Top, px(OVERDRAW));
+        let list_state = if measure_all {
+            list_state.measure_all()
+        } else {
+            list_state.with_uniform_item_height(px(MESSAGE_HEIGHT_HINT))
+        };
         let view = cx.entity().downgrade();
         list_state.set_scroll_handler(move |_, _, cx| {
             let view = view.clone();
@@ -541,28 +562,84 @@ impl Scenario for ChatScroll {
 
     fn build(&self, _: &mut Window, cx: &mut App) -> AnyView {
         let back_to_bottom = self.back_to_bottom;
-        cx.new(|cx| Transcript::new(back_to_bottom, cx)).into()
+        cx.new(|cx| Transcript::new(back_to_bottom, true, cx))
+            .into()
     }
 
     fn step(&self, root: &AnyView, frame: usize, window: &mut Window, cx: &mut App) {
-        // The bodies that rendered for the first time are parsed now.
         if let Ok(transcript) = root.clone().downcast::<Transcript>() {
-            // The view is notified now and then for something the transcript
-            // does not show, as a client's is by a task it runs.
-            if frame % NOTIFY_EVERY_FRAMES == NOTIFY_EVERY_FRAMES / 2 {
-                transcript.update(cx, |_, cx| cx.notify());
-            }
-            let bodies = transcript.read(cx).bodies.clone();
-            for body in bodies {
-                if body.read(cx).rendered && !body.read(cx).parsed {
-                    body.update(cx, |body, cx| {
-                        body.parsed = true;
-                        cx.notify();
-                    });
-                }
-            }
+            run_background(&transcript, frame, cx);
         }
         window.dispatch_event(wheel(frame), cx);
+    }
+}
+
+/// What happens to the transcript besides scrolling: the view is notified
+/// now and then for something the transcript does not show, as a client's
+/// is by a task it runs, and the bodies that rendered for the first time are
+/// parsed.
+fn run_background(transcript: &Entity<Transcript>, frame: usize, cx: &mut App) {
+    if frame % NOTIFY_EVERY_FRAMES == NOTIFY_EVERY_FRAMES / 2 {
+        transcript.update(cx, |_, cx| cx.notify());
+    }
+    let bodies = transcript.read(cx).bodies.clone();
+    for body in bodies {
+        if body.read(cx).rendered && !body.read(cx).parsed {
+            body.update(cx, |body, cx| {
+                body.parsed = true;
+                cx.notify();
+            });
+        }
+    }
+}
+
+/// How far down the transcript `chat-drag` has dragged its scrollbar at
+/// `frame`, from 0 at the top to 1 at the end: up from the end over
+/// [`DRAG_FRAMES`] frames, back down as many, and again.
+fn drag_position(frame: usize) -> f32 {
+    let along = (frame % DRAG_FRAMES) as f32 / (DRAG_FRAMES - 1) as f32;
+    if (frame / DRAG_FRAMES).is_multiple_of(2) {
+        1. - along
+    } else {
+        along
+    }
+}
+
+struct ChatDrag;
+
+impl Scenario for ChatDrag {
+    fn name(&self) -> &'static str {
+        "chat-drag"
+    }
+
+    fn description(&self) -> &'static str {
+        "The chat transcript of chat-scroll, measuring only the rows it shows, its scrollbar dragged from the end to the top and back"
+    }
+
+    fn build(&self, _: &mut Window, cx: &mut App) -> AnyView {
+        cx.new(|cx| Transcript::new(true, false, cx)).into()
+    }
+
+    fn step(&self, root: &AnyView, frame: usize, _: &mut Window, cx: &mut App) {
+        let Ok(transcript) = root.clone().downcast::<Transcript>() else {
+            return;
+        };
+        run_background(&transcript, frame, cx);
+        let list_state = transcript.read(cx).list_state.clone();
+        // A drag starts at either end and ends at the other, as the pointer
+        // is pressed on the thumb and released.
+        if frame.is_multiple_of(DRAG_FRAMES) {
+            list_state.scrollbar_drag_ended();
+            list_state.scrollbar_drag_started();
+        }
+        let max_offset = list_state.max_offset_for_scrollbar().y;
+        list_state.set_offset_from_scrollbar(point(px(0.), -max_offset * drag_position(frame)));
+        // The view holding the list takes the drag in as it renders: it no
+        // longer follows the transcript's end. The scrollbar notifies it.
+        transcript.update(cx, |transcript, cx| {
+            transcript.stick_to_bottom = false;
+            cx.notify();
+        });
     }
 }
 
@@ -578,5 +655,6 @@ pub fn scenarios() -> Vec<Box<dyn Scenario>> {
             description: "The chat transcript of chat-scroll without its back-to-bottom button, scrolled the same way",
             back_to_bottom: false,
         }),
+        Box::new(ChatDrag),
     ]
 }

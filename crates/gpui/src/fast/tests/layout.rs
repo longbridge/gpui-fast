@@ -787,3 +787,85 @@ fn a_rebuilt_measured_leaf_measuring_the_same_leaves_its_layout_alone() {
     let (retained, fresh) = from_scratch(&mut cx);
     assert_eq!(retained, fresh);
 }
+
+/// A message's body, a view of its own inside a list row, as a Markdown
+/// view keeps its parsed text in an entity.
+struct ListRowBody {
+    ix: usize,
+}
+
+impl Render for ListRowBody {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .h(px(100.))
+            .child(format!("message {} of the transcript", self.ix))
+    }
+}
+
+/// A transcript: a `list` whose rows each hold a body view.
+struct ListOfViews {
+    list: crate::ListState,
+    bodies: Vec<Entity<ListRowBody>>,
+}
+
+impl Render for ListOfViews {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = cx.entity().downgrade();
+        crate::list(self.list.clone(), move |ix, _, cx| {
+            let body = view.upgrade().map(|view| view.read(cx).bodies[ix].clone());
+            div().children(body).into_any_element()
+        })
+        .size_full()
+    }
+}
+
+/// Moves `window`'s list to `offset_in_item` down row `item_ix` and returns
+/// the layout work that followed. See [`change_and_draw`].
+fn scroll_list_of_views(
+    cx: &mut TestAppContext,
+    window: WindowHandle<ListOfViews>,
+    item_ix: usize,
+    offset_in_item: Pixels,
+) -> LayoutStats {
+    change_and_draw(cx, window, |view| {
+        view.list.scroll_to(crate::ListOffset {
+            item_ix,
+            offset_in_item,
+        })
+    })
+}
+
+/// A view in a list row that moves is laid out again as the list prepaints
+/// the row, outside the row's own layout, where the nodes it claims were
+/// not taken for the row's: once the row scrolled out they were released,
+/// and dragging a scrollbar back over rows laid out moments before laid
+/// every body out, and shaped its text, afresh. They linger as the row's.
+#[test]
+fn a_moved_view_in_a_list_row_keeps_its_nodes_while_the_row_is_out_of_view() {
+    let mut cx = TestAppContext::single();
+    let window = cx.add_window(|_, cx| ListOfViews {
+        list: crate::ListState::new(40, crate::ListAlignment::Top, px(0.)),
+        bodies: (0..40).map(|ix| cx.new(|_| ListRowBody { ix })).collect(),
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.set_view_retention(true);
+        if crate::fast::layers::COMPILED {
+            window.set_scroll_layers(false);
+        }
+        window.resize(size(px(400.), px(200.)));
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    // Rows 10 to 12 are laid out, then move, so that their bodies are
+    // laid out again where the list prepaints them.
+    scroll_list_of_views(&mut cx, window, 10, px(0.));
+    scroll_list_of_views(&mut cx, window, 10, px(30.));
+    // Far enough for them to go unclaimed, and back.
+    scroll_list_of_views(&mut cx, window, 30, px(0.));
+    let back = scroll_list_of_views(&mut cx, window, 10, px(30.));
+    assert_eq!(
+        back.nodes_created, 0,
+        "rows scrolled back into view should find the nodes they had: {back:?}"
+    );
+}
