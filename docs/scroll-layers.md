@@ -66,6 +66,10 @@ drawing as it does without layers, and how to verify and measure layers.
     at its end, as a view keeping its list there calls on every render,
     changes nothing. Nor does `ScrollHandle::scroll_to_bottom` on a handle
     already at its bottom (`fast::layers::scroll_to_bottom`).
+  - A scrollbar dragging a `list` (`ListState::set_offset_from_scrollbar`)
+    scrolls it as a wheel does: the offset it sets is taken for a scroll, not
+    for a change of the list, and the view holding the list, which the
+    scrollbar notifies, draws it from its layer.
 - While accessibility is active, a `div`'s layer keeps the accessibility
   nodes its content added as it was painted, and a composited frame adds
   them again moved by the scroll since, as it does the content's hitboxes.
