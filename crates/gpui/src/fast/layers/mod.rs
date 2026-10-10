@@ -6,6 +6,7 @@
 //! work stream of the plan (docs/superpowers/plans/2026-09-30-scroll-layers.md).
 
 pub(crate) mod background;
+pub(crate) mod hover_freeze;
 pub(crate) mod input;
 pub(crate) mod invalidate;
 pub(crate) mod lists;
@@ -60,6 +61,8 @@ pub(crate) struct WindowLayers {
     pub(crate) window_size: Option<(crate::Size<crate::Pixels>, f32)>,
     /// The wheel event being dispatched, if any.
     pub(crate) wheel: wheel::WheelDispatch,
+    /// When the last wheel event came, for hover to be held still a while.
+    pub(crate) hover_freeze: hover_freeze::HoverFreeze,
 }
 
 impl Default for WindowLayers {
@@ -76,6 +79,7 @@ impl Default for WindowLayers {
             frame: 0,
             window_size: None,
             wheel: wheel::WheelDispatch::default(),
+            hover_freeze: hover_freeze::HoverFreeze::default(),
         }
     }
 }
