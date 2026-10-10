@@ -2451,6 +2451,106 @@ mod list {
         compare_with_layers_off(cx, window, without.into(), &[25.; 24], "scroll up");
     }
 
+    /// A cache a row of a [`DrawCachePage`] fills as it is prepainted and
+    /// painted, as a chart's path cache is.
+    struct DrawCache {
+        drawn: usize,
+    }
+
+    /// A page whose rows each read and write their own [`DrawCache`] as
+    /// they are drawn.
+    struct DrawCachePage {
+        state: ListState,
+        caches: Rc<Vec<Entity<DrawCache>>>,
+        rendered: Rc<RefCell<Vec<usize>>>,
+    }
+
+    impl Render for DrawCachePage {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let rendered = self.rendered.clone();
+            let caches = self.caches.clone();
+            div().size_full().bg(rgb(0xffffff)).child(
+                crate::list(self.state.clone(), move |row, _, _| {
+                    rendered.borrow_mut().push(row);
+                    let (prepaint_cache, paint_cache) = (caches[row].clone(), caches[row].clone());
+                    div()
+                        .w(px(VIEWPORT_WIDTH))
+                        .h(px(row_height(row)))
+                        .bg(row_color(row))
+                        .child(
+                            crate::canvas(
+                                move |_, _, cx| {
+                                    prepaint_cache.update(cx, |cache, _| cache.drawn += 1)
+                                },
+                                move |_, _, _, cx| {
+                                    paint_cache.update(cx, |cache, _| cache.drawn += 1)
+                                },
+                            )
+                            .size_full(),
+                        )
+                        .into_any_element()
+                })
+                .w(px(VIEWPORT_WIDTH))
+                .h(px(VIEWPORT_HEIGHT)),
+            )
+        }
+    }
+
+    fn draw_cache_page(
+        cx: &mut TestAppContext,
+    ) -> (WindowHandle<DrawCachePage>, Rc<RefCell<Vec<usize>>>) {
+        let rendered = Rc::new(RefCell::new(Vec::new()));
+        let log = rendered.clone();
+        let window = cx.add_window(move |_, cx| DrawCachePage {
+            state: ListState::new(1000, ListAlignment::Top, px(0.)).measure_all(),
+            caches: Rc::new(
+                (0..1000)
+                    .map(|_| cx.new(|_| DrawCache { drawn: 0 }))
+                    .collect(),
+            ),
+            rendered: log,
+        });
+        open_at(cx, window.into(), 1.);
+        (window, rendered)
+    }
+
+    /// What a row writes as it is prepainted and painted is its own, as what
+    /// it writes as it renders is: rows filling a cache they read as they
+    /// are drawn are not rendered again for it on every scrolled frame.
+    #[crate::test]
+    fn rows_writing_what_they_read_as_they_are_drawn_keep_the_layer(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let (handle, log) = draw_cache_page(cx);
+        let (without, _) = draw_cache_page(cx);
+        let window: AnyWindowHandle = handle.into();
+        compare_with_layers_off(cx, window, without.into(), &[-20., -20., -15.], "promote");
+        assert_eq!(decision(cx, window), Some(Decision::Composite));
+
+        let extended = extended_frames();
+        for frame in 0..20 {
+            rendered(&log);
+            let composited = compare_with_layers_off(cx, window, without.into(), &[-7.], "scroll");
+            assert_eq!(composited, 1, "frame {frame}");
+            assert_eq!(
+                decision(cx, window),
+                Some(Decision::Composite),
+                "frame {frame}"
+            );
+            let rendered_now = rendered(&log);
+            assert!(
+                rendered_now.len() <= 2,
+                "frame {frame}: a scroll renders only the rows it brings: {rendered_now:?}"
+            );
+        }
+        assert!(extended_frames() - extended >= 20);
+        assert_eq!(
+            with_window(cx, window, |window, _| window.layout_stats().layers_demoted),
+            0
+        );
+    }
+
     /// The width of a column every row of a [`ColumnPage`] is drawn at.
     struct Column {
         width: f32,
