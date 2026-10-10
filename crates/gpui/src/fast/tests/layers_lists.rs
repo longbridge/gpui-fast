@@ -2404,6 +2404,64 @@ mod list {
         compare_with_layers_off(cx, window, without.into(), &[25.; 24], "scroll up");
     }
 
+    /// Drags the scrollbar of `handle`'s list to `y` px down, as GPUI Kit's
+    /// scrollbar does: the offset set, the view holding the list notified.
+    /// Draws the frame that follows.
+    fn drag_scrollbar(cx: &mut TestAppContext, handle: WindowHandle<ListPage>, y: f32) {
+        let window: AnyWindowHandle = handle.into();
+        let frame = with_window(cx, window, |window, _| window.fast_layers.frame);
+        handle
+            .update(cx, |page, _, cx| {
+                page.state
+                    .set_offset_from_scrollbar(crate::point(px(0.), px(-y)));
+                cx.notify();
+            })
+            .unwrap();
+        if with_window(cx, window, |window, _| window.fast_layers.frame) == frame {
+            draw(cx, window);
+        }
+    }
+
+    /// A list whose scrollbar is dragged is drawn from its layer, as after
+    /// a wheel's scroll: the offset the scrollbar sets is taken for a scroll,
+    /// not for a change of the list, and the list renders only the rows the
+    /// drag brings. It draws as without layers.
+    #[crate::test]
+    fn a_list_dragged_by_its_scrollbar_is_composited(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let state = || ListState::new(1000, ListAlignment::Top, px(0.)).measure_all();
+        let (handle, log) = page(cx, state());
+        let (without, _) = page(cx, state());
+        let window: AnyWindowHandle = handle.into();
+        compare_with_layers_off(cx, window, without.into(), &[-20., -20.], "promote");
+        let mut y = 40.;
+        for step in 0..20 {
+            y += 7.;
+            rendered(&log);
+            drag_scrollbar(cx, handle, y);
+            drag_scrollbar(cx, without, y);
+            assert_eq!(
+                decision(cx, window),
+                Some(Decision::Composite),
+                "step {step}"
+            );
+            let rendered_now = rendered(&log);
+            assert!(
+                rendered_now.len() <= 2,
+                "step {step}: a drag renders only the rows it brings: {rendered_now:?}"
+            );
+            let expected = with_window(cx, without.into(), |window, _| {
+                expanded_quads(&window.rendered_frame.scene)
+            });
+            let actual = with_window(cx, window, |window, _| {
+                expanded_quads(&window.rendered_frame.scene)
+            });
+            assert_eq!(actual, expected, "step {step}, dragged to {y}");
+        }
+    }
+
     /// A cache a row of a [`DrawCachePage`] fills as it is prepainted and
     /// painted, as a chart's path cache is.
     struct DrawCache {
