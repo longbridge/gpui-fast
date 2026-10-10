@@ -223,6 +223,22 @@ fn render_row(
     let label = SharedString::from(format!("{container}/{}", row.id));
     div()
         .id(label.clone())
+        .role(accesskit::Role::Row)
+        .aria_label(WORDS[row.word])
+        .when(row.id.is_multiple_of(4), |this| {
+            this.on_a11y_action(accesskit::Action::ScrollIntoView, |_, _, _| {})
+        })
+        .when(row.id.is_multiple_of(5), |this| {
+            this.a11y_synthetic_children(|builder| {
+                let id = builder.synthetic_node_id("mark");
+                let mut node = accesskit::Node::new(accesskit::Role::Image);
+                // Where its row is, as an editor reports where its text runs are.
+                if let Some(bounds) = builder.parent_node().bounds() {
+                    node.set_bounds(bounds);
+                }
+                builder.push_child(id, node);
+            })
+        })
         .relative()
         .flex()
         .flex_row()
@@ -263,8 +279,58 @@ fn render_row(
                     .push(format!("click {label} at {:?}", event.position()))
             }
         })
+        .when(row.id % 4 == 1, |this| this.child(framed(row.id)))
         .child(probe(label, log.clone()))
         .into_any_element()
+}
+
+/// A rounded frame as GPUI Kit draws a table's: paths filling its corner
+/// notches, painted under the frame's border, which its element paints
+/// after its children, and under a swatch drawn after the frame. Every
+/// other one has a path nothing draws over too.
+fn framed(id: u64) -> impl IntoElement {
+    div()
+        .relative()
+        .w(px(24.))
+        .h(px(10.))
+        .border_1()
+        .border_color(PALETTE[3])
+        .rounded(px(3.))
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    for (corner, x, y) in [
+                        (bounds.origin, 1., 1.),
+                        (bounds.top_right(), -1., 1.),
+                        (bounds.bottom_right(), -1., -1.),
+                    ] {
+                        let mut path = crate::Path::new(corner);
+                        path.line_to(corner + point(px(3. * x), px(0.)));
+                        path.curve_to(corner + point(px(0.), px(3. * y)), corner);
+                        path.line_to(corner);
+                        window.paint_path(path, PALETTE[4]);
+                    }
+                    if id % 8 == 1 {
+                        let origin = bounds.origin + point(px(8.), px(2.));
+                        let mut path = crate::Path::new(origin);
+                        path.line_to(origin + point(px(6.), px(0.)));
+                        path.line_to(origin + point(px(0.), px(5.)));
+                        window.paint_path(path, PALETTE[2]);
+                    }
+                },
+            )
+            .absolute()
+            .size_full(),
+        )
+        .child(
+            div()
+                .absolute()
+                .right_0()
+                .w(px(5.))
+                .h(px(4.))
+                .bg(PALETTE[0]),
+        )
 }
 
 /// Records, for every mouse down over it, where it happened and the bounds
@@ -306,6 +372,7 @@ impl Render for ContentView {
         let field_bounds = self.field_bounds.clone();
         let field = div()
             .id("field")
+            .role(accesskit::Role::TextInput)
             .relative()
             .h(px(20.))
             .bg(PALETTE[1])
@@ -407,6 +474,7 @@ impl Render for LayerOracleView {
                 panel(0).child(
                     div()
                         .id("a")
+                        .role(accesskit::Role::ScrollView)
                         .size_full()
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll_a)
@@ -417,6 +485,7 @@ impl Render for LayerOracleView {
                 panel(1).child(
                     div()
                         .id("b")
+                        .role(accesskit::Role::ScrollView)
                         .size_full()
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll_b)
@@ -728,6 +797,7 @@ struct Observed {
     drawn: Vec<String>,
     hits: Vec<String>,
     log: Vec<String>,
+    a11y: Option<(String, Vec<super::a11y::A11yEntry>)>,
 }
 
 fn draw(
@@ -777,6 +847,9 @@ fn draw(
             drawn: drawn(&frame.scene),
             hits,
             log,
+            a11y: window
+                .is_a11y_active()
+                .then(|| super::a11y::a11y_snapshot(window)),
         }
     })
     .unwrap()
@@ -822,6 +895,9 @@ struct Coverage {
     /// held, and rows they rendered again because their hovers changed.
     list_frames: usize,
     rows_rendered_for_hover: usize,
+    /// Frames that composited a layer drawing paths, and what was drawn
+    /// over them, over its tiles.
+    overlaid: usize,
 }
 
 /// Drives a window with layers and one without through one random history
@@ -833,6 +909,7 @@ fn run(
     steps: usize,
     containers: Range<usize>,
     keep_turning: f64,
+    a11y: bool,
 ) -> Coverage {
     let mut cx = TestAppContext::with_text_system(Arc::new(GlyphBoxTextSystem(NoopTextSystem)));
     let layered = cx.add_window(|_, cx| LayerOracleView::new(cx));
@@ -841,6 +918,9 @@ fn run(
         cx.simulate_window_scale_factor_change(window.into(), scale_factor);
         cx.update_window(window.into(), |_, window, cx| {
             window.set_scroll_layers(layers);
+            if a11y {
+                window.set_a11y_active_for_tests(true);
+            }
             window.draw(cx).clear(cx);
             window.reset_layout_stats();
         })
@@ -882,6 +962,17 @@ fn run(
 
         let expected = draw(&mut cx, plain, &points);
         let actual = draw(&mut cx, layered, &points);
+        coverage.overlaid += cx
+            .update_window(layered.into(), |_, window, _| {
+                let composited = &window.rendered_frame.scene.layers.frames;
+                window.fast_layers.layers.values().any(|layer| {
+                    layer.record.as_ref().is_some_and(|record| {
+                        !record.overlay.is_empty()
+                            && composited.iter().any(|frame| frame.key == layer.key)
+                    })
+                })
+            })
+            .unwrap() as usize;
         let failure = if actual.log != expected.log {
             Some(format!(
                 "listeners saw different events {}",
@@ -897,6 +988,14 @@ fn run(
                 "hit tests differ {}",
                 first_difference(&actual.hits, &expected.hits)
             ))
+        } else if actual.a11y.is_some() != a11y || expected.a11y.is_some() != a11y {
+            Some("accessibility is not active".into())
+        } else if let (Some(actual), Some(expected)) = (&actual.a11y, &expected.a11y) {
+            // To a thousandth of a device pixel, as hitboxes: a layer's
+            // nodes are moved, which can differ in their last bits from
+            // nodes laid out where they lie now.
+            super::a11y::a11y_difference(actual, expected, 1e-3)
+                .map(|difference| format!("the accessibility trees differ:\n{difference}"))
         } else {
             None
         };
@@ -944,11 +1043,18 @@ fn run(
 
 /// Runs three random histories at scale factors 1 and 1.25, as [`run`]
 /// does, and adds up what they went through.
-fn run_all(containers: Range<usize>, keep_turning: f64) -> Coverage {
+fn run_all(containers: Range<usize>, keep_turning: f64, a11y: bool) -> Coverage {
     let mut total = Coverage::default();
     for seed in 0..3 {
         for scale_factor in [1., 1.25] {
-            let coverage = run(seed, scale_factor, 300, containers.clone(), keep_turning);
+            let coverage = run(
+                seed,
+                scale_factor,
+                300,
+                containers.clone(),
+                keep_turning,
+                a11y,
+            );
             total.composited += coverage.composited;
             total.clicks += coverage.clicks;
             total.downs += coverage.downs;
@@ -956,6 +1062,7 @@ fn run_all(containers: Range<usize>, keep_turning: f64) -> Coverage {
             total.scrolled += coverage.scrolled;
             total.list_frames += coverage.list_frames;
             total.rows_rendered_for_hover += coverage.rows_rendered_for_hover;
+            total.overlaid += coverage.overlaid;
         }
     }
     total
@@ -963,7 +1070,7 @@ fn run_all(containers: Range<usize>, keep_turning: f64) -> Coverage {
 
 #[test]
 fn frames_drawn_through_scroll_layers_match_frames_drawn_without() {
-    let total = run_all(0..CONTAINERS, 0.7);
+    let total = run_all(0..CONTAINERS, 0.7, false);
     assert!(
         total.clicks > 0 && total.downs > 0 && total.keys > 0,
         "no listener saw a click, a mouse down and a key press, so their positions \
@@ -978,6 +1085,10 @@ fn frames_drawn_through_scroll_layers_match_frames_drawn_without() {
             "no frame composited a scroll layer over {} scrolled frames",
             total.scrolled
         );
+        assert!(
+            total.overlaid > 0,
+            "no frame composited a layer with paths drawn over its tiles"
+        );
     }
 }
 
@@ -986,7 +1097,7 @@ fn frames_drawn_through_scroll_layers_match_frames_drawn_without() {
 /// and render again the rows whose hover changes.
 #[test]
 fn list_frames_drawn_through_scroll_layers_match_frames_drawn_without() {
-    let total = run_all(2..CONTAINERS, 0.9);
+    let total = run_all(2..CONTAINERS, 0.9, false);
     assert!(
         total.clicks > 0 && total.downs > 0,
         "no listener saw a click and a mouse down, so their positions were not compared"
@@ -998,6 +1109,25 @@ fn list_frames_drawn_through_scroll_layers_match_frames_drawn_without() {
              for its hover ({})",
             total.list_frames,
             total.rows_rendered_for_hover
+        );
+        assert!(
+            total.overlaid > 0,
+            "no frame composited a list's layer with paths drawn over its tiles"
+        );
+    }
+}
+
+/// The same with accessibility active: the accessibility trees must match
+/// too, a composited layer adding its content's nodes moved by the scroll.
+#[test]
+fn accessibility_trees_built_through_scroll_layers_match_trees_built_without() {
+    let total = run_all(0..CONTAINERS, 0.7, true);
+    assert!(total.scrolled > 0, "nothing ever scrolled");
+    if crate::fast::layers::COMPILED {
+        assert!(
+            total.composited > 0,
+            "no frame composited a scroll layer over {} scrolled frames",
+            total.scrolled
         );
     }
 }

@@ -26,6 +26,16 @@
 //!   to its end, to show a "back to bottom" button, which it fades in and
 //!   out a step a frame; `chat-scroll-no-button` has no button, to tell what
 //!   it costs.
+//!
+//! `chat-app-sidebar-scroll` puts the transcript, mounted as a cached view,
+//! beside a sidebar of recent chats in a window view, as a chat client's
+//! window does, and scrolls the sidebar. The window view renders the sidebar
+//! itself, and on every render writes into the transcript whether it shows
+//! and writes the recent chats into a model the sidebar's rows read, which
+//! each row writes too as it renders, without notifying either.
+//!
+//! `scenarios::chat_patterns` builds transcripts mirroring real chat views
+//! from this one's message bodies.
 
 use gpui::{
     AnyElement, AnyView, App, Context, Entity, FontWeight, Hsla, ListAlignment, ListState,
@@ -47,27 +57,27 @@ const FRAMES_PER_SWEEP: usize = 120;
 /// else, in frames: every two seconds at 60 frames a second.
 const NOTIFY_EVERY_FRAMES: usize = 120;
 
-fn color(hue: f32, saturation: f32, lightness: f32) -> Hsla {
+pub(crate) fn color(hue: f32, saturation: f32, lightness: f32) -> Hsla {
     hsla(hue / 360., saturation, lightness, 1.)
 }
 
-fn text_color() -> Hsla {
+pub(crate) fn text_color() -> Hsla {
     color(220., 0.2, 0.15)
 }
 
-fn muted() -> Hsla {
+pub(crate) fn muted() -> Hsla {
     color(220., 0.1, 0.45)
 }
 
-fn border() -> Hsla {
+pub(crate) fn border() -> Hsla {
     color(220., 0.13, 0.88)
 }
 
-fn code_background() -> Hsla {
+pub(crate) fn code_background() -> Hsla {
     color(220., 0.2, 0.95)
 }
 
-fn link() -> Hsla {
+pub(crate) fn link() -> Hsla {
     color(215., 0.8, 0.45)
 }
 
@@ -195,8 +205,19 @@ fn blocks(ix: usize) -> Vec<Block> {
 pub struct MessageBody {
     blocks: Vec<Block>,
     /// Whether the body rendered, and whether it was parsed since.
-    rendered: bool,
-    parsed: bool,
+    pub(crate) rendered: bool,
+    pub(crate) parsed: bool,
+}
+
+impl MessageBody {
+    /// The body of message `ix`, not rendered yet.
+    pub(crate) fn new(ix: usize) -> Self {
+        Self {
+            blocks: blocks(ix),
+            rendered: false,
+            parsed: false,
+        }
+    }
 }
 
 fn styled_paragraph(text: &SharedString, runs: &[(std::ops::Range<usize>, Style)]) -> StyledText {
@@ -305,13 +326,17 @@ pub struct Transcript {
     fading: bool,
     /// The composer's input state, which rendering writes its options into.
     composer: Entity<ComposerInput>,
+    /// Whether the transcript shows, which the window holding it writes
+    /// into it as it renders. See [`SidebarChatApp`]. Always true: it exists
+    /// so the window's write has something the transcript reads.
+    active: bool,
 }
 
 /// What an input component keeps of the options it is rendered with.
 #[derive(Default)]
 pub struct ComposerInput {
-    placeholder: SharedString,
-    disabled: bool,
+    pub(crate) placeholder: SharedString,
+    pub(crate) disabled: bool,
 }
 
 /// How much the "back to bottom" button fades in or out per frame.
@@ -351,7 +376,13 @@ impl Transcript {
             button_opacity: 0.,
             fading: false,
             composer: cx.new(|_| ComposerInput::default()),
+            active: true,
         }
+    }
+
+    /// Notes whether the transcript shows, without notifying it.
+    fn set_active(&mut self, active: bool) {
+        self.active = active;
     }
 
     /// Whether the "back to bottom" button is to show: the transcript is
@@ -488,7 +519,7 @@ impl Render for Transcript {
                     .p_3()
                     .rounded_xl()
                     .border_1()
-                    .border_color(border())
+                    .border_color(if self.active { border() } else { muted() })
                     .bg(gpui::white())
                     .text_color(muted())
                     .child(placeholder),
@@ -566,6 +597,146 @@ impl Scenario for ChatScroll {
     }
 }
 
+/// How many chats the sidebar lists.
+const RECENT_CHATS: usize = 400;
+/// How wide the sidebar is, in logical pixels.
+const SIDEBAR_WIDTH: f32 = 280.;
+
+/// The recent chats the window hands its sidebar's rows, as it renders.
+pub struct RecentChats {
+    titles: Vec<SharedString>,
+    selected: usize,
+    /// How many rows were drawn: each row notes it as it renders.
+    rows_drawn: usize,
+}
+
+/// A generic chat client's window: a sidebar of recent chats it renders
+/// itself, and the transcript of the chat selected, mounted as a cached view.
+/// `chat_patterns::ChatApp` is the one mirroring Allsum's window.
+pub struct SidebarChatApp {
+    sidebar: ListState,
+    recent: Entity<RecentChats>,
+    transcript: Entity<Transcript>,
+}
+
+impl SidebarChatApp {
+    fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            sidebar: ListState::new(RECENT_CHATS, ListAlignment::Top, px(200.)),
+            recent: cx.new(|_| RecentChats {
+                titles: Vec::new(),
+                selected: 0,
+                rows_drawn: 0,
+            }),
+            transcript: cx.new(|cx| Transcript::new(false, cx)),
+        }
+    }
+
+    fn row(recent: &Entity<RecentChats>, ix: usize, cx: &mut App) -> AnyElement {
+        let (title, selected) = recent.update(cx, |recent, _| {
+            recent.rows_drawn += 1;
+            (recent.titles[ix].clone(), recent.selected == ix)
+        });
+        div()
+            .id(("chat", ix))
+            .w_full()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .when(selected, |this| this.bg(code_background()))
+            .hover(|style| style.bg(border()))
+            .child(div().text_sm().text_color(text_color()).child(title))
+            .child(div().text_xs().text_color(muted()).child(sentence(ix, 5)))
+            .into_any_element()
+    }
+}
+
+impl Render for SidebarChatApp {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Written on every render, as the window hands its panes what they
+        // show, without notifying them.
+        self.transcript
+            .update(cx, |transcript, _| transcript.set_active(true));
+        self.recent.update(cx, |recent, _| {
+            if recent.titles.len() != RECENT_CHATS {
+                recent.titles = (0..RECENT_CHATS)
+                    .map(|ix| format!("Chat {ix}: {}", sentence(ix * 3, 3)).into())
+                    .collect();
+            }
+            recent.selected = 0;
+        });
+        let recent = self.recent.clone();
+        div()
+            .flex()
+            .size_full()
+            .bg(gpui::white())
+            .child(
+                div()
+                    .w(px(SIDEBAR_WIDTH))
+                    .h_full()
+                    .border_r_1()
+                    .border_color(border())
+                    .child(
+                        list(self.sidebar.clone(), move |ix, _, cx| {
+                            Self::row(&recent, ix, cx)
+                        })
+                        .size_full(),
+                    ),
+            )
+            .child(
+                div().flex_1().h_full().child(
+                    self.transcript
+                        .clone()
+                        .cached(gpui::StyleRefinement::default().size_full()),
+                ),
+            )
+    }
+}
+
+/// The wheel event of frame `frame`, over the sidebar: down for
+/// `FRAMES_PER_SWEEP` frames, back up as many, and again.
+fn sidebar_wheel(frame: usize) -> PlatformInput {
+    let down = (frame / FRAMES_PER_SWEEP).is_multiple_of(2);
+    let delta = if down { -WHEEL_STEP } else { WHEEL_STEP };
+    PlatformInput::ScrollWheel(ScrollWheelEvent {
+        position: point(px(SIDEBAR_WIDTH / 2.), px(450.)),
+        delta: ScrollDelta::Pixels(point(px(0.), px(delta))),
+        modifiers: Modifiers::default(),
+        touch_phase: TouchPhase::Moved,
+    })
+}
+
+struct ChatAppSidebarScroll;
+
+impl Scenario for ChatAppSidebarScroll {
+    fn name(&self) -> &'static str {
+        "chat-app-sidebar-scroll"
+    }
+
+    fn description(&self) -> &'static str {
+        "A chat client's window scrolling its sidebar of recent chats, writing into the cached transcript beside it and into the model its rows read on every render"
+    }
+
+    fn build(&self, _: &mut Window, cx: &mut App) -> AnyView {
+        cx.new(SidebarChatApp::new).into()
+    }
+
+    fn step(&self, root: &AnyView, frame: usize, window: &mut Window, cx: &mut App) {
+        if let Ok(app) = root.clone().downcast::<SidebarChatApp>() {
+            let bodies = app.read(cx).transcript.read(cx).bodies.clone();
+            for body in bodies {
+                if body.read(cx).rendered && !body.read(cx).parsed {
+                    body.update(cx, |body, cx| {
+                        body.parsed = true;
+                        cx.notify();
+                    });
+                }
+            }
+        }
+        window.dispatch_event(sidebar_wheel(frame), cx);
+    }
+}
+
 pub fn scenarios() -> Vec<Box<dyn Scenario>> {
     vec![
         Box::new(ChatScroll {
@@ -578,5 +749,6 @@ pub fn scenarios() -> Vec<Box<dyn Scenario>> {
             description: "The chat transcript of chat-scroll without its back-to-bottom button, scrolled the same way",
             back_to_bottom: false,
         }),
+        Box::new(ChatAppSidebarScroll),
     ]
 }

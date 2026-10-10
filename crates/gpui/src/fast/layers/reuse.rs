@@ -37,6 +37,7 @@ pub(crate) fn carry_prepaint(
     };
     let delta = scroll_offset - record.scroll_offset;
     let range = record.prepaint_range.clone();
+    let a11y = record.a11y.clone();
     let input = &mut layer.input;
     let moved = delta != input.stale;
     input.stale = delta;
@@ -44,7 +45,16 @@ pub(crate) fn carry_prepaint(
     input.handle_offset.set(delta);
     // The hitboxes are the layer's, lent to the carry while it runs.
     let hitboxes = std::mem::take(&mut input.hitboxes);
-    let carried = carry_prepaint_records(window, &range, &hitboxes, delta, viewport, !moved, true);
+    let carried = carry_prepaint_records(
+        window,
+        &range,
+        &hitboxes,
+        a11y.as_deref(),
+        delta,
+        viewport,
+        !moved,
+        true,
+    );
     if let Some(layer) = window.fast_layers.layers.get_mut(id) {
         layer.input.hitboxes = hitboxes;
         if let Some(record) = layer.record.as_mut() {
@@ -59,12 +69,15 @@ pub(crate) fn carry_prepaint(
 /// of the range, moved by `delta` and clipped to `viewport`; its tooltips if
 /// `tooltips`, a tooltip showing where its element was when it was
 /// requested; its element states if `element_states`, which are dropped
-/// otherwise; its line layouts and dispatch nodes.
+/// otherwise; its line layouts and dispatch nodes; and the accessibility
+/// nodes `a11y` kept of it, moved by `delta`.
+#[allow(clippy::too_many_arguments)]
 #[inline]
 pub(crate) fn carry_prepaint_records(
     window: &mut Window,
     range: &Range<PrepaintStateIndex>,
     hitboxes: &[Hitbox],
+    a11y: Option<&crate::fast::a11y::A11yStretch>,
     delta: Point<Pixels>,
     viewport: Bounds<Pixels>,
     tooltips: bool,
@@ -101,6 +114,7 @@ pub(crate) fn carry_prepaint_records(
     if subtree.contains_focus() {
         next.focus = window.focus;
     }
+    crate::fast::a11y::carry(window, a11y, delta);
     // Content that deferred draws is never composited (spec §6.5).
     debug_assert_eq!(
         range.start.deferred_draws_index,
@@ -155,8 +169,8 @@ pub(crate) fn carry_paint_records(
     let next = &mut window.next_frame;
     let rendered = &mut window.rendered_frame;
     next.window_control_hitboxes.extend(
-        rendered.window_control_hitboxes[range.start.fast_window_control_hitboxes_index
-            ..range.end.fast_window_control_hitboxes_index]
+        rendered.window_control_hitboxes
+            [range.start.fast.window_control_hitboxes..range.end.fast.window_control_hitboxes]
             .iter()
             .map(|(area, hitbox)| {
                 let moved = LayerInput::hitboxes_at(std::slice::from_ref(hitbox), delta, viewport)
@@ -193,6 +207,9 @@ pub(crate) fn carry_paint_records(
         &rendered.tab_stops.insertion_history
             [range.start.tab_handle_index..range.end.tab_handle_index],
     );
+    crate::fast::a11y::reuse_paint(window, range);
+    let next = &mut window.next_frame;
+    let rendered = &mut window.rendered_frame;
     #[cfg(any(test, feature = "test-support"))]
     for (selector, bounds) in
         &rendered.debug_bounds_records[range.start.debug_bounds_index..range.end.debug_bounds_index]
@@ -273,8 +290,8 @@ pub(crate) fn follow_paint(window: &mut Window, from: &Range<PaintIndex>, to: &P
     let inside = |range: &Range<PaintIndex>| {
         let (a, b) = (&range.start, &range.end);
         let (c, d) = (&from.start, &from.end);
-        a.fast_window_control_hitboxes_index >= c.fast_window_control_hitboxes_index
-            && b.fast_window_control_hitboxes_index <= d.fast_window_control_hitboxes_index
+        a.fast.window_control_hitboxes >= c.fast.window_control_hitboxes
+            && b.fast.window_control_hitboxes <= d.fast.window_control_hitboxes
             && a.mouse_listeners_index >= c.mouse_listeners_index
             && b.mouse_listeners_index <= d.mouse_listeners_index
             && a.input_handlers_index >= c.input_handlers_index
