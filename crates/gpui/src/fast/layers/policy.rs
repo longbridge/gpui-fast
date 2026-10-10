@@ -209,7 +209,12 @@ pub(crate) fn decide(
     } else {
         1
     };
-    let mut demoted_until = policy.demoted_until;
+    // A list's layer replays its rows (see
+    // [`crate::fast::layers::paint::replays`]): it costs no more than drawing
+    // them without it, so it is not demoted for what it costs or for changing
+    // often, and has no tiles to keep within budget.
+    let replayed = layer.rows.list;
+    let mut demoted_until = if replayed { None } else { policy.demoted_until };
     let changed_while_demoted =
         demoted_until.is_some() && invalidate::changed_without_layer(window, cx, id);
     if changed_while_demoted {
@@ -228,7 +233,7 @@ pub(crate) fn decide(
     // composite.
     let mut changed = false;
     let mut rerendered = false;
-    let mut demote = layer.record.is_some() && policy.work.over_budget();
+    let mut demote = layer.record.is_some() && !replayed && policy.work.over_budget();
     let mut ineligible = false;
     let mut owner_animating = false;
     let decision = match &layer.record {
@@ -238,7 +243,7 @@ pub(crate) fn decide(
             owner_animating = true;
             Decision::Bypass
         }
-        Some(record) if !fits(window, record) => {
+        Some(record) if !replayed && !fits(window, record) => {
             demote = true;
             Decision::Bypass
         }
@@ -289,7 +294,7 @@ pub(crate) fn decide(
         .unwrap_or_default();
     if changed {
         history |= 1;
-        demote |= history.count_ones() >= DEMOTE_AFTER_CHANGED_FRAMES;
+        demote |= !replayed && history.count_ones() >= DEMOTE_AFTER_CHANGED_FRAMES;
     }
     let decision = if demote { Decision::Bypass } else { decision };
 

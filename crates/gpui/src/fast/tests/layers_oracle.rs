@@ -1110,10 +1110,6 @@ fn list_frames_drawn_through_scroll_layers_match_frames_drawn_without() {
             total.list_frames,
             total.rows_rendered_for_hover
         );
-        assert!(
-            total.overlaid > 0,
-            "no frame composited a list's layer with paths drawn over its tiles"
-        );
     }
 }
 

@@ -2408,7 +2408,7 @@ pub(crate) fn begin_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Gl
     let region = rows_region(frame);
     let has_rows = !frame.slots.is_empty();
     let background = if has_rows {
-        paint::bake_background(window)
+        Some(replayed_background(window))
     } else {
         None
     };
@@ -2612,7 +2612,7 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
                     return;
                 }
                 // Rows are dropped: the content changes.
-                paint.background = paint::bake_background(window);
+                paint.background = Some(replayed_background(window));
             }
             // No row to paint: the layer holds nothing.
             Mode::Repaint => {
@@ -2879,28 +2879,10 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
     let work = (rendered_height / shown_height.max(1.))
         .max(rendered_operations as f32 / visible_operations.max(1) as f32);
 
-    // The content: the rows in order.
-    // A row's overlay is drawn over the tiles, so over every later row too:
-    // when a later row draws over it, the content is drawn into the frame.
-    let has_paths = rows.rows.values().enumerate().any(|(ix, row)| {
-        let Some(reach) = crate::fast::layers::overlay::OverlayReach::of(&row.overlay) else {
-            return false;
-        };
-        rows.rows.values().skip(ix + 1).any(|later| {
-            reach.may_meet(later.part.bounds)
-                && reach.drawn_over(&later.part.scene.paint_operations)
-        })
-    });
-    let content = if has_paths {
-        LayerContent::from_parts(rows.rows.values().map(Row::whole_part))
-    } else {
-        LayerContent::from_parts(rows.rows.values().map(|row| row.part.clone()))
-    };
-    let overlay: Rc<[Primitive]> = rows
-        .rows
-        .values()
-        .flat_map(|row| row.overlay.iter().cloned())
-        .collect();
+    // The content: the rows in order, each with the paths it paints, which
+    // are replayed in order with the rest (see [`paint::replays`]): nothing
+    // is drawn over the content.
+    let content = LayerContent::from_parts(rows.rows.values().map(Row::whole_part));
     let mut region = Bounds {
         origin: viewport.origin + to_content,
         size: viewport.size,
@@ -2960,13 +2942,13 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
         hovers: Rc::from([]),
         dependencies,
         views,
-        has_paths,
-        overlay,
+        has_paths: false,
+        overlay: Rc::from([]),
         view_layouts: Rc::default(),
         a11y: None,
     });
     finish_records(window, id, &frame, records);
-    if frame.mode == Mode::Repaint && !has_paths {
+    if frame.mode == Mode::Repaint {
         window
             .layout_engine
             .as_mut()
@@ -3033,4 +3015,18 @@ fn clear_rows(window: &mut Window, id: &GlobalElementId, frame: &RowsFrame) {
         layer.rows.clear();
         layer.rows.visible = Some((frame_number, frame.visible.clone()));
     }
+}
+
+/// What a list's layer records as its background: what the frame painted
+/// under the list, or none to clear with. Its rows are replayed over what is
+/// under them (see [`paint::replays`]), not composited from tiles cleared
+/// with it, so a background that cannot be baked does not keep the list off
+/// its layer.
+fn replayed_background(window: &Window) -> Rgba {
+    paint::bake_background(window).unwrap_or(Rgba {
+        r: 0.,
+        g: 0.,
+        b: 0.,
+        a: 0.,
+    })
 }
