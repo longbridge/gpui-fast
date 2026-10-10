@@ -977,9 +977,18 @@ pub(crate) fn reuse_starts(window: &mut Window, range: &Range<PaintIndex>) {
         .switch_to(surface, end);
 }
 
+/// Presents the frame last drawn, timing it for
+/// [`crate::fast::stats::LayoutStats::present_time`].
+pub(crate) fn present(window: &mut Window) {
+    let started_at = scheduler::Instant::now();
+    present_scene(window);
+    let elapsed = scheduler::Instant::now() - started_at;
+    window.fast_layout.phase_times.add_present(elapsed);
+}
+
 /// Presents the frame last drawn: on its one surface, or split along the
 /// composition tree once the window composes.
-pub(crate) fn present(window: &mut Window) {
+fn present_scene(window: &mut Window) {
     let state = window.fast_composition.0.clone();
     if !state.borrow().enabled {
         window.platform_window.draw(&window.rendered_frame.scene);

@@ -66,6 +66,7 @@ pub struct PhaseCost {
     pub prepaint_ms: f64,
     pub layout_ms: f64,
     pub paint_ms: f64,
+    pub present_ms: f64,
     pub views_built: f64,
     pub views_reused: f64,
     pub layer_frames_composited: f64,
@@ -101,6 +102,7 @@ impl Cost {
                 prepaint_ms: per_frame(to.prepaint - from.prepaint),
                 layout_ms: per_frame(to.layout - from.layout),
                 paint_ms: per_frame(to.paint - from.paint),
+                present_ms: per_frame(to.present - from.present),
                 views_built: per_frame_count(to.views_built - from.views_built),
                 views_reused: per_frame_count(to.views_reused - from.views_reused),
                 layer_frames_composited: per_frame_count(
@@ -260,6 +262,10 @@ pub fn status_bar(stats: &Stats, cx: &App) -> impl IntoElement {
         .child(field(
             "Paint",
             vec![value(format!("{:.2}", phases.paint_ms), |d| d.w_10()).into_any_element()],
+        ))
+        .child(field(
+            "Present",
+            vec![value(format!("{:.2}", phases.present_ms), |d| d.w_10()).into_any_element()],
         ))
         .child(separator())
         .child(field(

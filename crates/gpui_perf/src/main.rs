@@ -34,6 +34,9 @@
 //!   (default 16), for comparing refresh workloads with the same build.
 //! - `--no-hold-clock`: on macOS, measure `--auto` without holding the CPU's
 //!   clock up; see `showcase/clock.rs`.
+//! - `--composition`: compose the window around an empty native surface, as
+//!   one embedding a webview does, to measure what window composition costs
+//!   against a run without it.
 //!
 //! Headless flags:
 //!
@@ -74,7 +77,7 @@ use gpui_perf::runner::{self, Options, RetentionModes};
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const USAGE: &str = "usage: gpui_perf [--demo | --auto [--only SCENARIO] [--retention on|off] [--frames N] [--no-hold-clock]]\n       \
+const USAGE: &str = "usage: gpui_perf [--demo | --auto [--only SCENARIO] [--retention on|off] [--frames N] [--no-hold-clock]] [--composition]\n       \
 gpui_perf --headless [--scenario SUBSTRING]... [--frames N] [--warmup N] \
 [--retention on|off|both] [--json PATH] [--verify] [--list]";
 
@@ -94,6 +97,7 @@ fn main() -> ExitCode {
         showcase::run(
             args.iter().any(|arg| arg == "--auto"),
             args.iter().any(|arg| arg == "--demo"),
+            args.iter().any(|arg| arg == "--composition"),
         );
         return ExitCode::SUCCESS;
     }
