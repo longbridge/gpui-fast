@@ -38,10 +38,13 @@ drawing as it does without layers, and how to verify and measure layers.
     shows (a nested scroll offset, say). A row leaving the viewport is
     neither rendered nor keeps its element states that frame, and is
     rendered afresh before it shows again.
-  - The layer's content is one part per row (`LayerContent`), and each row's
-    tiles are hashed once, when it is painted. A frame adding a row hands the
-    renderer the other rows as they were and rasterizes only the tiles the
-    new row reaches. Rows past the overscan are dropped a batch at a time.
+  - The layer's content is one part per row (`LayerContent`), and it has no
+    tiles: a composited frame replays into the frame the paint operations of
+    the rows that reach the viewport, moved by the scroll
+    (`fast::layers::paint::replays`). That costs the frame what painting the
+    rows it shows costs, without rendering, laying out or prepainting them
+    again, and leaves nothing to rasterize, keep within a tile budget or bake
+    a background into. Rows past the overscan are dropped a batch at a time.
   - The first frame painting a list's layer paints the whole overscan. A
     frame painting it afresh after that, for a change of its content, paints
     only the rows the list shows, as the list does without a layer. A frame
@@ -63,6 +66,10 @@ drawing as it does without layers, and how to verify and measure layers.
     at its end, as a view keeping its list there calls on every render,
     changes nothing. Nor does `ScrollHandle::scroll_to_bottom` on a handle
     already at its bottom (`fast::layers::scroll_to_bottom`).
+  - A scrollbar dragging a `list` (`ListState::set_offset_from_scrollbar`)
+    scrolls it as a wheel does: the offset it sets is taken for a scroll, not
+    for a change of the list, and the view holding the list, which the
+    scrollbar notifies, draws it from its layer.
 - While accessibility is active, a `div`'s layer keeps the accessibility
   nodes its content added as it was painted, and a composited frame adds
   them again moved by the scroll since, as it does the content's hitboxes.
@@ -96,7 +103,8 @@ each frame it then takes one of three paths (`fast::layers::policy::decide`):
 - **Bypass.** The frame is drawn exactly as it would be without layers. This
   happens when a layer cannot guarantee identical pixels or current window
   coordinates, for example:
-  - the background under the viewport is not one opaque solid quad;
+  - the background under the viewport is not one opaque solid quad (a
+    list's rows are replayed over whatever is under them instead);
   - the content has deferred or anchored elements, a focused input, or
     surfaces, or something in it (an element, or a view drawn in it) asked
     for an animation frame this frame or the last;
@@ -111,9 +119,7 @@ each frame it then takes one of three paths (`fast::layers::policy::decide`):
     as a scrollbar's thumb dragged fast does: the layer is dropped, and is
     not promoted again while the scroll moves by a viewport or more a frame;
   - the content changes on at least eight of the last sixteen frames, or
-    the layer's estimated work exceeds drawing directly (demotion, below);
-  - a row of a list draws over the paths of a row before it, or over what
-    that row drew over its paths.
+    the layer's estimated work exceeds drawing directly (demotion, below).
 
 The view holding the container is notified by the container's wheel
 listener, and a frame is taken for a scroll only while that view was
@@ -151,6 +157,10 @@ updates must not keep causing latency spikes. Refreshes further apart than
 that are paid back by the frames composited between them. One isolated update
 and the initial cache build are not enough to trigger either guard.
 
+A list's layer is not demoted: replayed, painting its rows afresh costs what
+drawing them without it does, and every frame between two changes is
+composited for the cost of replaying the rows shown.
+
 Demotion releases cached rows and resets the fixed-size work history. The
 first cooldown requires 60 stable frames; repeated demotions double that wait,
 up to 1920 frames, so periodic refreshes do not keep rebuilding and discarding
@@ -170,7 +180,8 @@ after such a primitive that overlaps it, are the layer's *overlay*, kept out
 of the tiles and drawn over them in the frame, in drawing order, wherever the
 layer is composited. On every pixel the primitives drawing it are then drawn
 in the same order as without a layer, and the paths are rasterized where they
-show. A table in a rounded frame, whose corner notches are paths under the
+show. A list's layer, which replays its rows, draws their paths in order with
+the rest and has no overlay. A table in a rounded frame, whose corner notches are paths under the
 frame's border, composites with only the paths and the border drawn each
 frame.
 
@@ -186,7 +197,10 @@ prepainting it, is not the layer's, and nothing it read is kept.
 
 What the list and its rows write while the list is built — a row noting in a
 model the rows read that it was drawn — is part of building the list, not a
-change of the rows the layer keeps. What the view holding the list writes in
+change of the rows the layer keeps. So is what a row writes while it is laid
+out, prepainted or painted, as a chart in it fills its own path cache: the
+row is not rendered again for it. A row reading what another row writes as
+it is drawn, as rows sharing one cache do, is. What the view holding the list writes in
 its `render`, as a sidebar writing the items its rows show into a model they
 read on every render, is judged with that render, by what the view read: the
 rows the layer holds are not all rendered again for it.

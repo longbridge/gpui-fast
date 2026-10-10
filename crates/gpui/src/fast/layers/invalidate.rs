@@ -160,7 +160,11 @@ impl ScrollLog {
         let sources = OFFSETS_SET.with_borrow_mut(std::mem::take);
         for source in sources {
             for (id, container) in &self.containers {
-                if container.source == source {
+                let list = container
+                    .version
+                    .as_ref()
+                    .is_some_and(|(version, _)| ScrollSource::of_state(version) == source);
+                if container.source == source || list {
                     *self.scroll_notifies.entry(container.view).or_default() += 1;
                     self.scrolled.insert(id.clone());
                 }
@@ -399,6 +403,19 @@ pub(crate) fn offset_set(version: &StateVersion, moved: bool) {
     crate::fast::dependencies::StateVersion::bump_if(version, moved);
     if COMPILED && moved {
         OFFSETS_SET.with_borrow_mut(|set| set.push(ScrollSource::of_state(version)));
+    }
+}
+
+/// Notes that a scrollbar set the offset of the list whose state `version`
+/// counts changes of, as a scroll of it, as a wheel's is (see
+/// [`ScrollLog::take_offsets_set`]): the version, which counts changes of
+/// the list's content too, is not moved, and the list is drawn from its
+/// layer. Without layers it is moved, as for any change of the list.
+pub(crate) fn list_offset_set(version: &StateVersion) {
+    if COMPILED {
+        OFFSETS_SET.with_borrow_mut(|set| set.push(ScrollSource::of_state(version)));
+    } else {
+        version.bump();
     }
 }
 

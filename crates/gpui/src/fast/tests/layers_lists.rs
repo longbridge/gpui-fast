@@ -135,11 +135,17 @@ fn expanded_quads(scene: &Scene) -> Vec<String> {
     quads
 }
 
-/// Whether the window's last frame drew a layer's tiles, its rows painted
-/// afresh or kept.
+/// Whether the window's last frame drew a layer's content, its rows painted
+/// afresh or kept: its tiles, or a list's rows replayed.
 fn composites(cx: &mut TestAppContext, window: AnyWindowHandle) -> bool {
     with_window(cx, window, |window, _| {
         !window.rendered_frame.scene.layers.frames.is_empty()
+            || window.fast_layers.layers.keys().any(|id| {
+                matches!(
+                    last_decision(window, id),
+                    Some(Decision::Composite | Decision::Repaint)
+                )
+            })
     })
 }
 
@@ -450,12 +456,15 @@ mod uniform {
         assert!(held_rows(cx, window).len() >= 25);
     }
 
+    /// A list whose content changes every fourth frame keeps its layer:
+    /// replayed, painting its rows afresh costs what drawing them without it
+    /// does, and the frames between the changes composite them.
     #[crate::test]
-    fn uniform_list_with_expensive_quarter_rate_updates_falls_back(cx: &mut TestAppContext) {
+    fn uniform_list_with_quarter_rate_updates_keeps_its_layer(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {
             return;
         }
-        let (handle, log) = page(cx, 1000);
+        let (handle, _) = page(cx, 1000);
         let window = handle.into();
         promote(cx, window);
         for frame in 0..64 {
@@ -467,33 +476,19 @@ mod uniform {
                     })
                     .unwrap();
             }
-            rendered_rows(&log);
             wheel(cx, window, -ROW_HEIGHT);
+            assert_ne!(
+                decision(cx, window),
+                Some(Decision::Bypass),
+                "frame {frame}"
+            );
         }
-        assert_eq!(decision(cx, window), Some(Decision::Bypass));
-        assert!(
-            held_rows(cx, window).is_empty(),
-            "demotion releases cached rows"
-        );
-        assert!(
-            rendered_rows(&log)
-                .iter()
-                .map(|range| range.len())
-                .sum::<usize>()
-                <= 6,
-            "the fallback renders the viewport, without layer overscan"
-        );
+        wheel(cx, window, -ROW_HEIGHT);
+        assert_eq!(decision(cx, window), Some(Decision::Composite));
         assert_eq!(
             with_window(cx, window, |window, _| window.layout_stats().layers_demoted),
-            1
+            0
         );
-        // Ongoing refreshes never re-promoted the layer. Once they stop,
-        // the same container may cache again, with a fresh work budget.
-        for _ in 0..64 {
-            wheel(cx, window, -ROW_HEIGHT);
-        }
-        assert_eq!(decision(cx, window), Some(Decision::Composite));
-        assert!(!held_rows(cx, window).is_empty());
     }
 
     /// A change of the content repaints only the rows shown, and the
@@ -526,44 +521,34 @@ mod uniform {
         );
     }
 
+    /// A list over a background that cannot be baked into tiles keeps its
+    /// layer: its rows are replayed over what is under them, as drawn
+    /// without it.
     #[crate::test]
-    fn an_unbakeable_list_background_stops_rebuilding_overscan(cx: &mut TestAppContext) {
+    fn a_list_over_a_translucent_background_keeps_its_layer(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {
             return;
         }
-        let (handle, log) = page(cx, 1000);
-        let window = handle.into();
-        handle
-            .update(cx, |page, _, cx| {
-                page.background = crate::rgba(0xffffff80).into();
-                cx.notify();
-            })
-            .unwrap();
-        draw(cx, window);
-        promote(cx, window);
-        rendered_rows(&log);
-        for _ in 0..20 {
-            wheel(cx, window, -ROW_HEIGHT);
-            assert_eq!(decision(cx, window), Some(Decision::Bypass));
-            let rendered: usize = rendered_rows(&log).iter().map(|range| range.len()).sum();
-            assert!(
-                rendered <= (VIEWPORT_HEIGHT / ROW_HEIGHT) as usize + 2,
-                "only visible rows should render while the background cannot be baked: {rendered}"
-            );
+        let (with_layers, _) = page(cx, 1000);
+        let (without_layers, _) = page(cx, 1000);
+        for handle in [with_layers, without_layers] {
+            handle
+                .update(cx, |page, _, cx| {
+                    page.background = crate::rgba(0xffffff80).into();
+                    cx.notify();
+                })
+                .unwrap();
+            draw(cx, handle.into());
         }
-        handle
-            .update(cx, |page, _, cx| {
-                page.background = rgb(0xffffff).into();
-                cx.notify();
-            })
-            .unwrap();
-        for _ in 0..70 {
-            wheel(cx, window, -ROW_HEIGHT);
-        }
-        assert!(
-            composites(cx, window),
-            "a bakeable background can recover after the retry delay"
+        let composited = compare_with_layers_off(
+            cx,
+            with_layers.into(),
+            without_layers.into(),
+            &[-ROW_HEIGHT; 20],
+            "translucent",
         );
+        assert!(composited >= 18, "composited {composited}");
+        assert_eq!(decision(cx, with_layers.into()), Some(Decision::Composite));
     }
 
     #[crate::test]
@@ -629,12 +614,12 @@ mod uniform {
         }
     }
 
-    /// A list whose content changes on every other frame while it scrolls, as
-    /// a feed of 60 updates a second does at 120 Hz, would paint five
-    /// viewports of rows on each of them: its layer is demoted by the fourth
-    /// change within sixteen frames (the work guard may act earlier), and stays demoted while the feed goes on.
+    /// A list whose content changes on every other frame while it scrolls,
+    /// as a feed of 60 updates a second does at 120 Hz, keeps its layer: it
+    /// paints the rows afresh on the frames they change, which costs what
+    /// drawing them without it does, and composites them on the others.
     #[crate::test]
-    fn a_list_whose_content_keeps_changing_is_demoted(cx: &mut TestAppContext) {
+    fn a_list_whose_content_keeps_changing_keeps_its_layer(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {
             return;
         }
@@ -659,27 +644,24 @@ mod uniform {
                 draw(cx, window);
             }
         };
-        let demoted = |cx: &mut TestAppContext| {
-            with_window(cx, window, |window, _| window.layout_stats().layers_demoted)
-        };
         promote(cx, window);
-        for _ in 0..4 {
-            change(cx);
-            if decision(cx, window) == Some(Decision::Bypass) {
-                break;
-            }
-            wheel(cx, window, -ROW_HEIGHT);
-        }
-        assert_eq!(decision(cx, window), Some(Decision::Bypass));
-        assert_eq!(demoted(cx), 1);
-        for step in 0..20 {
+        for step in 0..40 {
             if step % 2 == 0 {
                 change(cx);
+                assert_eq!(decision(cx, window), Some(Decision::Repaint), "step {step}");
             } else {
                 wheel(cx, window, -ROW_HEIGHT);
+                assert_eq!(
+                    decision(cx, window),
+                    Some(Decision::Composite),
+                    "step {step}"
+                );
             }
-            assert_eq!(decision(cx, window), Some(Decision::Bypass), "step {step}");
         }
+        assert_eq!(
+            with_window(cx, window, |window, _| window.layout_stats().layers_demoted),
+            0
+        );
     }
 
     #[crate::test]
@@ -1264,61 +1246,32 @@ mod list {
         );
     }
 
-    /// A list kept off its layer for changing too often, whose view is then
-    /// notified every couple of seconds, gets its layer back between the
-    /// notifications: a change while it is kept off asks only for the rows
-    /// to stay as they are a second before it is tried again.
+    /// A list whose rows change on every frame while it scrolls keeps its
+    /// layer, painting them afresh, and draws as without it.
     #[crate::test]
-    fn a_demoted_list_notified_every_few_seconds_gets_its_layer_back(cx: &mut TestAppContext) {
+    fn a_list_whose_rows_keep_changing_keeps_its_layer(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {
             return;
         }
-        let state = ListState::new(1000, ListAlignment::Top, px(0.)).measure_all();
-        let (handle, _) = page(cx, state);
+        let state = || ListState::new(1000, ListAlignment::Top, px(0.)).measure_all();
+        let (handle, _) = page(cx, state());
+        let (without, _) = page(cx, state());
         let window = handle.into();
-        promote(cx, window);
-        // Its rows changed on every frame: demoted, and kept off its layer
-        // while they keep changing, twice, its cooldown growing.
-        let scroll_changing_rows = |cx: &mut TestAppContext, frame: usize| {
+        compare_with_layers_off(cx, window, without.into(), &[-20., -20.], "promote");
+        for frame in 0..120 {
             tint_rows(cx);
-            wheel(cx, window, if frame % 40 < 20 { -10. } else { 10. });
-        };
-        let demoted = |cx: &mut TestAppContext| {
-            with_window(cx, window, |window, _| window.layout_stats().layers_demoted)
-        };
-        let mut frames = 0;
-        for times in 1..=2 {
-            while demoted(cx) < times {
-                scroll_changing_rows(cx, frames);
-                frames += 1;
-                assert!(frames < 2_000, "demoted {times} times");
-            }
-            for frame in 0..200 {
-                scroll_changing_rows(cx, frame);
-                assert_eq!(
-                    decision(cx, window),
-                    Some(Decision::Bypass),
-                    "frame {frame}"
-                );
-            }
-            if times < 2 {
-                // Left alone, it gets its layer back.
-                while decision(cx, window) == Some(Decision::Bypass) {
-                    wheel(cx, window, if frames % 40 < 20 { -10. } else { 10. });
-                    frames += 1;
-                    assert!(frames < 2_000, "promoted again");
-                }
-            }
+            let dy = if frame % 40 < 20 { -10. } else { 10. };
+            compare_with_layers_off(cx, window, without.into(), &[dy], "changing rows");
+            assert_ne!(
+                decision(cx, window),
+                Some(Decision::Bypass),
+                "frame {frame}"
+            );
         }
-        let mut composited = 0;
-        for frame in 0..1_200 {
-            if frame % 100 == 0 {
-                notify(cx, handle);
-            }
-            wheel(cx, window, if frame % 200 < 100 { -5. } else { 5. });
-            composited += usize::from(decision(cx, window) == Some(Decision::Composite));
-        }
-        assert!(composited > 600, "composited {composited}");
+        assert_eq!(
+            with_window(cx, window, |window, _| window.layout_stats().layers_demoted),
+            0
+        );
     }
 
     #[crate::test]
@@ -2451,6 +2404,164 @@ mod list {
         compare_with_layers_off(cx, window, without.into(), &[25.; 24], "scroll up");
     }
 
+    /// Drags the scrollbar of `handle`'s list to `y` px down, as GPUI Kit's
+    /// scrollbar does: the offset set, the view holding the list notified.
+    /// Draws the frame that follows.
+    fn drag_scrollbar(cx: &mut TestAppContext, handle: WindowHandle<ListPage>, y: f32) {
+        let window: AnyWindowHandle = handle.into();
+        let frame = with_window(cx, window, |window, _| window.fast_layers.frame);
+        handle
+            .update(cx, |page, _, cx| {
+                page.state
+                    .set_offset_from_scrollbar(crate::point(px(0.), px(-y)));
+                cx.notify();
+            })
+            .unwrap();
+        if with_window(cx, window, |window, _| window.fast_layers.frame) == frame {
+            draw(cx, window);
+        }
+    }
+
+    /// A list whose scrollbar is dragged is drawn from its layer, as after
+    /// a wheel's scroll: the offset the scrollbar sets is taken for a scroll,
+    /// not for a change of the list, and the list renders only the rows the
+    /// drag brings. It draws as without layers.
+    #[crate::test]
+    fn a_list_dragged_by_its_scrollbar_is_composited(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let state = || ListState::new(1000, ListAlignment::Top, px(0.)).measure_all();
+        let (handle, log) = page(cx, state());
+        let (without, _) = page(cx, state());
+        let window: AnyWindowHandle = handle.into();
+        compare_with_layers_off(cx, window, without.into(), &[-20., -20.], "promote");
+        let mut y = 40.;
+        for step in 0..20 {
+            y += 7.;
+            rendered(&log);
+            drag_scrollbar(cx, handle, y);
+            drag_scrollbar(cx, without, y);
+            assert_eq!(
+                decision(cx, window),
+                Some(Decision::Composite),
+                "step {step}"
+            );
+            let rendered_now = rendered(&log);
+            assert!(
+                rendered_now.len() <= 2,
+                "step {step}: a drag renders only the rows it brings: {rendered_now:?}"
+            );
+            let expected = with_window(cx, without.into(), |window, _| {
+                expanded_quads(&window.rendered_frame.scene)
+            });
+            let actual = with_window(cx, window, |window, _| {
+                expanded_quads(&window.rendered_frame.scene)
+            });
+            assert_eq!(actual, expected, "step {step}, dragged to {y}");
+        }
+    }
+
+    /// A cache a row of a [`DrawCachePage`] fills as it is prepainted and
+    /// painted, as a chart's path cache is.
+    struct DrawCache {
+        drawn: usize,
+    }
+
+    /// A page whose rows each read and write their own [`DrawCache`] as
+    /// they are drawn.
+    struct DrawCachePage {
+        state: ListState,
+        caches: Rc<Vec<Entity<DrawCache>>>,
+        rendered: Rc<RefCell<Vec<usize>>>,
+    }
+
+    impl Render for DrawCachePage {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let rendered = self.rendered.clone();
+            let caches = self.caches.clone();
+            div().size_full().bg(rgb(0xffffff)).child(
+                crate::list(self.state.clone(), move |row, _, _| {
+                    rendered.borrow_mut().push(row);
+                    let (prepaint_cache, paint_cache) = (caches[row].clone(), caches[row].clone());
+                    div()
+                        .w(px(VIEWPORT_WIDTH))
+                        .h(px(row_height(row)))
+                        .bg(row_color(row))
+                        .child(
+                            crate::canvas(
+                                move |_, _, cx| {
+                                    prepaint_cache.update(cx, |cache, _| cache.drawn += 1)
+                                },
+                                move |_, _, _, cx| {
+                                    paint_cache.update(cx, |cache, _| cache.drawn += 1)
+                                },
+                            )
+                            .size_full(),
+                        )
+                        .into_any_element()
+                })
+                .w(px(VIEWPORT_WIDTH))
+                .h(px(VIEWPORT_HEIGHT)),
+            )
+        }
+    }
+
+    fn draw_cache_page(
+        cx: &mut TestAppContext,
+    ) -> (WindowHandle<DrawCachePage>, Rc<RefCell<Vec<usize>>>) {
+        let rendered = Rc::new(RefCell::new(Vec::new()));
+        let log = rendered.clone();
+        let window = cx.add_window(move |_, cx| DrawCachePage {
+            state: ListState::new(1000, ListAlignment::Top, px(0.)).measure_all(),
+            caches: Rc::new(
+                (0..1000)
+                    .map(|_| cx.new(|_| DrawCache { drawn: 0 }))
+                    .collect(),
+            ),
+            rendered: log,
+        });
+        open_at(cx, window.into(), 1.);
+        (window, rendered)
+    }
+
+    /// What a row writes as it is prepainted and painted is its own, as what
+    /// it writes as it renders is: rows filling a cache they read as they
+    /// are drawn are not rendered again for it on every scrolled frame.
+    #[crate::test]
+    fn rows_writing_what_they_read_as_they_are_drawn_keep_the_layer(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let (handle, log) = draw_cache_page(cx);
+        let (without, _) = draw_cache_page(cx);
+        let window: AnyWindowHandle = handle.into();
+        compare_with_layers_off(cx, window, without.into(), &[-20., -20., -15.], "promote");
+        assert_eq!(decision(cx, window), Some(Decision::Composite));
+
+        let extended = extended_frames();
+        for frame in 0..20 {
+            rendered(&log);
+            let composited = compare_with_layers_off(cx, window, without.into(), &[-7.], "scroll");
+            assert_eq!(composited, 1, "frame {frame}");
+            assert_eq!(
+                decision(cx, window),
+                Some(Decision::Composite),
+                "frame {frame}"
+            );
+            let rendered_now = rendered(&log);
+            assert!(
+                rendered_now.len() <= 2,
+                "frame {frame}: a scroll renders only the rows it brings: {rendered_now:?}"
+            );
+        }
+        assert!(extended_frames() - extended >= 20);
+        assert_eq!(
+            with_window(cx, window, |window, _| window.layout_stats().layers_demoted),
+            0
+        );
+    }
+
     /// The width of a column every row of a [`ColumnPage`] is drawn at.
     struct Column {
         width: f32,
@@ -2722,8 +2833,10 @@ mod rows {
         rows_that_can_be_hit_stay_hittable(cx, true);
     }
 
+    /// A list whose rows paint paths keeps its layer, the paths replayed
+    /// with the rest of what the rows paint.
     #[crate::test]
-    fn a_list_whose_rows_paint_paths_composites_with_them_over_its_tiles(cx: &mut TestAppContext) {
+    fn a_list_whose_rows_paint_paths_composites_with_them(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {
             return;
         }
@@ -2742,14 +2855,17 @@ mod rows {
             }
             with_window(cx, with_layers, |window, _| {
                 let scene = &window.rendered_frame.scene;
-                assert_eq!(scene.layers.frames.len(), 1, "the tiles are composited");
-                assert!(!scene.paths.is_empty(), "the paths are drawn over them");
+                assert!(scene.layers.frames.is_empty(), "no tiles are composited");
+                assert!(!scene.paths.is_empty(), "the paths are replayed");
             });
         }
     }
 
+    /// A list whose rows draw over the paths of rows before them keeps its
+    /// layer: the rows are replayed in order, paths and all, so what a row
+    /// draws over another's paths lands as drawn afresh.
     #[crate::test]
-    fn a_list_whose_rows_draw_over_paths_of_rows_before_is_kept_off_its_layer(
+    fn a_list_whose_rows_draw_over_paths_of_rows_before_composites_them_in_order(
         cx: &mut TestAppContext,
     ) {
         if !crate::fast::layers::COMPILED {
@@ -2758,15 +2874,13 @@ mod rows {
         for uniform in [false, true] {
             let with_layers = page(cx, RowKind::SpillingPath, uniform);
             let without_layers = page(cx, RowKind::SpillingPath, uniform);
-            // Promoted and painted once into the layer, then demoted: paths
-            // composited from tiles would not land as drawn afresh.
             compare_with_layers_off(cx, with_layers, without_layers, &[-20., -20.], "promote");
             assert_eq!(decision(cx, with_layers), Some(Decision::Repaint));
             for step in 0..5 {
-                compare_with_layers_off(cx, with_layers, without_layers, &[-15.], "demoted");
+                compare_with_layers_off(cx, with_layers, without_layers, &[-15.], "scroll");
                 assert_eq!(
                     decision(cx, with_layers),
-                    Some(Decision::Bypass),
+                    Some(Decision::Composite),
                     "uniform {uniform}, step {step}"
                 );
             }

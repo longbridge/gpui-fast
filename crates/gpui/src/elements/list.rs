@@ -783,7 +783,7 @@ impl ListState {
 
     /// Set the offset from the scrollbar
     pub fn set_offset_from_scrollbar(&self, point: Point<Pixels>) {
-        crate::fast::dependencies::StateVersion::bump(&self.0.borrow().version);
+        crate::fast::layers::invalidate::list_offset_set(&self.0.borrow().version);
         self.0.borrow_mut().set_offset_from_scrollbar(point);
     }
 
