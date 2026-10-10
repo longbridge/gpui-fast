@@ -186,7 +186,10 @@ prepainting it, is not the layer's, and nothing it read is kept.
 
 What the list and its rows write while the list is built — a row noting in a
 model the rows read that it was drawn — is part of building the list, not a
-change of the rows the layer keeps. What the view holding the list writes in
+change of the rows the layer keeps. So is what a row writes while it is laid
+out, prepainted or painted, as a chart in it fills its own path cache: the
+row is not rendered again for it. A row reading what another row writes as
+it is drawn, as rows sharing one cache do, is. What the view holding the list writes in
 its `render`, as a sidebar writing the items its rows show into a model they
 read on every render, is judged with that render, by what the view read: the
 rows the layer holds are not all rendered again for it.
