@@ -307,6 +307,19 @@ fn paint_children_of_layers(
 /// The opaque colour a layer's tiles are cleared with: what the frame has
 /// painted so far under the viewport, the current content mask, if it is
 /// one solid quad covering it (spec §5.2).
+/// Whether the layer of `id` replays its content into the frame rather than
+/// compositing tiles of it: a list's does. Its rows' paint operations are
+/// drawn again, moved, over the viewport, costing the frame what drawing
+/// the rows it shows costs, without rendering, laying out or prepainting
+/// them again, and without tiles to rasterize or to keep within budget.
+pub(crate) fn replays(window: &Window, id: &GlobalElementId) -> bool {
+    window
+        .fast_layers
+        .layers
+        .get(id)
+        .is_some_and(|layer| layer.rows.list)
+}
+
 pub(crate) fn bake_background(window: &Window) -> Option<Rgba> {
     let window_opaque =
         window.platform_window.background_appearance() == WindowBackgroundAppearance::Opaque;
@@ -347,6 +360,10 @@ pub(crate) fn composite_at(
     id: &GlobalElementId,
     translation: Point<ScaledPixels>,
 ) {
+    if replays(window, id) {
+        insert_layer(window, id, translation, 0);
+        return;
+    }
     let background = bake_background(window);
     let layer = layer_mut(window, id);
     let Some(current) = layer.record.as_ref().map(|record| record.background) else {
@@ -405,6 +422,19 @@ pub(crate) fn insert_layer(
     let Some(record) = layer.record.as_ref() else {
         return;
     };
+    if layer.rows.list {
+        let content = record.content.clone();
+        let viewport = viewports(window).snapped;
+        let in_content = Bounds {
+            origin: viewport.origin - translation,
+            size: viewport.size,
+        };
+        draw_into_frame(window, content.operations_over(in_content), translation);
+        let stats = &mut window.layout_engine.as_mut().unwrap().retention.stats;
+        stats.layer_frames_composited += 1;
+        policy::note_work(window, id, 0.);
+        return;
+    }
     if record.has_paths {
         let content = record.content.clone();
         draw_into_frame(window, content.operations(), translation);
