@@ -726,6 +726,9 @@ fn foretold_hit_test(
     translation: Point<ScaledPixels>,
     viewport: Bounds<Pixels>,
 ) -> ForetoldHitTest {
+    if crate::fast::layers::hover_freeze::frozen(window) {
+        return ForetoldHitTest::default();
+    }
     let position = window.mouse_position;
     let scale_factor = window.scale_factor();
     let hitboxes = &window.rendered_frame.hitboxes;

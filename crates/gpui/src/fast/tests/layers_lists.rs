@@ -2887,6 +2887,62 @@ mod rows {
         }
     }
 
+    /// While a wheel scrolls rows under a still pointer, hover is held
+    /// still: nothing is hovered, no row is rendered again for its hover,
+    /// and the list stays composited on every frame. A pointer that moves
+    /// hovers what is under it again at once.
+    #[crate::test]
+    fn hover_held_still_while_the_wheel_scrolls_renders_no_row_for_it(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        for uniform in [false, true] {
+            let window = page(cx, RowKind::Hover, uniform);
+            with_window(cx, window, |window, _| window.set_hover_freeze(true));
+            wheel(cx, window, -5.);
+            wheel(cx, window, -5.);
+            let for_hover = crate::fast::layers::lists::rows_rendered_for_hover();
+            // Down only: a row that left the viewport and shows again is
+            // rendered afresh for that, which is counted with the hovers.
+            for frame in 0..60 {
+                wheel(cx, window, -7.);
+                assert_eq!(
+                    decision(cx, window),
+                    Some(Decision::Composite),
+                    "uniform {uniform}, frame {frame}"
+                );
+                assert!(
+                    with_window(cx, window, |window, _| window.mouse_hit_test.ids.is_empty()),
+                    "uniform {uniform}, frame {frame}: nothing is hovered"
+                );
+            }
+            assert_eq!(
+                crate::fast::layers::lists::rows_rendered_for_hover(),
+                for_hover,
+                "uniform {uniform}: no row rendered for its hover"
+            );
+
+            with_window(cx, window, |window, cx| {
+                window.dispatch_event(
+                    crate::PlatformInput::MouseMove(crate::MouseMoveEvent {
+                        position: crate::point(px(21.), px(21.)),
+                        pressed_button: None,
+                        modifiers: Default::default(),
+                    }),
+                    cx,
+                );
+            });
+            draw(cx, window);
+            assert!(
+                with_window(cx, window, |window, _| !window
+                    .mouse_hit_test
+                    .ids
+                    .is_empty()),
+                "uniform {uniform}: the moved pointer hovers the row under it"
+            );
+        }
+    }
+
     /// A list whose rows take input (a hover style: a hitbox, a listener,
     /// element state) is composited from its layer while it scrolls under a
     /// still pointer, its rows' records carried from frame to frame; the
