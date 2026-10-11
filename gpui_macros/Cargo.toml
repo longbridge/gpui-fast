@@ -1,0 +1,44 @@
+# Modified by Longbridge for gpui-fast publication.
+[package]
+name = "gpui-fast-macros"
+version = "0.1.7"
+edition = "2024"
+publish = ["crates-io"]
+license = "Apache-2.0"
+description = "gpui_macros: GPUI with gpui-fast rendering and layout optimizations"
+repository = "https://github.com/longbridge/gpui-fast"
+homepage = "https://github.com/longbridge/gpui-fast"
+readme = "README.md"
+documentation = "https://docs.rs/gpui-fast-macros/0.1.7/gpui_macros/"
+autoexamples = false
+autobenches = false
+autotests = false
+authors = ["Longbridge"]
+include = ["/src/**", "/resources/**", "/build.rs", "/Cargo.toml", "/README.md", "/LICENSE", "/NOTICE"]
+
+[features]
+inspector = []
+
+[lib]
+path = "src/gpui_macros.rs"
+proc-macro = true
+doctest = true
+test = false
+name = "gpui_macros"
+
+[dependencies.heck]
+version = "0.5"
+
+[dependencies.proc-macro2]
+version = "1.0.93"
+
+[dependencies.quote]
+version = "1.0.9"
+
+[dependencies.syn]
+version = "2.0"
+default-features = true
+features = ["proc-macro", "full", "extra-traits", "visit-mut"]
+
+[lints.rust.unexpected_cfgs]
+level = "allow"

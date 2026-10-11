@@ -1,0 +1,3 @@
+[workspace]
+resolver = "2"
+members = ["gpui_macros", "gpui", "gpui_apple", "gpui_wgpu", "gpui_macos", "gpui_linux", "gpui_windows", "gpui_web", "gpui_platform"]

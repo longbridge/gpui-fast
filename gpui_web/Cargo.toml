@@ -1,0 +1,107 @@
+# Modified by Longbridge for gpui-fast publication.
+[package]
+name = "gpui-fast-web"
+version = "0.1.7"
+publish = ["crates-io"]
+edition = "2024"
+license = "Apache-2.0"
+autoexamples = false
+repository = "https://github.com/longbridge/gpui-fast"
+homepage = "https://github.com/longbridge/gpui-fast"
+readme = "README.md"
+documentation = "https://docs.rs/gpui-fast-web/0.1.7/gpui_web/"
+description = "gpui_web: GPUI with gpui-fast rendering and layout optimizations"
+autobenches = false
+autotests = false
+authors = ["Longbridge"]
+include = ["/src/**", "/resources/**", "/build.rs", "/Cargo.toml", "/README.md", "/LICENSE", "/NOTICE"]
+
+[features]
+default = ["multithreaded"]
+multithreaded = ["dep:wasm_thread", "scheduler/wasm-threads"]
+
+[lib]
+path = "src/gpui_web.rs"
+doctest = false
+name = "gpui_web"
+
+[dependencies]
+unicode-properties = "=0.1.3"
+
+[dependencies.unicode-script]
+version = "0.5.7"
+
+[dependencies.unicode-segmentation]
+version = "1.10"
+
+[target."cfg(target_family = \"wasm\")".dependencies.gpui]
+default-features = false
+package = "gpui-fast"
+version = "^0.1.7"
+path = "../gpui"
+
+[target."cfg(target_family = \"wasm\")".dependencies.scheduler]
+package = "gpui-pre-scheduler"
+version = "=0.3.8"
+
+[target."cfg(target_family = \"wasm\")".dependencies.parking_lot]
+version = "0.12.1"
+features = ["nightly"]
+
+[target."cfg(target_family = \"wasm\")".dependencies.gpui_wgpu]
+package = "gpui-fast-wgpu"
+version = "^0.1.7"
+path = "../gpui_wgpu"
+
+[target."cfg(target_family = \"wasm\")".dependencies.http_client]
+package = "gpui-pre-http-client"
+version = "=0.3.8"
+
+[target."cfg(target_family = \"wasm\")".dependencies.anyhow]
+version = "1.0.86"
+
+[target."cfg(target_family = \"wasm\")".dependencies.futures]
+version = "0.3.34"
+
+[target."cfg(target_family = \"wasm\")".dependencies.log]
+version = "0.4"
+default-features = false
+features = ["std"]
+
+[target."cfg(target_family = \"wasm\")".dependencies.uuid]
+version = "1.1"
+features = ["serde"]
+
+[target."cfg(target_family = \"wasm\")".dependencies.wasm-bindgen]
+version = "0.2.120"
+
+[target."cfg(target_family = \"wasm\")".dependencies.wasm-bindgen-futures]
+version = "0.4"
+
+[target."cfg(target_family = \"wasm\")".dependencies.web-time]
+version = "1.1.0"
+
+[target."cfg(target_family = \"wasm\")".dependencies.console_error_panic_hook]
+version = "0.1.7"
+
+[target."cfg(target_family = \"wasm\")".dependencies.js-sys]
+version = "0.3"
+
+[target."cfg(target_family = \"wasm\")".dependencies.raw-window-handle]
+version = "0.6"
+
+[target."cfg(target_family = \"wasm\")".dependencies.smallvec]
+version = "1.6"
+features = ["union", "const_new"]
+
+[target."cfg(target_family = \"wasm\")".dependencies.wasm_thread]
+version = "0.3"
+features = ["es_modules"]
+optional = true
+
+[target."cfg(target_family = \"wasm\")".dependencies.web-sys]
+version = "0.3"
+features = ["console", "Blob", "Clipboard", "ClipboardEvent", "ClipboardItem", "CompositionEvent", "CssStyleDeclaration", "DataTransfer", "DataTransferItem", "DataTransferItemList", "Document", "DomRect", "DragEvent", "Element", "EventTarget", "File", "FocusOptions", "HtmlCanvasElement", "HtmlElement", "HtmlTextAreaElement", "IdleDeadline", "IdleRequestOptions", "ImageData", "InputEvent", "KeyboardEvent", "Location", "MediaQueryList", "MouseEvent", "Navigator", "OffscreenCanvas", "OffscreenCanvasRenderingContext2d", "PointerEvent", "ReadableStream", "ReadableStreamDefaultReader", "ReadableStreamReadResult", "ResizeObserver", "ResizeObserverBoxOptions", "ResizeObserverEntry", "ResizeObserverSize", "ResizeObserverOptions", "Screen", "Storage", "TextMetrics", "VisualViewport", "Headers", "Request", "RequestCredentials", "RequestInit", "RequestRedirect", "Response", "WheelEvent", "Window"]
+
+[lints.rust.unexpected_cfgs]
+level = "allow"
