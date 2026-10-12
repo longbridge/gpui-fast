@@ -40,8 +40,9 @@ use windows::Win32::{
 use crate::DirectXAtlas;
 use crate::directx_renderer::{
     DirectXGlobalElements, DirectXRenderPipelines, RENDER_TARGET_FORMAT,
+    create_path_intermediate_msaa_texture_and_view, create_path_intermediate_texture,
 };
-use crate::fast::frame::{FrameState, Target, draw_scene, upload};
+use crate::fast::frame::{FrameState, PathTargets, Target, draw_scene, upload};
 use crate::fast::layers::TileCache;
 use crate::fast::layers::raster::{clear_color, rasterize};
 use crate::fast::layers::tile_cache::create_globals;
@@ -799,15 +800,15 @@ impl Harness {
         clear: Rgba,
         rasterize_tiles: bool,
     ) -> Result<Vec<u8>> {
-        let target = Target {
-            device: &self.device,
-            device_context: &self.context,
-            atlas: &self.atlas,
-            globals: &self.globals,
-            resources: None,
-        };
         if rasterize_tiles {
-            rasterize(&target, &mut self.pipelines, &mut self.frame, scene)?;
+            let tiles = Target {
+                device: &self.device,
+                device_context: &self.context,
+                atlas: &self.atlas,
+                globals: &self.globals,
+                paths: None,
+            };
+            rasterize(&tiles, &mut self.pipelines, &mut self.frame, scene)?;
         }
 
         let (width, height) = (size.width.0 as u32, size.height.0 as u32);
@@ -816,6 +817,24 @@ impl Harness {
         unsafe {
             self.device
                 .CreateRenderTargetView(&texture, None, Some(&mut render_target))?
+        };
+        // The window's path textures, as `DirectXResources::new` makes them.
+        let (intermediate_texture, intermediate_srv) =
+            create_path_intermediate_texture(&self.device, width, height)?;
+        let (msaa_texture, msaa_view) =
+            create_path_intermediate_msaa_texture_and_view(&self.device, width, height)?;
+        let target = Target {
+            device: &self.device,
+            device_context: &self.context,
+            atlas: &self.atlas,
+            globals: &self.globals,
+            paths: Some(PathTargets {
+                render_target_view: &render_target,
+                intermediate_texture: &intermediate_texture,
+                intermediate_srv: &intermediate_srv,
+                msaa_texture: &msaa_texture,
+                msaa_view: &msaa_view,
+            }),
         };
         let globals = create_globals(&self.device, width, height)?;
         // What `DirectXRenderer::pre_draw` binds.
