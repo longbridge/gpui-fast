@@ -819,6 +819,9 @@ impl X11Client {
         if !state.has_xim() {
             return;
         }
+        if !crate::fast::xim::is_handshake_complete(state.xim_handler.as_ref()) {
+            return;
+        }
 
         let Some((mut ximc, xim_handler)) = state.take_xim() else {
             return;
