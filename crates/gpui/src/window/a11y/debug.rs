@@ -55,7 +55,7 @@ pub(crate) struct NodeCreator {
 
 #[derive(Default)]
 pub(crate) struct A11yDebug {
-    last_tree_update: Option<TreeUpdate>,
+    pub(crate) last_tree_update: Option<TreeUpdate>,
     last_gpui_focus: Option<NodeId>,
     last_active_descendant: Option<NodeId>,
     /// Monotonic counter incremented on each captured frame, so a re-dump makes

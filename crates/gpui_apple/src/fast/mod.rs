@@ -1,4 +1,5 @@
-//! Everything gpui-fast adds to the Metal renderer lives under this module.
+//! Everything gpui-fast adds to the Metal renderer and text system lives under
+//! this module.
 //!
 //! The rest of this crate is kept as close to upstream GPUI (Zed's
 //! `crates/gpui_apple`) as possible, so that pulling in upstream changes stays
@@ -10,3 +11,5 @@
 pub(crate) mod composition;
 pub(crate) mod layers;
 pub(crate) mod paths;
+#[cfg(feature = "font-kit")]
+pub(crate) mod text_system;

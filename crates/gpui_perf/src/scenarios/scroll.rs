@@ -14,17 +14,31 @@
 //! - `scroll-same-view`: a scrolling `div` whose content is plain elements of
 //!   the view that owns the `div`;
 //! - `scroll-uniform-list`: a `uniform_list`;
-//! - `scroll-list`: a `list` of rows of varying height.
+//! - `scroll-list`: a `list` of rows of varying height;
+//! - `scroll-list-tables`: the same, every third row a table in a rounded
+//!   frame whose corners are paths drawn under its border, as GPUI Kit's
+//!   markdown tables are.
+//!
+//! The four content kinds run again with a scrollbar over the content, drawn
+//! and driven as GPUI Kit's is (`scenarios::scrollbar`), as
+//! `<name>-scrollbar`. The two lists also run with that scrollbar asking for
+//! an animation frame from its prepaint on 30 frames of every 100, as GPUI
+//! Kit's does while it fades, as `<name>-fading-scrollbar`, and turned by
+//! three wheel events a frame, as a trackpad sends them, as
+//! `<name>-scrollbar-burst`; and the three content kinds other than
+//! `same-view` once more with the scrollbar's thumb dragged instead of the
+//! wheel turned, as `scrollbar-drag-*`.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, cell::Cell, rc::Rc};
 
 use gpui::{
     AnyElement, AnyView, App, AssetSource, Context, Entity, FontWeight, Hsla, ListAlignment,
-    ListState, Modifiers, PlatformInput, Render, Result, ScrollDelta, ScrollHandle,
-    ScrollWheelEvent, SharedString, TouchPhase, UniformListScrollHandle, Window, div, hsla, list,
-    point, prelude::*, px, svg, uniform_list,
+    ListState, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, PlatformInput, Render,
+    Result, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, TouchPhase,
+    UniformListScrollHandle, Window, div, hsla, list, point, prelude::*, px, svg, uniform_list,
 };
 
+use super::scrollbar::{self, Scrolled, TRACK_WIDTH};
 use crate::Scenario;
 
 /// Sections of the gallery page.
@@ -37,6 +51,10 @@ const SIDEBAR_WIDTH: f32 = 240.;
 const WHEEL_STEP: f32 = 40.;
 /// Frames scrolled in one direction before turning back.
 const FRAMES_PER_SWEEP: usize = 50;
+/// How far the pointer drags the thumb each frame, in logical pixels.
+const DRAG_STEP: f32 = 8.;
+/// Where the thumb is grabbed: inside it while the content is at the top.
+const GRAB_Y: f32 = 6.;
 
 const ICONS: [&str; 6] = [
     "icons/check.svg",
@@ -130,11 +148,51 @@ fn pointer() -> gpui::Point<gpui::Pixels> {
     point(px(SIDEBAR_WIDTH + 600.), px(450.))
 }
 
+/// Where the scrollbar's track is: along the window's right edge, in the
+/// runner's 1440-wide window.
+fn track_x() -> gpui::Pixels {
+    px(1440. - TRACK_WIDTH / 2.)
+}
+
+/// The event of frame `frame` that drags the thumb: pressed on it at frame
+/// 0, then moved `DRAG_STEP` a frame, `FRAMES_PER_SWEEP` frames down, as
+/// many back up, and again, with the button held.
+fn drag(frame: usize) -> PlatformInput {
+    if frame == 0 {
+        return PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position: point(track_x(), px(GRAB_Y)),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+    }
+    let sweep = frame % (2 * FRAMES_PER_SWEEP);
+    let travel = if sweep < FRAMES_PER_SWEEP {
+        sweep
+    } else {
+        2 * FRAMES_PER_SWEEP - sweep
+    };
+    PlatformInput::MouseMove(MouseMoveEvent {
+        position: point(track_x(), px(GRAB_Y + DRAG_STEP * travel as f32)),
+        pressed_button: Some(MouseButton::Left),
+        modifiers: Modifiers::default(),
+    })
+}
+
 /// The wheel event of frame `frame`: `FRAMES_PER_SWEEP` frames down, as many
 /// back up, and again.
 fn wheel(frame: usize) -> PlatformInput {
+    wheel_part(frame, 1)
+}
+
+/// One of `parts` wheel events that together scroll as far as the wheel
+/// event of frame `frame` does, as a trackpad or a fast display sends
+/// several a frame.
+fn wheel_part(frame: usize, parts: usize) -> PlatformInput {
     let down = (frame / FRAMES_PER_SWEEP).is_multiple_of(2);
-    let delta = if down { -WHEEL_STEP } else { WHEEL_STEP };
+    let step = WHEEL_STEP / parts as f32;
+    let delta = if down { -step } else { step };
     PlatformInput::ScrollWheel(ScrollWheelEvent {
         position: pointer(),
         delta: ScrollDelta::Pixels(point(px(0.), px(delta))),
@@ -298,8 +356,9 @@ enum Content {
     SameView,
     /// A `uniform_list` of this many rows.
     UniformList(usize, UniformListScrollHandle),
-    /// A `list`.
-    List(ListState),
+    /// A `list`; with `true`, every third row holds a table in a rounded
+    /// frame drawn as GPUI Kit's markdown tables are.
+    List(ListState, bool),
 }
 
 /// The gallery: a sidebar view and the scrolled content, on an opaque
@@ -308,14 +367,40 @@ pub struct Gallery {
     sidebar: Entity<Sidebar>,
     scroll: ScrollHandle,
     content: Content,
+    /// The scrollbar's state, when the content has one.
+    scrollbar: Option<Rc<Cell<scrollbar::State>>>,
+}
+
+/// The scrollbar a gallery draws over its content.
+#[derive(Clone, Copy, PartialEq)]
+enum Bar {
+    None,
+    Still,
+    /// One animating on this many frames of every 100.
+    Animated(u32),
 }
 
 impl Gallery {
-    fn new(content: Content, cx: &mut Context<Self>) -> Self {
+    fn new(content: Content, bar: Bar, cx: &mut Context<Self>) -> Self {
+        let scrollbar = match bar {
+            Bar::None => None,
+            Bar::Still => Some(scrollbar::State::default()),
+            Bar::Animated(frames) => Some(scrollbar::State::animated(frames)),
+        };
         Self {
             sidebar: cx.new(|_| Sidebar),
             scroll: ScrollHandle::new(),
             content,
+            scrollbar: scrollbar.map(|state| Rc::new(Cell::new(state))),
+        }
+    }
+
+    /// What the scrollbar scrolls.
+    fn scrolled(&self) -> Scrolled {
+        match &self.content {
+            Content::ChildView(_) | Content::SameView => Scrolled::Div(self.scroll.clone()),
+            Content::UniformList(_, handle) => Scrolled::UniformList(handle.clone()),
+            Content::List(state, _) => Scrolled::List(state.clone()),
         }
     }
 }
@@ -368,6 +453,80 @@ fn row(ix: usize, variable: bool) -> AnyElement {
         .into_any_element()
 }
 
+/// A row holding a small table in a rounded frame, drawn as GPUI Kit draws
+/// a markdown table (`horizontal_scroll_area` and `RoundedFrameCover`):
+/// paths fill the frame's corner notches with the background, and the
+/// frame's border, painted after its children, draws over them.
+fn table_row(ix: usize) -> AnyElement {
+    const RADIUS: f32 = 6.;
+    let cell = |text: String, header: bool| {
+        div()
+            .flex_1()
+            .px_2()
+            .py_1()
+            .border_r_1()
+            .border_color(border())
+            .when(header, |this| this.bg(color(220., 0.1, 0.95)))
+            .text_xs()
+            .child(SharedString::from(text))
+    };
+    let line = |row: usize| {
+        div()
+            .flex()
+            .border_b_1()
+            .border_color(border())
+            .children((0..4).map(move |column| {
+                cell(
+                    if row == 0 {
+                        format!("Column {column}")
+                    } else {
+                        format!("{} · {}", ix + row, column * 7 + row)
+                    },
+                    row == 0,
+                )
+            }))
+    };
+    let notches = gpui::canvas(
+        |_, _, _| {},
+        |bounds, _, window, _| {
+            let radius = px(RADIUS);
+            for (corner, x, y) in [
+                (bounds.origin, 1., 1.),
+                (bounds.top_right(), -1., 1.),
+                (bounds.bottom_right(), -1., -1.),
+                (bounds.bottom_left(), 1., -1.),
+            ] {
+                let mut path = gpui::Path::new(corner);
+                path.line_to(corner + point(radius * x, px(0.)));
+                path.curve_to(corner + point(px(0.), radius * y), corner);
+                path.line_to(corner);
+                window.paint_path(path, background());
+            }
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full();
+    div()
+        .id(("table-row", ix))
+        .px_4()
+        .py_2()
+        .border_b_1()
+        .border_color(border())
+        .child(
+            div()
+                .relative()
+                .overflow_hidden()
+                .border_1()
+                .border_color(border())
+                .rounded(px(RADIUS))
+                .children((0..4).map(line))
+                .child(notches),
+        )
+        .into_any_element()
+}
+
 impl Render for Gallery {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let content = match &self.content {
@@ -397,9 +556,18 @@ impl Render for Gallery {
             .track_scroll(handle)
             .size_full()
             .into_any_element(),
-            Content::List(state) => list(state.clone(), |ix, _, _| row(ix, true))
+            Content::List(state, tables) => {
+                let tables = *tables;
+                list(state.clone(), move |ix, _, _| {
+                    if tables && ix % 3 == 0 {
+                        table_row(ix)
+                    } else {
+                        row(ix, true)
+                    }
+                })
                 .size_full()
-                .into_any_element(),
+                .into_any_element()
+            }
         };
         div()
             .flex()
@@ -407,15 +575,39 @@ impl Render for Gallery {
             .bg(background())
             .text_color(text())
             .child(self.sidebar.clone())
-            .child(div().flex_1().h_full().min_w_0().child(content))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .h_full()
+                    .min_w_0()
+                    .child(content)
+                    .when_some(self.scrollbar.clone(), |this, state| {
+                        this.child(scrollbar::scrollbar(self.scrolled(), state))
+                    }),
+            )
     }
 }
 
-/// A scenario scrolling one kind of content with the wheel.
+/// How a scenario scrolls.
+#[derive(Clone, Copy, PartialEq)]
+enum Drive {
+    /// The wheel over the content.
+    Wheel,
+    /// The wheel over the content, in three events a frame.
+    WheelBurst,
+    /// The scrollbar's thumb, dragged.
+    Thumb,
+}
+
+/// A scenario scrolling one kind of content, by the wheel or by dragging the
+/// scrollbar's thumb.
 struct WheelScroll {
     name: &'static str,
     description: &'static str,
     content: fn(&mut App) -> Content,
+    scrollbar: Bar,
+    drive: Drive,
 }
 
 impl Scenario for WheelScroll {
@@ -429,35 +621,121 @@ impl Scenario for WheelScroll {
 
     fn build(&self, _: &mut Window, cx: &mut App) -> AnyView {
         let content = (self.content)(cx);
-        cx.new(|cx| Gallery::new(content, cx)).into()
+        let scrollbar = self.scrollbar;
+        cx.new(|cx| Gallery::new(content, scrollbar, cx)).into()
     }
 
     fn step(&self, _: &AnyView, frame: usize, window: &mut Window, cx: &mut App) {
-        window.dispatch_event(wheel(frame), cx);
+        if matches!(self.scrollbar, Bar::Animated(_)) {
+            // The test platform draws a dirty window without running what
+            // was scheduled for the next frame, as a platform's frame
+            // callback does first: the animation frame the scrollbar asked
+            // for notifies the view drawing it here.
+            window.simulate_next_frame(cx);
+        }
+        let event = match self.drive {
+            Drive::Wheel => wheel(frame),
+            Drive::WheelBurst => {
+                for _ in 0..2 {
+                    window.dispatch_event(wheel_part(frame, 3), cx);
+                }
+                wheel_part(frame, 3)
+            }
+            Drive::Thumb => drag(frame),
+        };
+        window.dispatch_event(event, cx);
     }
 }
 
+/// The content kinds: name, description, content.
+const KINDS: [(&str, &str, fn(&mut App) -> Content); 4] = [
+    (
+        "child-view",
+        "A gallery page, a child view of 24 sections of buttons",
+        |cx| Content::ChildView(cx.new(|_| Page)),
+    ),
+    (
+        "same-view",
+        "A gallery page of 24 sections drawn by the scrolling view itself",
+        |_| Content::SameView,
+    ),
+    ("uniform-list", "A 10,000-row uniform_list", |_| {
+        Content::UniformList(10_000, UniformListScrollHandle::new())
+    }),
+    ("list", "A 2,000-row list of rows of varying height", |_| {
+        Content::List(ListState::new(2_000, ListAlignment::Top, px(200.)), false)
+    }),
+];
+
 pub fn scenarios() -> Vec<Box<dyn Scenario>> {
-    vec![
-        Box::new(WheelScroll {
-            name: "scroll-child-view",
-            description: "A gallery page, a child view of 24 sections of buttons, scrolled by the wheel",
-            content: |cx| Content::ChildView(cx.new(|_| Page)),
-        }),
-        Box::new(WheelScroll {
-            name: "scroll-same-view",
-            description: "A gallery page of 24 sections drawn by the scrolling view itself, scrolled by the wheel",
-            content: |_| Content::SameView,
-        }),
-        Box::new(WheelScroll {
-            name: "scroll-uniform-list",
-            description: "A 10,000-row uniform_list scrolled by the wheel",
-            content: |_| Content::UniformList(10_000, UniformListScrollHandle::new()),
-        }),
-        Box::new(WheelScroll {
-            name: "scroll-list",
-            description: "A 2,000-row list of rows of varying height scrolled by the wheel",
-            content: |_| Content::List(ListState::new(2_000, ListAlignment::Top, px(200.))),
-        }),
-    ]
+    let leak = |text: String| -> &'static str { Box::leak(text.into_boxed_str()) };
+    let mut scenarios: Vec<Box<dyn Scenario>> = Vec::new();
+    for (kind, description, content) in KINDS {
+        scenarios.push(Box::new(WheelScroll {
+            name: leak(format!("scroll-{kind}")),
+            description: leak(format!("{description}, scrolled by the wheel")),
+            content,
+            scrollbar: Bar::None,
+            drive: Drive::Wheel,
+        }));
+    }
+    scenarios.push(Box::new(WheelScroll {
+        name: "scroll-list-tables",
+        description: "A 2,000-row list of rows of varying height, every third a table in a \
+                      rounded frame whose corners are paths under its border, scrolled by \
+                      the wheel",
+        content: |_| Content::List(ListState::new(2_000, ListAlignment::Top, px(200.)), true),
+        scrollbar: Bar::None,
+        drive: Drive::Wheel,
+    }));
+    for (kind, description, content) in KINDS {
+        scenarios.push(Box::new(WheelScroll {
+            name: leak(format!("scroll-{kind}-scrollbar")),
+            description: leak(format!(
+                "{description}, with a GPUI Kit scrollbar, scrolled by the wheel"
+            )),
+            content,
+            scrollbar: Bar::Still,
+            drive: Drive::Wheel,
+        }));
+    }
+    for (kind, description, content) in KINDS {
+        if kind != "list" && kind != "uniform-list" {
+            continue;
+        }
+        scenarios.push(Box::new(WheelScroll {
+            name: leak(format!("scroll-{kind}-fading-scrollbar")),
+            description: leak(format!(
+                "{description}, with a GPUI Kit scrollbar animating on 30 frames of every 100, \
+                 scrolled by the wheel"
+            )),
+            content,
+            scrollbar: Bar::Animated(30),
+            drive: Drive::Wheel,
+        }));
+        scenarios.push(Box::new(WheelScroll {
+            name: leak(format!("scroll-{kind}-scrollbar-burst")),
+            description: leak(format!(
+                "{description}, with a GPUI Kit scrollbar, scrolled by three wheel events a frame"
+            )),
+            content,
+            scrollbar: Bar::Still,
+            drive: Drive::WheelBurst,
+        }));
+    }
+    for (kind, description, content) in KINDS {
+        if kind == "same-view" {
+            continue;
+        }
+        scenarios.push(Box::new(WheelScroll {
+            name: leak(format!("scrollbar-drag-{kind}")),
+            description: leak(format!(
+                "{description}, scrolled by dragging a GPUI Kit scrollbar's thumb"
+            )),
+            content,
+            scrollbar: Bar::Still,
+            drive: Drive::Thumb,
+        }));
+    }
+    scenarios
 }

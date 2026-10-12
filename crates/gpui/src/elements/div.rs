@@ -4263,12 +4263,12 @@ impl ScrollAnchor {
 
 #[derive(Default, Debug)]
 pub(crate) struct ScrollHandleState {
-    offset: Rc<RefCell<Point<Pixels>>>,
+    pub(crate) offset: Rc<RefCell<Point<Pixels>>>,
     ongoing_scroll: Rc<RefCell<OngoingScroll>>,
     bounds: Bounds<Pixels>,
-    max_offset: Point<Pixels>,
+    pub(crate) max_offset: Point<Pixels>,
     child_bounds: Vec<Bounds<Pixels>>,
-    scroll_to_bottom: bool,
+    pub(crate) scroll_to_bottom: bool,
     overflow: Point<Overflow>,
     active_item: Option<ScrollActiveItem>,
     pub(crate) version: crate::fast::dependencies::StateVersion,
@@ -4443,7 +4443,7 @@ impl ScrollHandle {
     /// Scrolls to the bottom.
     pub fn scroll_to_bottom(&self) {
         let mut state = self.0.borrow_mut();
-        crate::fast::dependencies::StateVersion::bump(&state.version);
+        crate::fast::layers::scroll_to_bottom::note_scroll_to_bottom(self, &state);
         state.scroll_to_bottom = true;
     }
 

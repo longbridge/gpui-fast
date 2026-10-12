@@ -158,6 +158,10 @@ enum Change {
         width: f32,
         height: f32,
     },
+    /// Focuses a panel, or nothing past the last.
+    Focus {
+        panel: usize,
+    },
     Redraw,
 }
 
@@ -237,6 +241,9 @@ impl Change {
             120..124 => Change::TintLeaf {
                 panel: rng.random_range(0..PANELS),
             },
+            95..98 => Change::Focus {
+                panel: rng.random_range(0..=PANELS),
+            },
             92..95 => Change::Resize {
                 width: rng.random_range(300.0..1000.0),
                 height: rng.random_range(240.0..800.0),
@@ -311,6 +318,7 @@ impl OracleView {
                             tint: 0,
                             shared,
                             leaf: cx.new(|_| Leaf { count: ix, tint: 0 }),
+                            focus: cx.focus_handle(),
                         })
                     })
                     .collect()
@@ -385,6 +393,7 @@ impl OracleView {
                 return;
             }
             Change::Global { .. }
+            | Change::Focus { .. }
             | Change::MoveMouse { .. }
             | Change::Resize { .. }
             | Change::Redraw => return,
@@ -503,6 +512,9 @@ fn render_cell(cell: CellState) -> AnyElement {
             this.hover(|style| style.bg(PALETTE[4]).text_color(PALETTE[0]))
         })
         .child(WORDS[cell.word])
+        .id("cell")
+        .role(accesskit::Role::Cell)
+        .aria_label(WORDS[cell.word])
         .into_any_element()
 }
 
@@ -532,8 +544,16 @@ fn render_row(row: u64, identity: RowIdentity) -> AnyElement {
         );
     match identity {
         RowIdentity::Position => row_element.into_any_element(),
-        RowIdentity::Id => row_element.id(("row", row)).into_any_element(),
-        RowIdentity::Wrapped => div().id(("row", row)).child(row_element).into_any_element(),
+        RowIdentity::Id => row_element
+            .id(("row", row))
+            .role(accesskit::Role::Row)
+            .into_any_element(),
+        RowIdentity::Wrapped => div()
+            .id(("row", row))
+            .role(accesskit::Role::Row)
+            .aria_label(word)
+            .child(row_element)
+            .into_any_element(),
     }
 }
 
@@ -597,6 +617,8 @@ impl Render for OracleView {
         .h(px(120.));
 
         div()
+            .id("oracle")
+            .role(accesskit::Role::Pane)
             .size_full()
             .flex()
             .flex_wrap()
@@ -685,6 +707,7 @@ struct Panel {
     tint: usize,
     shared: Entity<Shared>,
     leaf: Entity<Leaf>,
+    focus: crate::FocusHandle,
 }
 
 impl Render for Panel {
@@ -700,6 +723,13 @@ impl Render for Panel {
             0
         };
         div()
+            .id("panel")
+            .role(accesskit::Role::Group)
+            .aria_label(WORDS[(self.value + shared) % WORDS.len()])
+            .track_focus(&self.focus)
+            .when(self.ix.is_multiple_of(2), |this| {
+                this.on_a11y_action(accesskit::Action::Increment, |_, _, _| {})
+            })
             .flex()
             .flex_col()
             .p_1()
@@ -729,7 +759,22 @@ struct Leaf {
 
 impl Render for Leaf {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let count = self.count;
         div()
+            .id("leaf")
+            // Now and then without a role, so without a node: the panel's
+            // node, drawn from last frame around it, has other children.
+            .when(count % 4 != 3, |this| this.role(accesskit::Role::List))
+            .aria_active_descendant()
+            .aria_value(SharedString::from(self.tint.to_string()))
+            .a11y_synthetic_children(move |builder| {
+                for ix in 0..count % 3 + 1 {
+                    let id = builder.synthetic_node_id(ix);
+                    let mut node = accesskit::Node::new(accesskit::Role::Image);
+                    node.set_label(format!("box {ix}"));
+                    builder.push_child(id, node);
+                }
+            })
             .flex()
             .flex_row()
             .children((0..self.count % 3 + 1).map(|ix| {
@@ -749,6 +794,8 @@ struct Badge {
 impl Render for Badge {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
+            .id("badge")
+            .role(accesskit::Role::Status)
             .flex()
             .flex_row()
             .gap_1()
@@ -841,6 +888,19 @@ fn apply(cx: &mut TestAppContext, window: WindowHandle<OracleView>, change: &Cha
             cx.simulate_window_resize(window.into(), size(px(width), px(height)));
         }
         Change::Global { value } => cx.update(|cx| cx.set_global(Accent(value))),
+        Change::Focus { panel } => {
+            cx.update_window(window.into(), |view, window, cx| {
+                let view = view.downcast::<OracleView>().unwrap();
+                match view.read(cx).panels.get(panel) {
+                    Some(panel) => {
+                        let focus = panel.read(cx).focus.clone();
+                        window.focus(&focus, cx);
+                    }
+                    None => window.blur(cx),
+                }
+            })
+            .unwrap();
+        }
         Change::Badge
         | Change::Panel { .. }
         | Change::Leaf { .. }
@@ -862,7 +922,7 @@ fn draw(
     cx: &mut TestAppContext,
     window: WindowHandle<OracleView>,
     from_scratch: bool,
-) -> (Vec<String>, u64, bool) {
+) -> (Vec<String>, u64, bool, Option<A11ySnapshot>) {
     cx.update_window(window.into(), |_, window, cx| {
         if from_scratch {
             window.forget_retained_state();
@@ -873,14 +933,19 @@ fn draw(
             window.describe_rendered_frame(),
             window.layout_stats().nodes_reused,
             window.rendered_frame.retained.reused_any(),
+            window
+                .is_a11y_active()
+                .then(|| super::a11y::a11y_snapshot(window)),
         )
     })
     .unwrap()
 }
 
+type A11ySnapshot = (String, Vec<super::a11y::A11yEntry>);
+
 /// Drives both windows through one random history and returns how many
 /// layout nodes the incremental window reused along the way.
-fn run(seed: u64, steps: usize) -> (u64, usize) {
+fn run(seed: u64, steps: usize, a11y: bool) -> (u64, usize) {
     let mut cx = TestAppContext::with_text_system(Arc::new(GlyphBoxTextSystem(NoopTextSystem)));
     let incremental = cx.add_window(|_, cx| OracleView::new(cx));
     let from_scratch = cx.add_window(|_, cx| OracleView::new(cx));
@@ -890,6 +955,14 @@ fn run(seed: u64, steps: usize) -> (u64, usize) {
         window.set_scroll_layers(false)
     })
     .unwrap();
+    if a11y {
+        for window in [incremental, from_scratch] {
+            cx.update_window(window.into(), |_, window, _| {
+                window.set_a11y_active_for_tests(true)
+            })
+            .unwrap();
+        }
+    }
     let mut rng = StdRng::seed_from_u64(seed);
     let mut history: Vec<Vec<Change>> = Vec::new();
     let mut reused = 0;
@@ -909,9 +982,19 @@ fn run(seed: u64, steps: usize) -> (u64, usize) {
         }
         history.push(changes);
 
-        let (expected, reused_from_scratch, subtrees_from_scratch) =
+        let (expected, reused_from_scratch, subtrees_from_scratch, expected_a11y) =
             draw(&mut cx, from_scratch, true);
-        let (actual, reused_incrementally, reused_subtrees) = draw(&mut cx, incremental, false);
+        let (actual, reused_incrementally, reused_subtrees, actual_a11y) =
+            draw(&mut cx, incremental, false);
+        if let (Some(actual), Some(expected)) = (&actual_a11y, &expected_a11y)
+            && let Some(difference) = super::a11y::a11y_difference(actual, expected, 0.)
+        {
+            panic!(
+                "seed {seed}, step {step}: the incremental accessibility tree differs from the \
+                 tree built from scratch:\n{difference}\nchanges so far:\n{history:#?}"
+            );
+        }
+        assert_eq!(actual_a11y.is_some(), a11y);
         assert_eq!(
             reused_from_scratch, 0,
             "a window that forgot its layout nodes cannot have reused any"
@@ -962,12 +1045,23 @@ fn run(seed: u64, steps: usize) -> (u64, usize) {
 #[test]
 fn incremental_frames_match_frames_drawn_from_scratch() {
     let (reused, frames_reusing_subtrees) = (0..24)
-        .map(|seed| run(seed, 60))
+        .map(|seed| run(seed, 60, false))
         .fold((0, 0), |(a, b), (c, d)| (a + c, b + d));
     assert!(
         reused > 0,
         "the incremental window never reused a layout node, so nothing was compared"
     );
+    assert!(
+        frames_reusing_subtrees > 0,
+        "the incremental window never drew a view again from its last frame"
+    );
+}
+
+#[test]
+fn incremental_accessibility_trees_match_trees_built_from_scratch() {
+    let (_, frames_reusing_subtrees) = (100..116)
+        .map(|seed| run(seed, 60, true))
+        .fold((0, 0), |(a, b), (c, d)| (a + c, b + d));
     assert!(
         frames_reusing_subtrees > 0,
         "the incremental window never drew a view again from its last frame"

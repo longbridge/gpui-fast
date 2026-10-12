@@ -15,6 +15,10 @@
 //! search box, a text selection layer, and a market feed every panel
 //! subscribes to, which a timer streams quotes into; see `workspace.rs`.
 //!
+//! Its first page is Allsum Desktop's chat window, built from the views of
+//! the headless `chat-scroll-allsum` scenario, which nothing scrolls but the
+//! user: `--demo` waits while it shows.
+//!
 //! The toolbar picks what scrolls itself, and switches the data refresh and
 //! retained views. Every command has a key: `1`–`6` for what scrolls, `R` for
 //! the refresh, `Q` for the workspace's quote stream, `V` for retained views,
@@ -142,6 +146,8 @@ fn groups() -> &'static [(&'static str, Vec<&'static str>)] {
             "Tooltip",
         ];
         let mut groups = vec![
+            // First, at `CHAT_PAGE`.
+            ("Chat", vec!["Allsum chat"]),
             (
                 "Getting started",
                 vec!["Introduction", "Installation", "Theming"],
@@ -196,7 +202,9 @@ fn workspace_page() -> usize {
 }
 
 fn page_kind(page: usize) -> PageKind {
-    if page == workspace_page() {
+    if page == CHAT_PAGE {
+        PageKind::Chat
+    } else if page == workspace_page() {
         PageKind::Workspace
     } else if page == table_page() {
         PageKind::Table
@@ -207,8 +215,18 @@ fn page_kind(page: usize) -> PageKind {
     }
 }
 
+/// The page showing Allsum's chat window, scrolled by hand: the first.
+const CHAT_PAGE: usize = 0;
+
 /// The page showing components, when the table is not wanted.
-const BUTTON_PAGE: usize = 8;
+const BUTTON_PAGE: usize = 9;
+
+/// What a page of components is made from: its place in the sidebar,
+/// counted as before the chat page came first, so that every page of
+/// components shows what it did.
+fn page_seed(page: usize) -> usize {
+    page.saturating_sub(CHAT_PAGE + 1)
+}
 
 const SAMPLE_EVERY: Duration = Duration::from_millis(500);
 
@@ -356,6 +374,15 @@ fn step(
 ) -> bool {
     let demo = driver.borrow().demo;
     if let Some(started) = demo {
+        // The chat page is scrolled by hand, so the demo waits while it
+        // shows, until another page is picked.
+        let on_chat = handles
+            .showcase
+            .upgrade()
+            .is_some_and(|showcase| showcase.read(cx).active == CHAT_PAGE);
+        if on_chat {
+            return false;
+        }
         const ORDER: [Scroll; 4] = [Scroll::Sidebar, Scroll::Page, Scroll::Table, Scroll::List];
         let scroll =
             ORDER[(started.elapsed().as_secs() / DEMO_STEP.as_secs()) as usize % ORDER.len()];
@@ -450,7 +477,7 @@ fn step(
 impl Showcase {
     fn new(auto: bool, demo: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let container = cx.new(|cx| {
-            let mut container = Container::new(BUTTON_PAGE, cx);
+            let mut container = Container::new(page_seed(BUTTON_PAGE), cx);
             container.title = page_name(BUTTON_PAGE).into();
             container
         });
@@ -535,10 +562,24 @@ impl Showcase {
 
     fn select(&mut self, page: usize, cx: &mut Context<Self>) {
         self.active = page;
+        if page == CHAT_PAGE {
+            // Nothing scrolls the chat page but the user.
+            self.scroll = Scroll::Off;
+            self.driver.borrow_mut().scroll = Scroll::Off;
+        }
         self.container.update(cx, |container, cx| {
-            container.show(page, page_name(page).into(), page_kind(page), cx);
+            container.show(page_seed(page), page_name(page).into(), page_kind(page), cx);
         });
         cx.notify();
+    }
+
+    /// After the user picks a page: focuses it, and goes on with `--demo`'s
+    /// scrolling, which waits while the chat page shows.
+    fn page_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_page(window, cx);
+        if self.driver.borrow().demo.is_some() && self.active != CHAT_PAGE {
+            self.start_frames(window, cx);
+        }
     }
 
     fn set_scroll(&mut self, scroll: Scroll, window: &mut Window, cx: &mut Context<Self>) {
@@ -770,7 +811,7 @@ impl Showcase {
                     .child(self.stories[page].read(cx).name.clone())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.select(page, cx);
-                        this.focus_page(window, cx);
+                        this.page_selected(window, cx);
                     }))
             });
             div()
@@ -831,7 +872,10 @@ impl Showcase {
                     .child(name.clone()),
             )
             .child(div().text_sm().text_color(theme.muted_foreground).child(
-                if self.active == workspace_page() {
+                if self.active == CHAT_PAGE {
+                    "Allsum Desktop's chat window: a cached 200-message transcript to scroll by wheel, trackpad or scrollbar."
+                        .to_string()
+                } else if self.active == workspace_page() {
                     "Docked market panels, every one subscribed to a feed of streaming quotes."
                         .to_string()
                 } else if self.active == table_page() {
@@ -910,11 +954,11 @@ impl Render for Showcase {
             }))
             .on_action(cx.listener(|this, _: &SelectNext, window, cx| {
                 this.select((this.active + 1).min(page_count() - 1), cx);
-                this.focus_page(window, cx);
+                this.page_selected(window, cx);
             }))
             .on_action(cx.listener(|this, _: &SelectPrevious, window, cx| {
                 this.select(this.active.saturating_sub(1), cx);
-                this.focus_page(window, cx);
+                this.page_selected(window, cx);
             }))
             .size_full()
             .flex()

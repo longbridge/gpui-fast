@@ -48,7 +48,7 @@ pub(crate) struct RebuildHandle(Option<AnyView>);
 /// can be built again on its own.
 #[inline(always)]
 pub(crate) fn cached<V: View>(view: V, any: AnyView, style: StyleRefinement) -> ViewElement<V> {
-    ViewElement::new(view).rebuildable(any).cached(style)
+    rebuildable(view, any).cached(style)
 }
 
 /// `view` drawn as a view that can be built again on its own, kept as `any`,
@@ -56,7 +56,8 @@ pub(crate) fn cached<V: View>(view: V, any: AnyView, style: StyleRefinement) -> 
 /// [`AnyView::into_element`](crate::IntoElement::into_element) draw it.
 #[inline(always)]
 pub(crate) fn rebuildable<V: View>(view: V, any: AnyView) -> ViewElement<V> {
-    ViewElement::new(view).rebuildable(any)
+    let view_type_name = any.view_type_name;
+    ViewElement::with_type_name(view, view_type_name).rebuildable(any)
 }
 
 impl<V: View> ViewElement<V> {
@@ -85,6 +86,11 @@ impl Rebuild {
     /// The layout key the view's element was requested under.
     pub(crate) fn parent_layout_key(&self) -> u64 {
         self.parent_layout_key
+    }
+
+    /// Whether the view is a cached view.
+    pub(crate) fn is_cached(&self) -> bool {
+        self.cached_style.is_some()
     }
 }
 
@@ -294,7 +300,7 @@ impl Window {
     pub(crate) fn splice_layout(&mut self, id: &GlobalElementId, cx: &mut App) -> Option<Splice> {
         if self.refreshing
             || cx.has_active_drag()
-            || self.a11y.is_active()
+            || crate::fast::a11y::stale(&self.a11y)
             || self.is_inspector_picking(cx)
             || self.retained_state.dirty_subtrees.contains(id)
             || self.next_frame.retained.by_id.contains_key(id)
@@ -757,6 +763,7 @@ impl Window {
         range: Range<PrepaintStateIndex>,
         dispatch: &mut OpenDispatchCopy,
     ) {
+        crate::fast::a11y::reuse_prepaint(self, &range);
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
                 .iter()

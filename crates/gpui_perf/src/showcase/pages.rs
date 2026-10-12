@@ -1,14 +1,16 @@
 //! The pages the showcase scrolls: a page of component sections inside the
 //! container that owns the scrolled area, as GPUI Kit's `StoryContainer` does;
 //! a data table refreshed by a timer; a list of messages of different
-//! heights; and the trading workspace, in `workspace.rs`.
+//! heights; the trading workspace, in `workspace.rs`; and Allsum's chat
+//! window, the headless `chat-scroll-allsum` scenario's views, scrolled by
+//! hand.
 
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, Entity, FontWeight, Hsla, IntoElement, ListAlignment, ListState,
-    Render, ScrollHandle, SharedString, Task, UniformListScrollHandle, Window, div, hsla, list,
-    point, prelude::*, px, uniform_list,
+    AnyElement, AnyView, App, Context, Entity, FontWeight, Hsla, IntoElement, ListAlignment,
+    ListState, Render, ScrollHandle, SharedString, Task, UniformListScrollHandle, Window, div,
+    hsla, list, point, prelude::*, px, uniform_list,
 };
 
 use super::{
@@ -28,6 +30,7 @@ pub enum PageKind {
     Table,
     List,
     Workspace,
+    Chat,
 }
 
 /// The scrolled area around the page being shown. Scrolling it notifies this
@@ -39,6 +42,8 @@ pub struct Container {
     pub table: Option<Entity<Table>>,
     pub messages: Option<Entity<MessageList>>,
     pub workspace: Option<Entity<Workspace>>,
+    /// Allsum's chat window, built the first time its page shows.
+    chat: Option<AnyView>,
     showing: PageKind,
     pub refreshing: bool,
     /// Whether the workspace's quotes are streaming.
@@ -57,6 +62,7 @@ impl Container {
             table: None,
             messages: None,
             workspace: None,
+            chat: None,
             showing: PageKind::Components,
             refreshing: false,
             streaming: false,
@@ -90,6 +96,9 @@ impl Container {
             PageKind::Workspace if self.workspace.is_none() => {
                 self.workspace = Some(cx.new(Workspace::new));
             }
+            PageKind::Chat if self.chat.is_none() => {
+                self.chat = chat_window(cx);
+            }
             PageKind::Components => self.page.update(cx, |page, cx| {
                 page.seed = seed;
                 cx.notify();
@@ -120,6 +129,15 @@ impl Render for Container {
         if let (PageKind::Workspace, Some(workspace)) = (self.showing, &self.workspace) {
             return div().flex_1().min_h_0().child(workspace.clone());
         }
+        if self.showing == PageKind::Chat {
+            return div()
+                .flex_1()
+                .min_h_0()
+                .children(self.chat.clone())
+                .when(self.chat.is_none(), |this| {
+                    this.p_6().child("The chat page runs on gpui-fast only.")
+                });
+        }
         let content: AnyElement = match (self.showing, &self.table_page, &self.messages) {
             (PageKind::Table, Some(table_page), _) => div()
                 .size_full()
@@ -139,6 +157,18 @@ impl Render for Container {
         };
         div().flex_1().min_h_0().child(content)
     }
+}
+
+/// Allsum's chat window, as the `chat-scroll-allsum` scenario builds it. The
+/// scenario's views are built against gpui-fast, so upstream GPUI has none.
+#[cfg(not(feature = "upstream"))]
+fn chat_window(cx: &mut App) -> Option<AnyView> {
+    Some(gpui_perf::scenarios::chat_patterns::allsum_chat_window(cx))
+}
+
+#[cfg(feature = "upstream")]
+fn chat_window(_: &mut App) -> Option<AnyView> {
+    None
 }
 
 /// A page of component sections, as a GPUI Kit story is: one view whose

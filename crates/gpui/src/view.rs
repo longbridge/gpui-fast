@@ -5,7 +5,10 @@ use crate::{
 };
 use crate::{Empty, Window};
 use anyhow::Result;
-use std::{any::TypeId, fmt};
+use std::{
+    any::{TypeId, type_name},
+    fmt,
+};
 
 /// A dynamically-typed view handle that can be downcast to a specific `Entity<V>`.
 ///
@@ -16,6 +19,7 @@ use std::{any::TypeId, fmt};
 pub struct AnyView {
     entity: AnyEntity,
     render: fn(&AnyView, &mut Window, &mut App) -> AnyElement,
+    pub(crate) view_type_name: &'static str,
 }
 
 impl<V: Render> From<Entity<V>> for AnyView {
@@ -23,6 +27,7 @@ impl<V: Render> From<Entity<V>> for AnyView {
         AnyView {
             entity: value.into_any(),
             render: any_view::render::<V>,
+            view_type_name: type_name::<V>(),
         }
     }
 }
@@ -34,7 +39,7 @@ impl AnyView {
     /// [Context::notify] was called on the backing entity since it was rendered
     /// (or [Window::refresh] is called, which ignores caching).
     pub fn cached(self, style: StyleRefinement) -> ViewElement<AnyView> {
-        crate::fast::splice::cached(self.clone(), self, style)
+        self.into_element().cached(style)
     }
 
     /// Convert this to a weak handle.
@@ -42,6 +47,7 @@ impl AnyView {
         AnyWeakView {
             entity: self.entity.downgrade(),
             render: self.render,
+            view_type_name: self.view_type_name,
         }
     }
 
@@ -53,6 +59,7 @@ impl AnyView {
             Err(entity) => Err(Self {
                 entity,
                 render: self.render,
+                view_type_name: self.view_type_name,
             }),
         }
     }
@@ -114,6 +121,7 @@ impl IntoElement for AnyView {
 pub struct AnyWeakView {
     entity: AnyWeakEntity,
     render: fn(&AnyView, &mut Window, &mut App) -> AnyElement,
+    view_type_name: &'static str,
 }
 
 impl AnyWeakView {
@@ -123,6 +131,7 @@ impl AnyWeakView {
         Some(AnyView {
             entity,
             render: self.render,
+            view_type_name: self.view_type_name,
         })
     }
 }
@@ -132,6 +141,7 @@ impl<V: 'static + Render> From<WeakEntity<V>> for AnyWeakView {
         AnyWeakView {
             entity: view.into(),
             render: any_view::render::<V>,
+            view_type_name: type_name::<V>(),
         }
     }
 }
@@ -246,6 +256,8 @@ pub struct ViewElement<V: View> {
     pub(crate) entity_id: Option<EntityId>,
     pub(crate) cached_style: Option<StyleRefinement>,
     pub(crate) rebuild: crate::fast::splice::RebuildHandle,
+    #[cfg(feature = "profiler")]
+    pub(crate) view_type_name: &'static str,
     #[cfg(debug_assertions)]
     source: &'static core::panic::Location<'static>,
 }
@@ -254,11 +266,21 @@ impl<V: View> ViewElement<V> {
     /// Wrap a [`View`] as an element.
     #[track_caller]
     pub fn new(view: V) -> Self {
+        Self::with_type_name(view, type_name::<V>())
+    }
+
+    /// Wraps a view whose draw time profiling attributes to `view_type_name`,
+    /// such as an entity's type rather than [`Entity`]'s.
+    #[track_caller]
+    #[cfg_attr(not(feature = "profiler"), expect(unused_variables))]
+    pub(crate) fn with_type_name(view: V, view_type_name: &'static str) -> Self {
         let entity_id = view.entity_id();
         ViewElement {
             entity_id,
             cached_style: None,
             rebuild: crate::fast::splice::RebuildHandle::default(),
+            #[cfg(feature = "profiler")]
+            view_type_name,
             view: Some(view),
             #[cfg(debug_assertions)]
             source: core::panic::Location::caller(),

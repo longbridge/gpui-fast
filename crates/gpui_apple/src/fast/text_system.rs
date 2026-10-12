@@ -36,7 +36,7 @@ impl SizedFonts {
 
 #[cfg(test)]
 mod tests {
-    use crate::MacTextSystem;
+    use crate::AppleTextSystem;
     use gpui::{FontRun, PlatformTextSystem, font, px};
 
     /// Fonts are made once per size and kept, so a line laid out with a kept
@@ -45,7 +45,7 @@ mod tests {
     /// apart, and never mixed up with the same font at another size.
     #[test]
     fn lines_laid_out_with_kept_fonts_match_the_first_layout() {
-        let fonts = MacTextSystem::new();
+        let fonts = AppleTextSystem::new();
         let font_id = fonts.font_id(&font("Helvetica")).unwrap();
         let line = "AVAWAY fi ffi 12.5 office";
         // Runs alternate between two sizes a hair apart, to keep ligatures

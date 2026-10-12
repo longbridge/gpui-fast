@@ -288,7 +288,8 @@ frame around it.
 
 Every view is drawn from scratch while the window is refreshed
 (`window.refresh()`, a resize, a focus change), while something is dragged,
-while the inspector is picking, and while accessibility is active. Setting
+while the inspector is picking, and on the first frame after accessibility
+is turned on (see [`retained-mode.md`](retained-mode.md#accessibility)). Setting
 `GPUI_VIEW_RETENTION=0` turns retention off entirely, and scroll layers with
 it; `GPUI_SCROLL_LAYERS=0` turns off scroll layers alone.
 
