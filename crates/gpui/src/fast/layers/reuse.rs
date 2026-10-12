@@ -305,12 +305,18 @@ pub(crate) fn follow_paint(window: &mut Window, from: &Range<PaintIndex>, to: &P
             && a.line_layout_index.lines_index >= c.line_layout_index.lines_index
             && b.line_layout_index.lines_index <= d.line_layout_index.lines_index
     };
+    // A layer's scene index counts from its own scene, so it can lie before
+    // the window's, where shifting it would underflow: it is shifted by none.
+    let from_start = PaintIndex {
+        scene_index: 0,
+        ..from.start.clone()
+    };
+    let to = PaintIndex {
+        scene_index: 0,
+        ..to.clone()
+    };
     let shift = |range: &Range<PaintIndex>| {
-        let mut start = range.start.shifted(&from.start, to);
-        let mut end = range.end.shifted(&from.start, to);
-        start.scene_index = range.start.scene_index;
-        end.scene_index = range.end.scene_index;
-        start..end
+        range.start.shifted(&from_start, &to)..range.end.shifted(&from_start, &to)
     };
     for layer in window.fast_layers.layers.values_mut() {
         if layer.input.prepaint_followed != Some(frame) {

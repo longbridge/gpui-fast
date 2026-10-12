@@ -137,6 +137,15 @@ unchanged, and a new entry needs as good a reason.
   layers from the scene. Polychrome sprites whose texture index is at or
   above `LAYER_TILE_TEXTURE_BASE` are scroll layer tiles, not atlas textures.
 - `crates/gpui/Cargo.toml` names this repository and sets `publish = false`.
+- The workspace pins Taffy 0.14 where upstream pins 0.13. Taffy 0.13 keeps
+  one cached size per kind of constraint, so a node measured under two widths
+  in one layout evicts one with the other, and the clean subtrees around a
+  single dirty node are laid out again on every frame; 0.14 keeps nine sizes
+  per node whatever their kind. 0.14 hands a leaf's measure function its whole
+  layout, so `taffy.rs` lays the tree out through
+  `fast::layout::MeasuredTaffy`, which lays each leaf out around GPUI's
+  measurement as 0.13 did. When upstream moves to 0.14 or later, the sync
+  takes its version and drops `MeasuredTaffy`.
 - Window composition, the API of
   [zed#62379](https://github.com/zed-industries/zed/pull/62379), which
   upstream has not merged yet: native views drawn between a window's GPUI

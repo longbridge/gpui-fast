@@ -46,7 +46,7 @@ edition = "2024"
 xkbcommon = { version = "0.8", default-features = false }
 wasm_thread = { git = "https://github.com/zed-industries/wasm_thread", rev = "0cf96c7708dfb97ccf3da50347e25edcf75d6937", version = "0.3", features = ["es_modules"] }
 tracing-subscriber = "0.3"
-taffy = { version = "=0.13.0", default-features = false }
+taffy = { version = "=0.14.0", default-features = false }
 oo7 = { version = "0.6", default-features = false }
 font-kit = { git = "https://github.com/zed-industries/font-kit", rev = "94b0f28166665e8fd2f53ff6d268a14955c82269", package = "zed-font-kit", version = "0.14.1-zed", default-features = false }
 web-sys = "0.3"

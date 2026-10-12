@@ -839,8 +839,11 @@ impl TaffyLayoutEngine {
             width: taffy::style::Dimension::length(given.width),
             height: taffy::style::Dimension::length(given.height),
         };
-        held.min_size = held.size;
-        held.max_size = held.size;
+        held.min_size = taffy::geometry::Size {
+            width: taffy::style::LengthPercentageAuto::length(given.width),
+            height: taffy::style::LengthPercentageAuto::length(given.height),
+        };
+        held.max_size = held.min_size;
         held.box_sizing = taffy::style::BoxSizing::BorderBox;
         self.taffy.set_style(id.into(), held).expect(EXPECT_MESSAGE);
         self.compute_layout(id, available_space, window, cx);
@@ -1125,6 +1128,37 @@ fn request_measured_node(
     node.measure_log = Some(log);
 
     id
+}
+
+/// The tree as [`TaffyLayoutEngine::compute_layout`] lays it out: each leaf is
+/// measured by a function of the constraints Taffy measures it under. Since
+/// 0.14, Taffy hands that function the leaf's whole layout instead; this lays
+/// the leaf out around the measurement, as Taffy did before.
+pub(crate) struct MeasuredTaffy<'a>(pub(crate) &'a mut TaffyTree<NodeContext>);
+
+impl MeasuredTaffy<'_> {
+    pub(crate) fn compute_layout_with_measure(
+        self,
+        node: taffy::NodeId,
+        available_space: taffy::Size<taffy::AvailableSpace>,
+        mut measure: impl FnMut(
+            taffy::Size<Option<f32>>,
+            taffy::Size<taffy::AvailableSpace>,
+            taffy::NodeId,
+            Option<&mut NodeContext>,
+            &taffy::Style,
+        ) -> taffy::Size<f32>,
+    ) -> taffy::TaffyResult<()> {
+        self.0
+            .compute_layout_with_measure(node, available_space, |inputs, id, context, style| {
+                taffy::compute_leaf_layout(
+                    inputs,
+                    style,
+                    |_, _| 0.0,
+                    |known, available| measure(known, available, id, context, style),
+                )
+            })
+    }
 }
 
 /// Measures, with the closures they were given this frame, the measured
