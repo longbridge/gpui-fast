@@ -76,12 +76,14 @@ fn never_ends_line(c: char) -> bool {
 mod tests {
     use super::{allows_break_between, never_ends_line, never_starts_line};
     use crate::{
-        Boundary, IndentAdjustment, LineFragment, LineWrapper, Pixels, TestAppContext,
-        TestDispatcher, TextRun, TextSystem, WindowTextSystem, font, px,
+        Boundary, FontId, GlyphId, IndentAdjustment, LineFragment, LineLayout, LineWrapper, Pixels,
+        ShapedGlyph, ShapedRun, TestAppContext, TestDispatcher, TextRun, TextSystem,
+        WindowTextSystem, font, point, px,
     };
     use std::sync::Arc;
 
     const SENTENCE: &str = "今天的天气非常好，我们一起去公园散步吧。";
+    const MIXED: &str = "我用（Rust）重写了程序：速度提升了８％，超出预期……「渲染」部分表现亮眼——尤其是《文档》提到的部分。";
 
     fn wrapper() -> (LineWrapper, Arc<TextSystem>) {
         let cx = TestAppContext::build(TestDispatcher::new(0), None);
@@ -131,7 +133,7 @@ mod tests {
 
     #[test]
     fn no_width_starts_a_line_with_closing_or_ends_one_with_opening_punctuation() {
-        let text = "我用（Rust）重写了程序：速度提升了８％，超出预期……「渲染」部分表现亮眼——尤其是《文档》提到的部分。";
+        let text = MIXED;
         let (mut wrapper, text_system) = wrapper();
         let one = width_of(&text_system, &wrapper, "中");
         // From the narrowest line `（Rust）` fits on, so no break is forced.
@@ -225,5 +227,97 @@ mod tests {
         let layout = &line.layout.unwrapped_layout;
         let ix = layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index;
         assert_eq!(&SENTENCE[ix..], "好，我们一起去公园散步吧。");
+    }
+
+    /// A shaped line with one glyph per character, each `advance` wide, as
+    /// text elements wrap it in `LineLayout::compute_wrap_boundaries`.
+    fn layout_of(text: &str, advance: f32) -> LineLayout {
+        let glyphs: Vec<_> = text
+            .char_indices()
+            .enumerate()
+            .map(|(column, (index, _))| ShapedGlyph {
+                id: GlyphId(0),
+                position: point(px(advance * column as f32), px(0.)),
+                index,
+                is_emoji: false,
+            })
+            .collect();
+        LineLayout {
+            font_size: px(16.),
+            width: px(advance * glyphs.len() as f32),
+            ascent: px(12.),
+            descent: px(4.),
+            runs: vec![ShapedRun {
+                font_id: FontId(0),
+                glyphs,
+            }],
+            len: text.len(),
+        }
+    }
+
+    fn wrapped_lines(text: &str, wrap_width: f32) -> Vec<&str> {
+        let layout = layout_of(text, 10.);
+        let mut start = 0;
+        let mut lines = Vec::new();
+        for boundary in layout.compute_wrap_boundaries(text, px(wrap_width), None) {
+            let end = layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index;
+            lines.push(&text[start..end]);
+            start = end;
+        }
+        lines.push(&text[start..]);
+        lines
+    }
+
+    #[test]
+    fn shaped_lines_keep_cjk_punctuation_with_the_character_before_it() {
+        // Eight columns fit, so the comma would open the second line.
+        assert_eq!(
+            wrapped_lines(SENTENCE, 85.),
+            ["今天的天气非常", "好，我们一起去公", "园散步吧。"]
+        );
+        // `(` ends no line, `)` may start one.
+        assert_eq!(
+            wrapped_lines("我们去(公园)散步", 45.),
+            ["我们去", "(公园)", "散步"]
+        );
+        // Latin text still breaks after spaces only.
+        assert_eq!(
+            wrapped_lines("Hello world, 你好世界", 135.),
+            ["Hello world, ", "你好世界"]
+        );
+    }
+
+    #[test]
+    fn no_width_breaks_a_shaped_line_inside_cjk_punctuation() {
+        // From the narrowest line `（Rust）` fits on, so no break is forced.
+        for columns in 6..MIXED.chars().count() {
+            let lines = wrapped_lines(MIXED, 10. * columns as f32 + 5.);
+            for pair in lines.windows(2) {
+                let prev = pair[0].chars().next_back().unwrap();
+                let next = pair[1].chars().next().unwrap();
+                assert!(
+                    allows_break_between(prev, next),
+                    "{columns} columns: {lines:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_shaped_line_breaks_where_it_overflows_when_no_break_is_allowed() {
+        // Nothing may break between these, so lines break where they overflow.
+        let text = "，。、！？：；，。";
+        assert_eq!(
+            wrapped_lines(text, 25.),
+            ["，。", "、！", "？：", "；，", "。"]
+        );
+        assert_eq!(
+            wrapped_lines(text, 5.),
+            ["，", "。", "、", "！", "？", "：", "；", "，", "。"]
+        );
+        assert_eq!(
+            wrapped_lines("好，，，，，，", 35.),
+            ["好，，", "，，，", "，"]
+        );
     }
 }
