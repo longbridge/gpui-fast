@@ -1,4 +1,4 @@
-//! Small fixes to upstream behavior, each too small for a topic of its own.
+//! How fast a touch scroll is flung when the finger lifts.
 
 /// The speed a touch scroll is released with along one axis, in pixels per
 /// second, from the two estimates `VelocityTracker::velocity` in

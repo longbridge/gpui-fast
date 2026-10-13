@@ -1074,11 +1074,11 @@ impl VelocityTracker {
             return point(endpoint_estimate(&horizontal), endpoint_estimate(&vertical));
         }
         point(
-            crate::fast::misc::release_velocity(
+            crate::fast::misc::touch_fling::release_velocity(
                 endpoint_estimate(&horizontal),
                 quadratic_velocity_at_newest(&times_seconds, &horizontal),
             ),
-            crate::fast::misc::release_velocity(
+            crate::fast::misc::touch_fling::release_velocity(
                 endpoint_estimate(&vertical),
                 quadratic_velocity_at_newest(&times_seconds, &vertical),
             ),

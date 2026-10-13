@@ -1,6 +1,6 @@
-//! Tests of [`crate::fast::misc`].
+//! Tests of [`crate::fast::misc::touch_fling`].
 
-use crate::fast::misc::release_velocity;
+use crate::fast::misc::touch_fling::release_velocity;
 
 #[test]
 fn accelerating_flick_keeps_its_release_speed() {
