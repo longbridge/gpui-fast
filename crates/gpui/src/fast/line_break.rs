@@ -16,7 +16,33 @@
 /// space between them, in text that otherwise breaks between any two
 /// characters.
 pub(crate) fn allows_break_between(prev: char, c: char) -> bool {
-    !never_starts_line(c) && !never_ends_line(prev) && !(prev == '—' && c == '—')
+    !never_starts_line(c)
+        && !never_ends_line(prev)
+        && !(prev == '—' && c == '—')
+        && !(is_cjk(prev) && closes_cjk_text(c))
+}
+
+/// ASCII punctuation that, written right after CJK text, closes it like its
+/// full-width form would (UAX #14 classes CL, CP, EX, IS and PO): `你好,世界`.
+/// After Latin text a break before it stays, since that is what lets a long
+/// path or URL wrap.
+fn closes_cjk_text(c: char) -> bool {
+    matches!(c, ',' | '.' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '%')
+}
+
+/// Han, kana, Hangul and full-width forms, the scripts that wrap between
+/// characters rather than at spaces.
+fn is_cjk(c: char) -> bool {
+    matches!(
+        c,
+        '\u{3000}'..='\u{30FF}'
+            | '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{AC00}'..='\u{D7AF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{FF00}'..='\u{FFEF}'
+            | '\u{20000}'..='\u{3FFFF}'
+    )
 }
 
 /// Closing and full-width punctuation that must stay at the end of the line
@@ -132,6 +158,19 @@ mod tests {
     }
 
     #[test]
+    fn an_ascii_comma_after_cjk_text_moves_down_with_it() {
+        let (mut wrapper, text_system) = wrapper();
+        let sentence = "今天的天气非常好,我们一起去公园散步吧.";
+        let fits = "今天的天气非常好";
+        let comma = width_of(&text_system, &wrapper, ",");
+        assert!(comma > px(0.));
+        let width = width_of(&text_system, &wrapper, fits) + comma / 2.;
+
+        let boundaries = wrap(&mut wrapper, sentence, width);
+        assert_eq!(&sentence[boundaries[0]..], "好,我们一起去公园散步吧.");
+    }
+
+    #[test]
     fn no_width_starts_a_line_with_closing_or_ends_one_with_opening_punctuation() {
         let text = MIXED;
         let (mut wrapper, text_system) = wrapper();
@@ -162,7 +201,14 @@ mod tests {
         assert!(!allows_break_between('８', '％'));
         assert!(allows_break_between('去', '('));
         assert!(!allows_break_between('(', '公'));
-        assert!(allows_break_between('园', ')'));
+        assert!(!allows_break_between('园', ')'));
+        // ASCII closing punctuation stays with CJK text, not with Latin text.
+        assert!(!allows_break_between('好', ','));
+        assert!(!allows_break_between('な', '.'));
+        assert!(!allows_break_between('８', '%'));
+        assert!(allows_break_between('m', '.'));
+        assert!(allows_break_between('b', ')'));
+        assert!(allows_break_between(',', '你'));
 
         let (mut wrapper, text_system) = wrapper();
         let one = width_of(&text_system, &wrapper, "中");
