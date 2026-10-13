@@ -266,7 +266,8 @@ fn forget_measurement(inputs: &TextMeasureInputs) {
 ///   a wrapping leaf is measured unconstrained and then again at the width it
 ///   ends up with. Text that came out narrower than the width now on offer
 ///   wraps nowhere, and the lines shaped without a wrap width are the same
-///   lines, so that is answered from what is already there.
+///   lines, so that is answered from what is already there. The other way
+///   round holds only for text that wrapped nowhere at its width.
 /// - Which affix to truncate with, and the line wrapper truncation needs, are
 ///   worked out only when the text truncates and has to be shaped: resolving
 ///   the font and borrowing a wrapper from the pool on every measurement was
@@ -307,13 +308,22 @@ fn measure_text(
     });
 
     // A kept measurement answers when the wrap width is one it was taken at,
-    // or one it fits within unwrapped, unless truncation is involved either
-    // way: a truncated layout would answer an unconstrained probe with the
-    // truncated size.
+    // an unconstrained probe when it wrapped nowhere, or a wrap width it fits
+    // within unwrapped, unless truncation is involved either way: a truncated
+    // layout would answer an unconstrained probe with the truncated size.
+    // Text wrapped at a width is only as wide as that width, and Taffy can
+    // measure a retained leaf narrow after laying it out (see
+    // `text_laid_out_from_the_cache_paints_the_lines_of_its_box`): answering
+    // an unconstrained probe with that would size a box as wide as its
+    // content to the narrow width, for good.
     if let Some(text_layout) = layout.0.borrow().as_ref()
         && let Some(size) = text_layout.size
-        && (wrap_width.is_none()
-            || wrap_width == text_layout.wrap_width
+        && (wrap_width == text_layout.wrap_width
+            || (wrap_width.is_none()
+                && text_layout
+                    .lines
+                    .iter()
+                    .all(|line| line.wrap_boundaries.is_empty()))
             || (text_layout.wrap_width.is_none()
                 && wrap_width.is_some_and(|wrap_width| size.width <= wrap_width)))
         && truncate_width.is_none()
@@ -1044,4 +1054,74 @@ fn resolve_font_uncached(text_system: &crate::TextSystem, font: &crate::Font) ->
             .collect::<Vec<_>>()
             .join(", ")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TextMeasureInputs, measure_text};
+    use crate::{AppContext as _, AvailableSpace, Size, TestAppContext, TextLayout, px};
+    use std::cell::RefCell;
+
+    /// Taffy can measure a retained leaf under other constraints after it has
+    /// been laid out: at width zero, say, when a node above it is sized to its
+    /// content again. Text it wrapped there must not answer a later probe for
+    /// its unwrapped width with the width it wrapped to: a box as wide as its
+    /// content would take that width, the text would wrap in it, and the box
+    /// would stay that narrow with room for the text on one line.
+    #[test]
+    fn text_wrapped_narrow_does_not_answer_for_its_unwrapped_width() {
+        let mut cx = TestAppContext::single();
+        let window = cx.add_window(|_, _| crate::Empty);
+        cx.update_window(window.into(), |_, window, cx| {
+            let text_style = crate::fast::text_style::text_style(window);
+            let font_size = text_style.font_size.to_pixels(window.rem_size());
+            let line_height = text_style
+                .line_height
+                .to_pixels(font_size.into(), window.rem_size());
+            let inputs = TextMeasureInputs {
+                text: "the quick brown fox jumps over the lazy dog".into(),
+                runs: Vec::new(),
+                text_style,
+                font_size,
+                line_height,
+                layout: RefCell::new(TextLayout::default()),
+            };
+            let probe = |width| Size {
+                width,
+                height: AvailableSpace::MaxContent,
+            };
+            let unwrapped = measure_text(
+                &inputs,
+                Size::default(),
+                probe(AvailableSpace::MaxContent),
+                window,
+                cx,
+            );
+
+            let narrow = px(40.);
+            let wrapped = measure_text(
+                &inputs,
+                Size {
+                    width: Some(narrow),
+                    height: None,
+                },
+                probe(AvailableSpace::Definite(narrow)),
+                window,
+                cx,
+            );
+            assert!(
+                wrapped.width < unwrapped.width,
+                "the text should wrap at {narrow:?}: {wrapped:?}, unwrapped {unwrapped:?}"
+            );
+
+            for width in [AvailableSpace::MaxContent, AvailableSpace::MinContent] {
+                assert_eq!(
+                    measure_text(&inputs, Size::default(), probe(width), window, cx),
+                    unwrapped,
+                    "probed under {width:?} after wrapping at {narrow:?}"
+                );
+            }
+        })
+        .unwrap();
+    }
 }
