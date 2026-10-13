@@ -117,6 +117,10 @@ impl LineWrapper {
                             first_non_whitespace_ix = Some(ix);
                         }
 
+                        // An element is no punctuation: the text after it
+                        // may break as if it started the line.
+                        fast_prev_char = '\0';
+
                         element_width
                     }
                 };
@@ -438,7 +442,10 @@ impl LineWrapper {
                     last_candidate_ix = ix;
                     last_candidate_width = width;
                 }
-            } else if c != ' ' && first_non_whitespace_ix.is_some() {
+            } else if c != ' '
+                && first_non_whitespace_ix.is_some()
+                && crate::fast::line_break::allows_break_between(prev_c, c)
+            {
                 last_candidate_ix = ix;
                 last_candidate_width = width;
             }

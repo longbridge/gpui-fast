@@ -235,7 +235,12 @@ impl LineLayout {
                     last_candidate_x = x;
                 }
             } else {
-                if ch != ' ' && first_non_whitespace_ix.is_some() {
+                // Not between CJK punctuation and the character it belongs
+                // to, see `fast::line_break`.
+                if ch != ' '
+                    && first_non_whitespace_ix.is_some()
+                    && crate::fast::line_break::allows_break_between(prev_ch, ch)
+                {
                     last_candidate_ix = Some(boundary);
                     last_candidate_x = x;
                 }
@@ -1175,5 +1180,86 @@ mod tests {
 
         let positions = glyph_x_positions(&layout);
         assert_eq!(positions, vec![0.5, 0.5]);
+    }
+
+    /// One glyph per character, each `advance` wide.
+    fn layout_of(text: &str, advance: f32) -> LineLayout {
+        let glyphs: Vec<_> = text
+            .char_indices()
+            .enumerate()
+            .map(|(column, (index, _))| glyph_at(advance * column as f32, index))
+            .collect();
+        LineLayout {
+            width: px(advance * glyphs.len() as f32),
+            len: text.len(),
+            ..make_layout(glyphs)
+        }
+    }
+
+    fn wrapped_lines(text: &str, wrap_width: f32) -> Vec<&str> {
+        let layout = layout_of(text, 10.);
+        let mut start = 0;
+        let mut lines = Vec::new();
+        for boundary in layout.compute_wrap_boundaries(text, px(wrap_width), None) {
+            let end = layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index;
+            lines.push(&text[start..end]);
+            start = end;
+        }
+        lines.push(&text[start..]);
+        lines
+    }
+
+    #[test]
+    fn test_wrap_keeps_cjk_punctuation_with_the_character_before_it() {
+        // Eight columns fit, so the comma would open the second line.
+        assert_eq!(
+            wrapped_lines("今天的天气非常好，我们一起去公园散步吧。", 85.),
+            ["今天的天气非常", "好，我们一起去公", "园散步吧。"]
+        );
+        // `(` ends no line, `)` may start one.
+        assert_eq!(
+            wrapped_lines("我们去(公园)散步", 45.),
+            ["我们去", "(公园)", "散步"]
+        );
+        // Latin text still breaks after spaces only.
+        assert_eq!(
+            wrapped_lines("Hello world, 你好世界", 135.),
+            ["Hello world, ", "你好世界"]
+        );
+    }
+
+    #[test]
+    fn test_wrap_never_breaks_inside_cjk_punctuation_unless_forced() {
+        let text = "我用（Rust）重写了程序：速度提升了８％，超出预期……「渲染」部分表现亮眼——尤其是《文档》提到的部分。";
+        // From the narrowest line `（Rust）` fits on, so no break is forced.
+        for columns in 6..text.chars().count() {
+            let lines = wrapped_lines(text, 10. * columns as f32 + 5.);
+            for pair in lines.windows(2) {
+                let prev = pair[0].chars().next_back().unwrap();
+                let next = pair[1].chars().next().unwrap();
+                assert!(
+                    crate::fast::line_break::allows_break_between(prev, next),
+                    "{columns} columns: {lines:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_wrap_forces_a_break_where_no_break_is_allowed() {
+        // Nothing may break between these, so lines break where they overflow.
+        let text = "，。、！？：；，。";
+        assert_eq!(
+            wrapped_lines(text, 25.),
+            ["，。", "、！", "？：", "；，", "。"]
+        );
+        assert_eq!(
+            wrapped_lines(text, 5.),
+            ["，", "。", "、", "！", "？", "：", "；", "，", "。"]
+        );
+        assert_eq!(
+            wrapped_lines("好，，，，，，", 35.),
+            ["好，，", "，，，", "，"]
+        );
     }
 }

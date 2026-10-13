@@ -5,9 +5,12 @@
 //! bracket can open a line of its own: `非常好` / `，我们一起`. CJK
 //! typesetting forbids that (W3C clreq / jlreq, UAX #14 classes CL, CP, EX,
 //! IS and NS), and equally forbids an opening bracket or quote ending a line.
-//! The wrapper asks [`allows_break_between`] before it takes a break in front
-//! of such a character, so the line breaks one character earlier and the
-//! punctuation moves down together with the character it belongs to.
+//! The wrappers ([`crate::LineWrapper`] for fragments and truncation,
+//! `LineLayout::compute_wrap_boundaries` for shaped text) ask
+//! [`allows_break_between`] before they take a break in front of such a
+//! character, so the line breaks one character earlier and the punctuation
+//! moves down together with the character it belongs to. Where no allowed
+//! break fits, they still break where the line overflows.
 
 /// Whether a line may wrap between `prev` and `c`, two characters with no
 /// space between them, in text that otherwise breaks between any two
@@ -29,15 +32,28 @@ fn never_starts_line(c: char) -> bool {
             // Ellipses, middle dots and the like, iteration marks.
             | '…' | '‥' | '・' | '･' | '〜' | '‼' | '⁇' | '⁈' | '⁉' | '々' | '〻' | 'ゝ'
             | 'ゞ' | 'ヽ' | 'ヾ'
+            // Postfix full-width signs.
+            | '％'
     )
 }
 
 /// Opening brackets and quotes that must start the line after them
 /// (clreq's 行尾禁则).
+///
+/// The ASCII brackets are here too, as in UAX #14 (class OP). This only takes
+/// breaks away, and only after the bracket: the wrappers break before a word
+/// character only after a space, so in Latin text, code and URLs, where `(`
+/// is followed by a letter, nothing changes, while `(` no longer ends a line
+/// before the CJK text it opens. ASCII closing punctuation is left out, since
+/// a break before `)` or `?` is what lets a long path or URL wrap at all.
 fn never_ends_line(c: char) -> bool {
     matches!(
         c,
-        '（' | '［'
+        // ASCII brackets.
+        '(' | '[' | '{'
+            // Full-width and CJK brackets and quotes.
+            | '（'
+            | '［'
             | '｛'
             | '「'
             | '『'
@@ -61,7 +77,7 @@ mod tests {
     use super::{allows_break_between, never_ends_line, never_starts_line};
     use crate::{
         Boundary, IndentAdjustment, LineFragment, LineWrapper, Pixels, TestAppContext,
-        TestDispatcher, TextSystem, font, px,
+        TestDispatcher, TextRun, TextSystem, WindowTextSystem, font, px,
     };
     use std::sync::Arc;
 
@@ -141,6 +157,10 @@ mod tests {
         assert!(allows_break_between('用', '（'));
         assert!(allows_break_between('）', '重'));
         assert!(!allows_break_between('—', '—'));
+        assert!(!allows_break_between('８', '％'));
+        assert!(allows_break_between('去', '('));
+        assert!(!allows_break_between('(', '公'));
+        assert!(allows_break_between('园', ')'));
 
         let (mut wrapper, text_system) = wrapper();
         let one = width_of(&text_system, &wrapper, "中");
@@ -149,5 +169,61 @@ mod tests {
         // Latin words still break at spaces only, and CJK after them anywhere.
         let width = width_of(&text_system, &wrapper, "world, 你好") + one / 2.;
         assert_eq!(wrap(&mut wrapper, "Hello world, 你好世界", width), [6, 19]);
+    }
+
+    #[test]
+    fn text_after_an_element_breaks_as_if_it_started_the_line() {
+        let (mut wrapper, text_system) = wrapper();
+        let one = width_of(&text_system, &wrapper, "中");
+        let fragments = [
+            LineFragment::text("看（"),
+            LineFragment::element(one, 1),
+            LineFragment::text("我们一起散步"),
+        ];
+        // `（` holds on to the element, not to the `我` after it.
+        let boundaries: Vec<_> = wrapper
+            .wrap_line(&fragments, one * 3.5, IndentAdjustment::NoIndent)
+            .map(|Boundary { ix, .. }| ix)
+            .collect();
+        assert_eq!(boundaries[0], "看（".len() + 1);
+    }
+
+    #[test]
+    fn shaped_text_keeps_a_comma_with_the_character_before_it() {
+        let cx = TestAppContext::build(TestDispatcher::new(0), None);
+        let text_system = WindowTextSystem::new(cx.text_system().clone());
+        let runs = [TextRun {
+            len: SENTENCE.len(),
+            font: font(".ZedMono"),
+            ..Default::default()
+        }];
+        let shape = |wrap_width| {
+            text_system
+                .shape_text(SENTENCE.into(), px(16.), &runs, wrap_width, None)
+                .unwrap()
+                .remove(0)
+        };
+        let glyph_x = |line: &crate::WrappedLine, index: usize| {
+            line.layout
+                .unwrapped_layout
+                .runs
+                .iter()
+                .flat_map(|run| &run.glyphs)
+                .find(|glyph| glyph.index == index)
+                .unwrap()
+                .position
+                .x
+        };
+
+        // The line ends halfway through the comma.
+        let comma = SENTENCE.find('，').unwrap();
+        let line = shape(None);
+        let width = (glyph_x(&line, comma) + glyph_x(&line, comma + '，'.len_utf8())) / 2.;
+
+        let line = shape(Some(width));
+        let boundary = line.layout.wrap_boundaries()[0];
+        let layout = &line.layout.unwrapped_layout;
+        let ix = layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index;
+        assert_eq!(&SENTENCE[ix..], "好，我们一起去公园散步吧。");
     }
 }
