@@ -25,6 +25,7 @@ pub(crate) mod layers;
 pub(crate) mod layout;
 pub(crate) mod layout_bounds;
 pub(crate) mod layout_key;
+pub(crate) mod misc;
 pub(crate) mod number_shaping;
 pub(crate) mod path_cache;
 pub(crate) mod retained;

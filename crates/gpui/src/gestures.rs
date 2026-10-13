@@ -1073,30 +1073,16 @@ impl VelocityTracker {
         if times_seconds.len() < 3 {
             return point(endpoint_estimate(&horizontal), endpoint_estimate(&vertical));
         }
-        // Release velocity from two estimators, reconciled:
-        //   * `fitted` — quadratic fit's instantaneous velocity at the newest
-        //     sample; captures a fast release well, but with few / noisy /
-        //     non-monotonic samples (finger easing off right before lift) it can
-        //     come out tiny or even opposite-signed → the fling then either
-        //     launches backwards ("scroll reverses on release") or dies ("no
-        //     inertia", the tiny value falls under the fling threshold).
-        //   * `endpoint` — average velocity over the window; robust in direction
-        //     and reflects the overall flick speed, but understates a quick flick
-        //     that started slow.
-        // Take the DIRECTION from the displacement (`endpoint`) so momentum never
-        // reverses, and the MAGNITUDE from whichever estimator is larger so a
-        // genuine flick keeps its inertia even when the finger decelerated at the
-        // very end. A slow drag-and-stop leaves both small, so it still won't fling.
-        let reconcile = |values: &[f64]| -> f32 {
-            let endpoint = endpoint_estimate(values);
-            let fitted =
-                quadratic_velocity_at_newest(&times_seconds, values).map_or(endpoint, |v| v as f32);
-            if endpoint == 0. {
-                return fitted;
-            }
-            endpoint.signum() * fitted.abs().max(endpoint.abs())
-        };
-        point(reconcile(&horizontal), reconcile(&vertical))
+        point(
+            crate::fast::misc::release_velocity(
+                endpoint_estimate(&horizontal),
+                quadratic_velocity_at_newest(&times_seconds, &horizontal),
+            ),
+            crate::fast::misc::release_velocity(
+                endpoint_estimate(&vertical),
+                quadratic_velocity_at_newest(&times_seconds, &vertical),
+            ),
+        )
     }
 }
 
