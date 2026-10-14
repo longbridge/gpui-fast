@@ -12,7 +12,7 @@
 //! a compositing manager blends windows with an ARGB visual, the GPUI content
 //! stacked above the native surfaces is instead drawn into a transparent
 //! override-redirect window kept over the window, which the compositing
-//! manager blends over the native content. Its input shape is its content, so
+//! manager blends over the native content. Its input shape uses GPUI hitboxes, so
 //! input elsewhere reaches the windows below it, and its input is delivered
 //! to the window it covers.
 
@@ -67,6 +67,7 @@ impl Composition {
             order: Vec::new(),
             occluders: FxHashMap::default(),
             overlay: Overlay::Unknown,
+            input_windows: Vec::new(),
         })))
     }
 
@@ -87,6 +88,7 @@ struct X11Composition {
     order: Vec<PlatformCompositionSurface>,
     occluders: FxHashMap<CompositionSurfaceId, Vec<Bounds<DevicePixels>>>,
     overlay: Overlay,
+    input_windows: Vec<xproto::Window>,
 }
 
 struct X11NativeSurfaceState {
@@ -203,6 +205,7 @@ impl X11NativeSurfaceState {
     }
 
     fn destroy(&mut self) {
+        INPUT_WINDOWS.with(|windows| windows.borrow_mut().remove(&self.x_window));
         if std::mem::replace(&mut self.destroyed, true) {
             return;
         }
@@ -402,6 +405,8 @@ impl X11Composition {
                     deviceid: XINPUT_ALL_DEVICE_GROUPS,
                     mask: vec![
                         xinput::XIEventMask::MOTION
+                            | xinput::XIEventMask::ENTER
+                            | xinput::XIEventMask::LEAVE
                             | xinput::XIEventMask::BUTTON_PRESS
                             | xinput::XIEventMask::BUTTON_RELEASE,
                     ],
@@ -530,6 +535,12 @@ impl X11Composition {
     }
 
     fn destroy(&mut self) {
+        INPUT_WINDOWS.with(|windows| {
+            let mut windows = windows.borrow_mut();
+            for id in self.input_windows.drain(..) {
+                windows.remove(&id);
+            }
+        });
         for surface in self
             .native_surfaces
             .drain(..)
@@ -656,8 +667,13 @@ impl X11Composition {
 
     /// Draws `scene`, the GPUI content above the native surfaces, into the
     /// overlay window, creating it on first use and unmapping it when the
-    /// scene is empty.
-    fn draw_overlay(&mut self, window: &X11Window, scene: &Scene) -> anyhow::Result<()> {
+    /// scene and its input region are empty.
+    fn draw_overlay(
+        &mut self,
+        window: &X11Window,
+        scene: &Scene,
+        input: Vec<Bounds<DevicePixels>>,
+    ) -> anyhow::Result<()> {
         let Overlay::Supported {
             root,
             colormap,
@@ -667,7 +683,7 @@ impl X11Composition {
         else {
             return Ok(());
         };
-        if scene.is_empty() {
+        if scene.is_empty() && input.is_empty() {
             if let Some(overlay) = overlay.take() {
                 *spare_renderer = Some(overlay.destroy(&self.xcb));
                 xcb_flush(&self.xcb);
@@ -712,9 +728,13 @@ impl X11Composition {
                     size,
                 )?;
                 INPUT_WINDOWS.with(|windows| {
-                    windows
-                        .borrow_mut()
-                        .insert(created.x_window, window.0.clone())
+                    windows.borrow_mut().insert(
+                        created.x_window,
+                        InputWindow {
+                            window: window.0.clone(),
+                            native: None,
+                        },
+                    )
                 });
                 overlay.insert(created)
             }
@@ -733,7 +753,7 @@ impl X11Composition {
             ),
             size,
         )?;
-        overlay.set_input(&self.xcb, scene_occluders(scene, false))?;
+        overlay.set_input(&self.xcb, input)?;
         overlay.map(&self.xcb)?;
         overlay.raise_above(&self.xcb, self.x_window);
         overlay.renderer.draw(scene);
@@ -760,16 +780,60 @@ impl X11Composition {
 }
 
 thread_local! {
-    /// The windows that overlay windows cover, by overlay window, so input on
-    /// an overlay window is delivered to the window below it.
-    static INPUT_WINDOWS: RefCell<FxHashMap<xproto::Window, X11WindowStatePtr>> =
+    /// Existing overlay routing plus opted-in native pointer slots. Native
+    /// entries never participate in keyboard or window-configuration lookup.
+    static INPUT_WINDOWS: RefCell<FxHashMap<xproto::Window, InputWindow>> =
         RefCell::default();
 }
 
-/// `X11Client::get_window`'s fallback for an overlay window: the window it
-/// covers, which shares its coordinate space.
+struct InputWindow {
+    window: X11WindowStatePtr,
+    native: Option<Weak<dyn PlatformSurfaceAttachment>>,
+}
+
+/// Overlays and opted-in native slots share the existing window dispatcher.
 pub(crate) fn input_window(x_window: xproto::Window) -> Option<X11WindowStatePtr> {
-    INPUT_WINDOWS.with(|windows| windows.borrow().get(&x_window).cloned())
+    INPUT_WINDOWS.with(|windows| {
+        windows
+            .borrow()
+            .get(&x_window)
+            .filter(|input| input.native.is_none())
+            .map(|input| input.window.clone())
+    })
+}
+
+pub(crate) fn pointer_window(x_window: xproto::Window) -> Option<X11WindowStatePtr> {
+    INPUT_WINDOWS.with(|windows| {
+        let windows = windows.borrow();
+        let input = windows.get(&x_window)?;
+        if let Some(native) = &input.native {
+            native.upgrade()?;
+        }
+        Some(input.window.clone())
+    })
+}
+
+pub(crate) fn pointer_window_id(x_window: xproto::Window) -> xproto::Window {
+    pointer_window(x_window).map_or(x_window, |window| window.x_window)
+}
+
+/// Native XInput coordinates are local to the slot, including during its grab.
+pub(crate) fn pointer_position(
+    x_window: xproto::Window,
+    position: Point<gpui::Pixels>,
+    scale: f32,
+) -> Point<gpui::Pixels> {
+    let native = INPUT_WINDOWS.with(|windows| {
+        windows
+            .borrow()
+            .get(&x_window)
+            .and_then(|input| input.native.clone())
+    });
+    native
+        .and_then(|native| native.upgrade())
+        .map_or(position, |native| {
+            position + native.bounds().to_pixels(scale).origin
+        })
 }
 
 /// Whether a window draws the GPUI content above its native surfaces into an
@@ -1096,9 +1160,18 @@ pub(crate) fn draw_composed(window: &X11Window, scene: ComposedScene<'_>) {
     // the shadows and backdrops blended over native content.
     let mut window_scene = Scene::default();
     let mut overlay_scene = Scene::default();
+    let mut overlay_input = Vec::new();
     let mut occluders = FxHashMap::default();
     for layer in scene.layers() {
         let in_overlay = overlay_surfaces.contains(&layer.surface);
+        if in_overlay {
+            overlay_input.extend(
+                scene
+                    .layer_hitboxes(layer)
+                    .iter()
+                    .map(|hitbox| hitbox.bounds.to_device_pixels(window.scale_factor())),
+            );
+        }
         let cuts_out = track_occluders && layer.surface != base_surface;
         let mut layer_scene = Scene::default();
         for range in &layer.ranges {
@@ -1137,7 +1210,7 @@ pub(crate) fn draw_composed(window: &X11Window, scene: ComposedScene<'_>) {
     }
     if overlay_surfaces.is_empty() {
         composition.hide_overlay();
-    } else if let Err(error) = composition.draw_overlay(window, &overlay_scene) {
+    } else if let Err(error) = composition.draw_overlay(window, &overlay_scene, overlay_input) {
         log::error!("drawing the X11 composition overlay window: {error:#}");
     }
     drop(composition);
@@ -1194,7 +1267,54 @@ pub(crate) fn set_composition_order(
     composition
         .occluders
         .retain(|id, _| surfaces.iter().any(|surface| surface.id == *id));
-    composition.apply_order()
+    composition.apply_order()?;
+    let inputs = surfaces
+        .iter()
+        .filter(|surface| match &surface.content {
+            PlatformCompositionSurfaceContent::Native(attachment)
+            | PlatformCompositionSurfaceContent::ExternalGpu(attachment) => {
+                attachment.input_forwarding()
+            }
+            PlatformCompositionSurfaceContent::Gpui => false,
+        })
+        .map(|surface| {
+            let attachment = match &surface.content {
+                PlatformCompositionSurfaceContent::Native(attachment)
+                | PlatformCompositionSurfaceContent::ExternalGpu(attachment) => attachment,
+                PlatformCompositionSurfaceContent::Gpui => {
+                    anyhow::bail!("GPUI surface cannot forward native input")
+                }
+            };
+            let handle = attachment
+                .platform_handle()?
+                .downcast::<rwh::RawWindowHandle>()
+                .map_err(|_| anyhow!("native X11 input surface has no window handle"))?;
+            let id = match *handle {
+                rwh::RawWindowHandle::Xcb(handle) => handle.window.get(),
+                rwh::RawWindowHandle::Xlib(handle) => u32::try_from(handle.window)?,
+                _ => anyhow::bail!("native input surface requires an X11 window"),
+            };
+            anyhow::ensure!(id != 0, "native X11 input window is null");
+            Ok((
+                id,
+                InputWindow {
+                    window: window.0.clone(),
+                    native: Some(Rc::downgrade(attachment)),
+                },
+            ))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    INPUT_WINDOWS.with(|windows| {
+        let mut windows = windows.borrow_mut();
+        for id in composition.input_windows.drain(..) {
+            windows.remove(&id);
+        }
+        for (id, input) in inputs {
+            windows.insert(id, input);
+            composition.input_windows.push(id);
+        }
+    });
+    Ok(())
 }
 
 #[cfg(test)]

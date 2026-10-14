@@ -114,6 +114,7 @@ impl LayerPolicy {
 /// not composited in another.
 #[derive(Clone, PartialEq)]
 struct LayerContext {
+    composition_surface: Option<crate::fast::composition::CompositionSurfaceId>,
     bounds: Bounds<Pixels>,
     content_size: Size<Pixels>,
     content_mask: ContentMask<Pixels>,
@@ -126,6 +127,7 @@ struct LayerContext {
 impl LayerContext {
     fn current(window: &Window, bounds: Bounds<Pixels>, content_size: Size<Pixels>) -> Self {
         LayerContext {
+            composition_surface: crate::fast::composition::input_surface(window),
             bounds,
             content_size,
             content_mask: window.content_mask(),

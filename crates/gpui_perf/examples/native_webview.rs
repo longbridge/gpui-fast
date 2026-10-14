@@ -58,10 +58,7 @@ mod platform {
     use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 
     #[cfg(target_os = "windows")]
-    use gpui::{
-        DispatchPhase, Modifiers, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-        NavigationDirection, ScrollDelta, ScrollWheelEvent,
-    };
+    use gpui::{DispatchEventResult, Modifiers, NavigationDirection, PlatformInput, ScrollDelta};
     #[cfg(target_os = "windows")]
     use webview2_com::{
         CoTaskMemPWSTR, CreateCoreWebView2CompositionControllerCompletedHandler,
@@ -489,6 +486,8 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     }
 
     struct NativeWebView {
+        #[cfg(target_os = "windows")]
+        geometry: std::cell::Cell<(Bounds<Pixels>, f32)>,
         #[cfg(target_os = "macos")]
         gpui_view: id,
         // Dropped before `surface`, whose native surface it presents to.
@@ -638,6 +637,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
             Ok(Self {
                 surface,
                 hwnd,
+                geometry: std::cell::Cell::new((Bounds::default(), window.scale_factor())),
                 controller,
                 webview_controller,
                 webview,
@@ -656,6 +656,12 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
                 .downcast::<RawWindowHandle>()
                 .map_err(|_| anyhow::anyhow!("native surface did not provide a window handle"))?;
             let renderer = NativeSurfaceRenderer::new(display, *native_window)?;
+            // The GPU content has no controls. GPUI owns outside-click capture,
+            // and the native slot consumes input instead of activating content behind it.
+            composition.on_input(surface.id(), |_| gpui::DispatchEventResult {
+                propagate: false,
+                default_prevented: false,
+            })?;
             Ok(Self {
                 renderer: RefCell::new(renderer),
                 surface,
@@ -668,6 +674,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
                 .set_bounds(bounds.to_device_pixels(scale_factor))?;
             #[cfg(target_os = "windows")]
             unsafe {
+                self.geometry.set((bounds, scale_factor));
                 let device_bounds = bounds.to_device_pixels(scale_factor);
                 self.webview_controller.SetBounds(RECT {
                     left: 0,
@@ -714,6 +721,91 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         }
 
         #[cfg(target_os = "windows")]
+        fn receive_input(&self, event: &PlatformInput) -> DispatchEventResult {
+            let (bounds, scale) = self.geometry.get();
+            match event {
+                PlatformInput::MouseDown(event) => self.send_mouse_input(
+                    match event.button {
+                        MouseButton::Left => COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOWN,
+                        MouseButton::Right => COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOWN,
+                        MouseButton::Middle => COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_DOWN,
+                        MouseButton::Navigate(_) => COREWEBVIEW2_MOUSE_EVENT_KIND_X_BUTTON_DOWN,
+                    },
+                    Some(event.button),
+                    event.modifiers,
+                    Self::navigation_mouse_data(event.button),
+                    event.position,
+                    bounds,
+                    scale,
+                ),
+                PlatformInput::MouseUp(event) => self.send_mouse_input(
+                    match event.button {
+                        MouseButton::Left => COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_UP,
+                        MouseButton::Right => COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_UP,
+                        MouseButton::Middle => COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_UP,
+                        MouseButton::Navigate(_) => COREWEBVIEW2_MOUSE_EVENT_KIND_X_BUTTON_UP,
+                    },
+                    None,
+                    event.modifiers,
+                    Self::navigation_mouse_data(event.button),
+                    event.position,
+                    bounds,
+                    scale,
+                ),
+                PlatformInput::MouseMove(event) => self.send_mouse_input(
+                    COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
+                    event.pressed_button,
+                    event.modifiers,
+                    0,
+                    event.position,
+                    bounds,
+                    scale,
+                ),
+                PlatformInput::MouseExited(event) => self.send_mouse_input(
+                    COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
+                    event.pressed_button,
+                    event.modifiers,
+                    0,
+                    event.position,
+                    bounds,
+                    scale,
+                ),
+                PlatformInput::ScrollWheel(event) => {
+                    let amount = match event.delta {
+                        ScrollDelta::Pixels(delta) => delta.map(f32::from),
+                        ScrollDelta::Lines(delta) => delta * 120.,
+                    };
+                    for (kind, amount) in [
+                        (COREWEBVIEW2_MOUSE_EVENT_KIND_WHEEL, amount.y),
+                        (COREWEBVIEW2_MOUSE_EVENT_KIND_HORIZONTAL_WHEEL, -amount.x),
+                    ] {
+                        if amount != 0. {
+                            self.send_mouse_input(
+                                kind,
+                                None,
+                                event.modifiers,
+                                amount as i32 as u32,
+                                event.position,
+                                bounds,
+                                scale,
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    return DispatchEventResult {
+                        propagate: true,
+                        default_prevented: false,
+                    };
+                }
+            }
+            DispatchEventResult {
+                propagate: false,
+                default_prevented: false,
+            }
+        }
+
+        #[cfg(target_os = "windows")]
         fn send_mouse_input(
             &self,
             event_kind: COREWEBVIEW2_MOUSE_EVENT_KIND,
@@ -724,9 +816,6 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
             bounds: Bounds<Pixels>,
             scale_factor: f32,
         ) {
-            if !bounds.contains(&position) {
-                return;
-            }
             let mut virtual_keys = COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_NONE;
             if modifiers.control {
                 virtual_keys |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_CONTROL;
@@ -851,106 +940,6 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
             _window: &mut Window,
             _cx: &mut App,
         ) {
-            #[cfg(target_os = "windows")]
-            {
-                let bounds = _bounds;
-                let window = _window;
-                let scale_factor = window.scale_factor();
-                let webview = self.webview.clone();
-                window.on_mouse_event({
-                    let webview = webview.clone();
-                    move |event: &MouseDownEvent, phase, _, _| {
-                        if phase == DispatchPhase::Bubble {
-                            let event_kind = match event.button {
-                                MouseButton::Left => COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOWN,
-                                MouseButton::Right => {
-                                    COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOWN
-                                }
-                                MouseButton::Middle => {
-                                    COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_DOWN
-                                }
-                                MouseButton::Navigate(NavigationDirection::Back) => {
-                                    COREWEBVIEW2_MOUSE_EVENT_KIND_X_BUTTON_DOWN
-                                }
-                                MouseButton::Navigate(NavigationDirection::Forward) => {
-                                    COREWEBVIEW2_MOUSE_EVENT_KIND_X_BUTTON_DOWN
-                                }
-                            };
-                            webview.send_mouse_input(
-                                event_kind,
-                                Some(event.button),
-                                event.modifiers,
-                                NativeWebView::navigation_mouse_data(event.button),
-                                event.position,
-                                bounds,
-                                scale_factor,
-                            );
-                        }
-                    }
-                });
-                window.on_mouse_event({
-                    let webview = webview.clone();
-                    move |event: &MouseUpEvent, phase, _, _| {
-                        if phase == DispatchPhase::Bubble {
-                            let event_kind = match event.button {
-                                MouseButton::Left => COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_UP,
-                                MouseButton::Right => COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_UP,
-                                MouseButton::Middle => {
-                                    COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_UP
-                                }
-                                MouseButton::Navigate(NavigationDirection::Back) => {
-                                    COREWEBVIEW2_MOUSE_EVENT_KIND_X_BUTTON_UP
-                                }
-                                MouseButton::Navigate(NavigationDirection::Forward) => {
-                                    COREWEBVIEW2_MOUSE_EVENT_KIND_X_BUTTON_UP
-                                }
-                            };
-                            webview.send_mouse_input(
-                                event_kind,
-                                Some(event.button),
-                                event.modifiers,
-                                NativeWebView::navigation_mouse_data(event.button),
-                                event.position,
-                                bounds,
-                                scale_factor,
-                            );
-                        }
-                    }
-                });
-                window.on_mouse_event({
-                    let webview = webview.clone();
-                    move |event: &MouseMoveEvent, phase, _, _| {
-                        if phase == DispatchPhase::Bubble {
-                            webview.send_mouse_input(
-                                COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
-                                event.pressed_button,
-                                event.modifiers,
-                                0,
-                                event.position,
-                                bounds,
-                                scale_factor,
-                            );
-                        }
-                    }
-                });
-                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, _| {
-                    if phase == DispatchPhase::Bubble {
-                        let amount = match event.delta {
-                            ScrollDelta::Pixels(delta) => f32::from(delta.y),
-                            ScrollDelta::Lines(delta) => delta.y * 120.0,
-                        };
-                        webview.send_mouse_input(
-                            COREWEBVIEW2_MOUSE_EVENT_KIND_WHEEL,
-                            None,
-                            event.modifiers,
-                            amount as i32 as u32,
-                            event.position,
-                            bounds,
-                            scale_factor,
-                        );
-                    }
-                });
-            }
         }
     }
 
@@ -1405,7 +1394,23 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
                 },
                 |window: &mut Window, cx: &mut App| {
                     let webview = window.enable_window_composition().and_then(|composition| {
-                        NativeWebView::new(window, &composition).map(Rc::new)
+                        NativeWebView::new(window, &composition).and_then(|webview| {
+                            let webview = Rc::new(webview);
+                            #[cfg(target_os = "windows")]
+                            {
+                                let weak = Rc::downgrade(&webview);
+                                composition.on_input(webview.surface.id(), move |event| {
+                                    weak.upgrade().map_or(
+                                        DispatchEventResult {
+                                            propagate: true,
+                                            default_prevented: false,
+                                        },
+                                        |webview| webview.receive_input(event),
+                                    )
+                                })?;
+                            }
+                            Ok(webview)
+                        })
                     });
                     match webview {
                         Ok(webview) => {

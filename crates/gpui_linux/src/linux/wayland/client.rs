@@ -2401,12 +2401,17 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                 ..
             } => {
                 let position = point(px(surface_x as f32), px(surface_y as f32));
+                let position = crate::fast::composition::wayland::pointer_position(
+                    &mut state,
+                    Some(&surface.id()),
+                    position,
+                );
                 state.serial_tracker.update(SerialKind::MouseEnter, serial);
                 state.mouse_location = Some(position);
                 state.button_pressed = None;
 
                 if let Some(window) =
-                    crate::fast::composition::wayland::get_input_window(&mut state, &surface.id())
+                    crate::fast::composition::wayland::get_pointer_window(&mut state, &surface.id())
                 {
                     state.mouse_focused_window = Some(window.clone());
 
@@ -2464,7 +2469,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                 if state.mouse_focused_window.is_none() {
                     return;
                 }
-                state.mouse_location = Some(point(px(surface_x as f32), px(surface_y as f32)));
+                state.mouse_location = Some(crate::fast::composition::wayland::pointer_position(
+                    &mut state,
+                    None,
+                    point(px(surface_x as f32), px(surface_y as f32)),
+                ));
                 state.restore_cursor_after_hide();
 
                 if let Some(window) = state.mouse_focused_window.clone() {

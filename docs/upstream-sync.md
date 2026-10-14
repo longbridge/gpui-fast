@@ -178,6 +178,17 @@ for `gpui_macos`, `WgpuRenderer` gains `new_sharing_atlas` and
   `gpui_perf` shows composition on macOS, Windows and Linux, and
   `linux_webview` shows a WebKitGTK page under overlays on X11.
 
+Composition input extends that existing exception: `ComposedScene::layer_hitboxes`
+lets the separate platform crates use prepared GPUI hitboxes instead of inferring
+input from graphics. `WindowComposition::on_input` registers a cooperating
+windowless producer; the defaulted `PlatformSurfaceAttachment::input_forwarding`
+reader carries that choice through the existing platform-order update. Existing
+attachment implementations and platform surface struct initializers stay valid. OS-managed child views keep
+their platform event loop. Capture runs first, press ownership survives through
+release, and leave is sent when the pointer changes recipients. Prepaint scopes
+and retained context keep input ownership with the same surface as its paint.
+No application-specific timeline policy belongs here.
+
 When the check fails, move the change into a `fast/` module and leave a hook
 behind that names it; use `git diff <import_commit> -- <file>` to see what
 differs.

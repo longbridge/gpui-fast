@@ -9,25 +9,24 @@
 //! the window's view.
 //!
 //! An overlay view covers the whole window, so it takes mouse events only
-//! while its surface drew something last frame, and hands them to the
-//! window's view; otherwise AppKit's hit testing passes through it to the
-//! native views below.
+//! within the prepared GPUI hitboxes of its surface and hands them to the
+//! window's view. Elsewhere, AppKit hit testing reaches the native views below.
 
 use std::{
     any::Any,
-    cell::Cell,
+    cell::{Cell, RefCell},
     ffi::c_void,
     ptr::{self, NonNull},
     rc::Rc,
     sync::{
         Arc, Weak,
-        atomic::{AtomicBool, AtomicPtr, Ordering},
+        atomic::{AtomicPtr, Ordering},
     },
 };
 
 use anyhow::{Context as _, Result, anyhow};
 use cocoa::{
-    appkit::{NSView, NSViewHeightSizable, NSViewWidthSizable},
+    appkit::{NSEvent, NSEventType, NSView, NSViewHeightSizable, NSViewWidthSizable},
     base::{id, nil},
     foundation::{NSPoint, NSRect, NSSize},
 };
@@ -40,7 +39,7 @@ use objc::{
     class,
     declare::ClassDecl,
     msg_send,
-    runtime::{Class, NO, Object, Sel, YES},
+    runtime::{BOOL, Class, NO, Object, Sel, YES},
     sel, sel_impl,
 };
 use parking_lot::Mutex;
@@ -54,9 +53,10 @@ use crate::{
 };
 
 /// The ivar of a `GPUIOverlayView` holding its surface's
-/// [`MacGpuiSurface::input_active`], an `Arc<AtomicBool>` turned into a raw
+/// [`MacGpuiSurface::input_regions`], a UI-thread-local `Rc` turned into a raw
 /// pointer.
-const OVERLAY_INPUT_IVAR: &str = "overlayInputActive";
+const OVERLAY_INPUT_IVAR: &str = "overlayInputRegions";
+const NATIVE_INPUT_IVAR: &str = "compositionInputActive";
 
 /// The `GPUIOverlayView` class, registered by [`build_overlay_view_class`].
 static OVERLAY_VIEW_CLASS: AtomicPtr<Class> = AtomicPtr::new(ptr::null_mut());
@@ -73,6 +73,14 @@ pub(crate) struct MacComposition {
     renderer_context: renderer::Context,
     /// Native identities, parents and sibling order, independent of geometry.
     view_order: Vec<(CompositionSurfaceId, usize, usize)>,
+    native_views: Rc<Vec<usize>>,
+    input_order: Rc<Vec<InputLayer>>,
+    native_event: usize,
+    native_buttons: u64,
+    native_owner: Option<usize>,
+    input_forwarders: FxHashSet<usize>,
+    event_result: gpui::DispatchEventResult,
+    forwarding_scroll: bool,
 }
 
 impl MacComposition {
@@ -82,17 +90,32 @@ impl MacComposition {
             gpui_surfaces: FxHashMap::default(),
             renderer_context,
             view_order: Vec::new(),
+            native_views: Rc::new(Vec::new()),
+            input_order: Rc::new(Vec::new()),
+            native_event: 0,
+            native_buttons: 0,
+            native_owner: None,
+            input_forwarders: FxHashSet::default(),
+            event_result: gpui::DispatchEventResult {
+                propagate: true,
+                default_prevented: false,
+            },
+            forwarding_scroll: false,
         }
     }
+}
+
+enum InputLayer {
+    Gpui(Rc<RefCell<Vec<gpui::Hitbox>>>),
+    Native(usize),
 }
 
 /// A GPUI surface above the base one: an overlay view and its renderer.
 struct MacGpuiSurface {
     view: NonNull<Object>,
     renderer: renderer::Renderer,
-    /// Whether the surface drew anything last frame, and so takes the mouse
-    /// events over it; shared with the view.
-    input_active: Arc<AtomicBool>,
+    /// Prepared GPUI hitboxes, shared with the overlay view on the UI thread.
+    input_regions: Rc<RefCell<Vec<gpui::Hitbox>>>,
 }
 
 /// Registers the `GPUIOverlayView` class, with the window's other classes.
@@ -139,16 +162,319 @@ pub(crate) unsafe fn build_overlay_view_class() {
     OVERLAY_VIEW_CLASS.store(class as *mut Class, Ordering::Release);
 }
 
-extern "C" fn overlay_hit_test(this: &Object, _: Sel, _: NSPoint) -> id {
-    let active = unsafe {
+extern "C" fn overlay_hit_test(this: &Object, _: Sel, point: NSPoint) -> id {
+    let regions = unsafe {
         let raw: *mut c_void = *this.get_ivar(OVERLAY_INPUT_IVAR);
-        &*(raw as *const AtomicBool)
+        &*(raw as *const RefCell<Vec<gpui::Hitbox>>)
     };
-    if active.load(Ordering::Acquire) {
+    let local: NSPoint = unsafe {
+        let parent: id = msg_send![this, superview];
+        msg_send![this, convertPoint: point fromView: parent]
+    };
+    let flipped: objc::runtime::BOOL = unsafe { msg_send![this, isFlipped] };
+    let height = unsafe { NSView::bounds(this as *const Object as id) }
+        .size
+        .height;
+    let point = gpui::point(
+        px(local.x as f32),
+        px(if flipped == YES {
+            local.y
+        } else {
+            height - local.y
+        } as f32),
+    );
+    if regions
+        .borrow()
+        .iter()
+        .rev()
+        .any(|region| region.bounds.contains(&point))
+    {
         this as *const Object as id
     } else {
         nil
     }
+}
+
+/// Native pointer input runs GPUI capture before AppKit delivers it.
+/// No handlers are run from hitTest, and no process-wide event monitor is installed.
+pub(crate) unsafe fn register_window_input(decl: &mut ClassDecl, superclass: &Class) {
+    extern "C" fn window(this: &Object, _: Sel, event: id) {
+        send_window_event(this, event, class!(NSWindow));
+    }
+    extern "C" fn panel(this: &Object, _: Sel, event: id) {
+        send_window_event(this, event, class!(NSPanel));
+    }
+    let handler: extern "C" fn(&Object, Sel, id) = if superclass == class!(NSPanel) {
+        panel
+    } else {
+        window
+    };
+    unsafe {
+        decl.add_ivar::<BOOL>(NATIVE_INPUT_IVAR);
+        decl.add_method(sel!(sendEvent:), handler);
+    }
+}
+
+fn send_window_event(this: &Object, event: id, superclass: &Class) {
+    if unsafe { *this.get_ivar::<BOOL>(NATIVE_INPUT_IVAR) } == NO {
+        unsafe {
+            let _: () = msg_send![super(this, superclass), sendEvent: event];
+        }
+        return;
+    }
+    let kind = unsafe { event.eventType() };
+    let observe = matches!(
+        kind,
+        NSEventType::NSLeftMouseDown
+            | NSEventType::NSRightMouseDown
+            | NSEventType::NSOtherMouseDown
+            | NSEventType::NSLeftMouseUp
+            | NSEventType::NSRightMouseUp
+            | NSEventType::NSOtherMouseUp
+    );
+    let wheel = kind == NSEventType::NSScrollWheel;
+    let dragged = matches!(
+        kind,
+        NSEventType::NSLeftMouseDragged
+            | NSEventType::NSRightMouseDragged
+            | NSEventType::NSOtherMouseDragged
+    );
+    let pointer = observe || wheel || dragged || kind == NSEventType::NSMouseMoved;
+    if !pointer {
+        unsafe {
+            let _: () = msg_send![super(this, superclass), sendEvent: event];
+        }
+        return;
+    }
+    let state = unsafe { get_window_state(this) };
+    let (root, native_views, captured, has_forwarders) = {
+        let state = state.lock();
+        (
+            state.native_view,
+            state.fast_composition.native_views.clone(),
+            state.fast_composition.native_owner,
+            !state.fast_composition.input_forwarders.is_empty(),
+        )
+    };
+    if kind == NSEventType::NSMouseMoved && !has_forwarders {
+        unsafe {
+            let _: () = msg_send![super(this, superclass), sendEvent: event];
+        }
+        return;
+    }
+    let up = matches!(
+        kind,
+        NSEventType::NSLeftMouseUp | NSEventType::NSRightMouseUp | NSEventType::NSOtherMouseUp
+    );
+    let button = if observe {
+        let number = unsafe { event.buttonNumber() };
+        1u64.checked_shl(number as u32).unwrap_or(0)
+    } else {
+        0
+    };
+    if up {
+        let mut state = state.lock();
+        state.fast_composition.native_buttons &= !button;
+        if state.fast_composition.native_buttons == 0 {
+            state.fast_composition.native_owner = None;
+        }
+    }
+    let native = if captured.is_some() && (dragged || up) {
+        captured
+    } else {
+        unsafe {
+            let parent: id = msg_send![root.as_ptr(), superview];
+            let point: NSPoint =
+                msg_send![parent, convertPoint: event.locationInWindow() fromView: nil];
+            let target: id = msg_send![root.as_ptr(), hitTest: point];
+            native_for_target(target, &native_views)
+        }
+    };
+    let forward =
+        native.is_some_and(|id| state.lock().fast_composition.input_forwarders.contains(&id));
+    // A windowless producer consumes its press instead of starting AppKit view
+    // tracking. Keep the recipient through drag/up, even when capture dismissed
+    // a popup and withheld the down event from the producer.
+    if forward && observe && !up {
+        let mut state = state.lock();
+        state.fast_composition.native_buttons |= button;
+        state.fast_composition.native_owner = native;
+    }
+    if native.is_some() && (observe || forward) {
+        state.lock().fast_composition.event_result = gpui::DispatchEventResult {
+            propagate: true,
+            default_prevented: false,
+        };
+        // This wheel will follow AppKit's original path if unhandled; it must
+        // not also be forwarded by the overlay's unhandled-wheel hook.
+        let forwarding = if wheel {
+            Some(std::mem::replace(
+                &mut state.lock().fast_composition.forwarding_scroll,
+                true,
+            ))
+        } else {
+            None
+        };
+        handle_view_event(unsafe { root.as_ref() }, sel!(sendEvent:), event);
+        let result = {
+            let mut state = state.lock();
+            if let Some(previous) = forwarding {
+                state.fast_composition.forwarding_scroll = previous;
+            }
+            state.fast_composition.event_result.clone()
+        };
+        if forward
+            || (!(captured.is_some() && up) && (!result.propagate || result.default_prevented))
+        {
+            return;
+        }
+    }
+    if native.is_none() {
+        unsafe {
+            let _: () = msg_send![super(this, superclass), sendEvent: event];
+        }
+        return;
+    }
+    let previous = {
+        let mut state = state.lock();
+        if observe && !up {
+            state.fast_composition.native_buttons |= button;
+            state.fast_composition.native_owner = native;
+        }
+        let previous = state.fast_composition.native_event;
+        state.fast_composition.native_event = event as usize;
+        previous
+    };
+    unsafe {
+        let _: () = msg_send![super(this, superclass), sendEvent: event];
+    }
+    state.lock().fast_composition.native_event = previous;
+}
+
+unsafe fn belongs_to_native(view: id, native: &[usize]) -> bool {
+    unsafe { native_for_target(view, native).is_some() }
+}
+
+unsafe fn native_for_target(mut view: id, native: &[usize]) -> Option<usize> {
+    let overlay = OVERLAY_VIEW_CLASS.load(Ordering::Acquire);
+    while !view.is_null() {
+        if !overlay.is_null() {
+            let gpui: BOOL = unsafe { msg_send![view, isKindOfClass: overlay] };
+            if gpui == YES {
+                return None;
+            }
+        }
+        if native.contains(&(view as usize)) {
+            return Some(view as usize);
+        }
+        view = unsafe { msg_send![view, superview] };
+    }
+    None
+}
+
+pub(crate) fn native_event_observed(state: &MacWindowState, event: id) -> bool {
+    state.fast_composition.native_event == event as usize
+}
+
+pub(crate) fn complete_event(
+    state: &Arc<Mutex<MacWindowState>>,
+    event: id,
+    callback: Box<dyn FnMut(gpui::PlatformInput) -> gpui::DispatchEventResult>,
+    result: gpui::DispatchEventResult,
+) {
+    let forward = {
+        let mut state = state.lock();
+        state.event_callback = Some(callback);
+        state.fast_composition.event_result = result.clone();
+        !state.fast_composition.native_views.is_empty()
+            && result.propagate
+            && !result.default_prevented
+    };
+    if forward {
+        forward_unhandled_scroll(state, event);
+    }
+}
+
+/// When a GPUI overlay permits scrolling underneath it, use the managed native
+/// views and AppKit's own hit testing. This never changes visibility or geometry.
+fn forward_unhandled_scroll(state: &Arc<Mutex<MacWindowState>>, event: id) {
+    if unsafe { event.eventType() } != NSEventType::NSScrollWheel {
+        return;
+    }
+    let (input_order, height) = {
+        let state = state.lock();
+        if state.fast_composition.forwarding_scroll {
+            return;
+        }
+        (
+            state.fast_composition.input_order.clone(),
+            state.content_size().height,
+        )
+    };
+    let location = unsafe { event.locationInWindow() };
+    let point = gpui::point(px(location.x as f32), height - px(location.y as f32));
+    for layer in input_order.iter().rev() {
+        match layer {
+            InputLayer::Gpui(regions) => {
+                if regions.borrow().iter().any(|region| {
+                    region.behavior == gpui::HitboxBehavior::BlockMouse
+                        && region.bounds.contains(&point)
+                }) {
+                    return;
+                }
+            }
+            InputLayer::Native(native) => {
+                let target = unsafe { native_scroll_target(*native as id, location) };
+                if target.is_null() {
+                    continue;
+                }
+                let previous = {
+                    let mut state = state.lock();
+                    state.fast_composition.forwarding_scroll = true;
+                    std::mem::replace(&mut state.fast_composition.native_event, event as usize)
+                };
+                unsafe {
+                    let _: () = msg_send![target, scrollWheel: event];
+                }
+                let mut state = state.lock();
+                state.fast_composition.native_event = previous;
+                state.fast_composition.forwarding_scroll = false;
+                return;
+            }
+        }
+    }
+}
+
+/// A nested GPUI overlay can decline a wheel event after AppKit selected it.
+/// Query its native siblings below it without changing the view tree or geometry.
+unsafe fn native_scroll_target(native: id, location: NSPoint) -> id {
+    let parent: id = unsafe { msg_send![native, superview] };
+    let point: NSPoint = unsafe { msg_send![parent, convertPoint: location fromView: nil] };
+    let mut selected: id = unsafe { msg_send![native, hitTest: point] };
+    if selected.is_null() || unsafe { belongs_to_native(selected, &[native as usize]) } {
+        return selected;
+    }
+    while selected != native && !selected.is_null() {
+        let parent: id = unsafe { msg_send![selected, superview] };
+        if parent.is_null() {
+            break;
+        }
+        let children: id = unsafe { msg_send![parent, subviews] };
+        let count: usize = unsafe { msg_send![children, count] };
+        let point: NSPoint = unsafe { msg_send![parent, convertPoint: location fromView: nil] };
+        for index in (0..count).rev() {
+            let child: id = unsafe { msg_send![children, objectAtIndex: index] };
+            if child == selected {
+                continue;
+            }
+            let target: id = unsafe { msg_send![child, hitTest: point] };
+            if !target.is_null() && unsafe { belongs_to_native(target, &[native as usize]) } {
+                return target;
+            }
+        }
+        selected = parent;
+    }
+    nil
 }
 
 extern "C" fn handle_overlay_event(this: &Object, selector: Sel, native_event: id) {
@@ -161,7 +487,7 @@ extern "C" fn dealloc_overlay_view(this: &Object, _: Sel) {
     unsafe {
         drop_window_state(this);
         let raw: *mut c_void = *this.get_ivar(OVERLAY_INPUT_IVAR);
-        drop(Arc::from_raw(raw as *const AtomicBool));
+        drop(Rc::from_raw(raw as *const RefCell<Vec<gpui::Hitbox>>));
         let _: () = msg_send![super(this, class!(NSView)), dealloc];
     }
 }
@@ -187,9 +513,11 @@ pub(crate) fn draw_composed(window_state: &Arc<Mutex<MacWindowState>>, scene: Co
         if layer.surface == base_surface {
             state.renderer.draw(&surface_scene);
         } else if let Some(surface) = state.fast_composition.gpui_surfaces.get_mut(&layer.surface) {
-            surface
-                .input_active
-                .store(!surface_scene.is_empty(), Ordering::Release);
+            {
+                let mut regions = surface.input_regions.borrow_mut();
+                regions.clear();
+                regions.extend(scene.layer_hitboxes(layer).iter().cloned());
+            }
             surface.renderer.draw(&surface_scene);
         } else {
             log::error!(
@@ -337,7 +665,60 @@ pub(crate) fn set_composition_order(
             for (_, view, parent) in &view_order {
                 (*parent as id).addSubview_(*view as id);
             }
+            lock.fast_composition.native_views = Rc::new(
+                view_order
+                    .iter()
+                    .filter_map(|(id, view, _)| {
+                        (*id != base_surface
+                            && !lock.fast_composition.gpui_surfaces.contains_key(id))
+                        .then_some(*view)
+                    })
+                    .collect(),
+            );
+            lock.fast_composition.input_order = Rc::new(
+                view_order
+                    .iter()
+                    .filter_map(|(id, view, _)| {
+                        if *id == base_surface {
+                            return None;
+                        }
+                        Some(match lock.fast_composition.gpui_surfaces.get(id) {
+                            Some(surface) => InputLayer::Gpui(surface.input_regions.clone()),
+                            None => InputLayer::Native(*view),
+                        })
+                    })
+                    .collect(),
+            );
+            if lock.fast_composition.native_views.is_empty() {
+                lock.fast_composition.native_buttons = 0;
+                lock.fast_composition.native_owner = None;
+            }
             lock.fast_composition.view_order = view_order;
+        }
+        lock.fast_composition.input_forwarders.clear();
+        for surface in surfaces.iter().filter(|surface| match &surface.content {
+            PlatformCompositionSurfaceContent::Native(attachment)
+            | PlatformCompositionSurfaceContent::ExternalGpu(attachment) => {
+                attachment.input_forwarding()
+            }
+            PlatformCompositionSurfaceContent::Gpui => false,
+        }) {
+            if let Some(view) = views_by_id.get(&surface.id) {
+                lock.fast_composition
+                    .input_forwarders
+                    .insert(*view as usize);
+            }
+        }
+        let window: id = msg_send![native_view, window];
+        if !window.is_null() {
+            (*window).set_ivar(
+                NATIVE_INPUT_IVAR,
+                if lock.fast_composition.native_views.is_empty() {
+                    NO
+                } else {
+                    YES
+                },
+            );
         }
         for surface in surfaces {
             let Some(view) = views_by_id.get(&surface.id).copied() else {
@@ -364,7 +745,7 @@ unsafe fn create_gpui_surface(
     window_state: &Arc<Mutex<MacWindowState>>,
     state: &mut MacWindowState,
 ) -> Result<MacGpuiSurface> {
-    let input_active = Arc::new(AtomicBool::new(false));
+    let input_regions = Rc::new(RefCell::new(Vec::<gpui::Hitbox>::new()));
     let native_view = state.native_view.as_ptr() as id;
     let class = OVERLAY_VIEW_CLASS.load(Ordering::Acquire) as *const Class;
     anyhow::ensure!(!class.is_null(), "GPUIOverlayView is not registered");
@@ -378,7 +759,7 @@ unsafe fn create_gpui_surface(
         );
         (*view).set_ivar(
             OVERLAY_INPUT_IVAR,
-            Arc::into_raw(input_active.clone()) as *const c_void,
+            Rc::into_raw(input_regions.clone()) as *const c_void,
         );
     }
 
@@ -402,7 +783,7 @@ unsafe fn create_gpui_surface(
     Ok(MacGpuiSurface {
         view: NonNull::new(view).context("GPUI composition view is null")?,
         renderer,
-        input_active,
+        input_regions,
     })
 }
 

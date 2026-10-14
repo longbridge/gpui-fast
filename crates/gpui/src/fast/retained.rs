@@ -131,6 +131,7 @@ pub(crate) enum PaintStatus {
 /// place it was drawn in and what it inherited there.
 #[derive(PartialEq)]
 pub(crate) struct RetainedContext {
+    pub(crate) composition_surface: Option<crate::fast::composition::CompositionSurfaceId>,
     pub(crate) bounds: Bounds<Pixels>,
     pub(crate) content_mask: ContentMask<Pixels>,
     pub(crate) text_style: TextStyle,
@@ -611,6 +612,7 @@ impl Window {
             && context.opacity == self.element_opacity
             && context.content_mask == self.content_mask()
             && context.text_style == self.text_style()
+            && context.composition_surface == crate::fast::composition::input_surface(self)
     }
 
     /// Lays out the view last frame's record `previous` stands for as it was
@@ -880,6 +882,7 @@ impl Window {
                 paint: PaintStatus::Unpainted,
                 nested: 0,
                 context: Rc::new(RetainedContext {
+                    composition_surface: None,
                     bounds: Bounds::default(),
                     content_mask: ContentMask::default(),
                     text_style: TextStyle::default(),
@@ -949,6 +952,7 @@ impl Window {
             };
         }
         let context = RetainedContext {
+            composition_surface: crate::fast::composition::input_surface(self),
             bounds,
             content_mask: self.content_mask(),
             text_style: self.text_style(),

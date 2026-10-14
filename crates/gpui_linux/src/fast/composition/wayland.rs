@@ -5,12 +5,12 @@
 //! are synchronized subsurfaces drawn by renderers sharing the window's sprite
 //! atlas, native surfaces are desynchronized subsurfaces their producer
 //! presents to. Pointer input on a GPUI overlay goes to its window, and an
-//! overlay without content has an empty input region so input reaches the
-//! surfaces below it.
+//! overlay without prepared hitboxes has an empty input region so input
+//! reaches the surfaces below it.
 
 use std::{
     any::Any,
-    cell::{RefCell, RefMut},
+    cell::{Cell, RefCell, RefMut},
     ffi::c_void,
     ptr::NonNull,
     rc::{Rc, Weak},
@@ -41,7 +41,14 @@ delegate_noop!(WaylandClientStatePtr: ignore wl_subsurface::WlSubsurface);
 /// The GPUI composition surfaces that deliver pointer input to their window,
 /// by `wl_surface`. Kept by the Wayland client.
 #[derive(Default)]
-pub(crate) struct InputSurfaces(HashMap<ObjectId, WaylandWindowStatePtr>);
+pub(crate) struct InputSurfaces {
+    surfaces: HashMap<ObjectId, InputSurface>,
+    focused: Option<ObjectId>,
+}
+struct InputSurface {
+    window: WaylandWindowStatePtr,
+    native: Option<Weak<RefCell<WaylandNativeSurfaceState>>>,
+}
 
 /// Resolves the window receiving pointer input on `surface_id`, including GPUI
 /// composition subsurfaces, which share their window's coordinate space.
@@ -52,10 +59,51 @@ pub(crate) fn get_input_window(
     get_window(state, surface_id).or_else(|| {
         state
             .fast_composition_input_surfaces
-            .0
+            .surfaces
             .get(surface_id)
-            .cloned()
+            .filter(|surface| surface.native.is_none())
+            .map(|surface| surface.window.clone())
     })
+}
+
+/// Pointer events on an owned native slot follow the same dispatcher as overlays.
+pub(crate) fn get_pointer_window(
+    state: &mut RefMut<WaylandClientState>,
+    surface_id: &ObjectId,
+) -> Option<WaylandWindowStatePtr> {
+    get_window(state, surface_id).or_else(|| {
+        let surface = state
+            .fast_composition_input_surfaces
+            .surfaces
+            .get(surface_id)?;
+        if let Some(native) = &surface.native {
+            if !native.upgrade()?.borrow().visible {
+                return None;
+            }
+        }
+        Some(surface.window.clone())
+    })
+}
+
+/// Translate native-subsurface coordinates into the window coordinate space.
+pub(crate) fn pointer_position(
+    state: &mut WaylandClientState,
+    surface: Option<&ObjectId>,
+    position: Point<Pixels>,
+) -> Point<Pixels> {
+    let input = &mut state.fast_composition_input_surfaces;
+    if let Some(surface) = surface {
+        input.focused = Some(surface.clone());
+    }
+    input
+        .focused
+        .as_ref()
+        .and_then(|id| input.surfaces.get(id))
+        .and_then(|surface| surface.native.as_ref()?.upgrade())
+        .map_or(position, |native| {
+            let native = native.borrow();
+            position + native.bounds.to_pixels(native.scale.get()).origin
+        })
 }
 
 /// Forgets the input surfaces of a window that closed.
@@ -65,8 +113,8 @@ pub(crate) fn forget_input_surfaces(
 ) {
     state
         .fast_composition_input_surfaces
-        .0
-        .retain(|_, window| !window.ptr_eq(closed_window));
+        .surfaces
+        .retain(|_, surface| !surface.window.ptr_eq(closed_window));
 }
 
 impl WaylandClientStatePtr {
@@ -74,19 +122,20 @@ impl WaylandClientStatePtr {
         &self,
         surface_id: ObjectId,
         window: WaylandWindowStatePtr,
+        native: Option<Weak<RefCell<WaylandNativeSurfaceState>>>,
     ) {
         self.get_client()
             .borrow_mut()
             .fast_composition_input_surfaces
-            .0
-            .insert(surface_id, window);
+            .surfaces
+            .insert(surface_id, InputSurface { window, native });
     }
 
     fn unregister_composition_input_surface(&self, surface_id: &ObjectId) {
         self.get_client()
             .borrow_mut()
             .fast_composition_input_surfaces
-            .0
+            .surfaces
             .remove(surface_id);
     }
 }
@@ -201,7 +250,7 @@ fn raw_window(surface: &wl_surface::WlSurface) -> anyhow::Result<RawWindow> {
 struct WaylandGpuiSurface {
     subsurface: WaylandSubsurface,
     renderer: WgpuRenderer,
-    input_active: Option<bool>,
+    input_regions: Vec<gpui::Bounds<gpui::Pixels>>,
 }
 
 impl WaylandGpuiSurface {
@@ -230,10 +279,12 @@ struct WaylandNativeSurfaceState {
     bounds: Bounds<DevicePixels>,
     parent_origin: Point<DevicePixels>,
     visible: bool,
+    scale: Cell<f32>,
 }
 
 impl WaylandNativeSurfaceState {
     fn update_geometry(&self, scale: f32) {
+        self.scale.set(scale);
         if let Some(subsurface) = &self.subsurface.subsurface {
             let position = logical_point(self.bounds.origin - self.parent_origin, scale);
             subsurface.set_position(position.x, position.y);
@@ -248,6 +299,7 @@ impl WaylandNativeSurfaceState {
 struct WaylandNativeSurface {
     state: Rc<RefCell<WaylandNativeSurfaceState>>,
     composition: Weak<RefCell<WaylandComposition>>,
+    client: WaylandClientStatePtr,
 }
 
 impl WaylandNativeSurface {
@@ -308,6 +360,8 @@ impl PlatformSurfaceAttachment for WaylandNativeSurface {
 
 impl Drop for WaylandNativeSurface {
     fn drop(&mut self) {
+        self.client
+            .unregister_composition_input_surface(&self.state.borrow().subsurface.surface.id());
         self.state.borrow_mut().subsurface.destroy();
     }
 }
@@ -610,21 +664,30 @@ pub(crate) fn draw_composed(window: &WaylandWindow, scene: ComposedScene<'_>) {
         if layer.surface == base_surface {
             base_scene = surface_scene;
         } else if let Some(surface) = composition.gpui_surfaces.get_mut(&layer.surface) {
-            // An overlay without content must let input reach the surfaces
-            // below it, like the AppKit overlay's hit testing.
-            let input_active = !surface_scene.is_empty();
-            if surface.input_active != Some(input_active) {
-                if input_active {
-                    surface.subsurface.surface.set_input_region(None);
-                } else {
-                    let region = composition
-                        .globals
-                        .compositor
-                        .create_region(&composition.globals.qh, ());
-                    surface.subsurface.surface.set_input_region(Some(&region));
-                    region.destroy();
+            let input = scene.layer_hitboxes(layer);
+            if surface.input_regions.len() != input.len()
+                || surface
+                    .input_regions
+                    .iter()
+                    .zip(input)
+                    .any(|(old, new)| *old != new.bounds)
+            {
+                let region = composition
+                    .globals
+                    .compositor
+                    .create_region(&composition.globals.qh, ());
+                surface.input_regions.clear();
+                for hitbox in input {
+                    let bounds = hitbox.bounds;
+                    let x = f32::from(bounds.origin.x).floor() as i32;
+                    let y = f32::from(bounds.origin.y).floor() as i32;
+                    let right = f32::from(bounds.bottom_right().x).ceil() as i32;
+                    let bottom = f32::from(bounds.bottom_right().y).ceil() as i32;
+                    region.add(x, y, right - x, bottom - y);
+                    surface.input_regions.push(bounds);
                 }
-                surface.input_active = Some(input_active);
+                surface.subsurface.surface.set_input_region(Some(&region));
+                region.destroy();
             }
             // Synchronized subsurfaces cache this commit until the window
             // surface commits the base frame below.
@@ -663,6 +726,7 @@ pub(crate) fn create_native_surface(
         bounds: Bounds::default(),
         parent_origin: Point::default(),
         visible: true,
+        scale: Cell::new(state.fast_composition.0.borrow().scale),
     }));
     state
         .fast_composition
@@ -670,7 +734,13 @@ pub(crate) fn create_native_surface(
         .borrow_mut()
         .native_surfaces
         .push(Rc::downgrade(&native_state));
+    state.client.register_composition_input_surface(
+        native_state.borrow().subsurface.surface.id(),
+        window.0.clone(),
+        Some(Rc::downgrade(&native_state)),
+    );
     Ok(Rc::new(WaylandNativeSurface {
+        client: state.client.clone(),
         state: native_state,
         composition: Rc::downgrade(&state.fast_composition.0),
     }))
@@ -736,14 +806,22 @@ pub(crate) fn set_composition_order(
                 return Err(error);
             }
         };
+        let empty_input = state
+            .globals
+            .compositor
+            .create_region(&state.globals.qh, ());
+        subsurface.surface.set_input_region(Some(&empty_input));
+        empty_input.destroy();
         let surface = WaylandGpuiSurface {
             subsurface,
             renderer,
-            input_active: None,
+            input_regions: Vec::new(),
         };
-        state
-            .client
-            .register_composition_input_surface(surface.subsurface.surface.id(), window.0.clone());
+        state.client.register_composition_input_surface(
+            surface.subsurface.surface.id(),
+            window.0.clone(),
+            None,
+        );
         composition.gpui_surfaces.insert(id, surface);
     }
 

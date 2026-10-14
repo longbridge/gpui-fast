@@ -119,7 +119,7 @@ impl DispatchPhase {
     }
 }
 
-struct WindowInvalidatorInner {
+pub(crate) struct WindowInvalidatorInner {
     #[cfg(feature = "profiler")]
     pub window_id: WindowId,
     pub dirty: bool,
@@ -154,7 +154,7 @@ enum FrameRateLimit {
 
 #[derive(Clone)]
 pub(crate) struct WindowInvalidator {
-    inner: Rc<RefCell<WindowInvalidatorInner>>,
+    pub(crate) inner: Rc<RefCell<WindowInvalidatorInner>>,
 }
 
 impl WindowInvalidator {
@@ -1046,6 +1046,7 @@ pub(crate) struct Frame {
     pub(crate) dispatch_tree: DispatchTree,
     pub(crate) scene: Scene,
     pub(crate) fast_composition_starts: crate::fast::composition::SurfaceStarts,
+    pub(crate) fast_composition_input: crate::fast::composition::SurfaceInput,
     pub(crate) hitboxes: Vec<Hitbox>,
     pub(crate) window_control_hitboxes: Vec<(WindowControlArea, Hitbox)>,
     pub(crate) deferred_draws: Vec<DeferredDraw>,
@@ -1106,6 +1107,7 @@ impl Frame {
             dispatch_tree,
             scene: Scene::default(),
             fast_composition_starts: crate::fast::composition::SurfaceStarts::default(),
+            fast_composition_input: crate::fast::composition::SurfaceInput::default(),
             hitboxes: Vec::new(),
             window_control_hitboxes: Vec::new(),
             deferred_draws: Vec::new(),
@@ -1139,6 +1141,7 @@ impl Frame {
         self.tooltip_requests.clear();
         self.cursor_styles.clear();
         self.hitboxes.clear();
+        crate::fast::composition::SurfaceInput::clear(&mut self.fast_composition_input);
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
         self.tab_stops.clear();
@@ -1174,6 +1177,9 @@ impl Frame {
     }
 
     pub(crate) fn hit_test(&self, position: Point<Pixels>) -> HitTest {
+        if let Some(hit_test) = crate::fast::composition::hit_test(self, position) {
+            return hit_test;
+        }
         let mut set_hover_hitbox_count = false;
         let mut hit_test = HitTest::default();
         for hitbox in self.hitboxes.iter().rev() {
@@ -1274,7 +1280,7 @@ pub struct Window {
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
     pub(crate) focus_lost_listeners: SubscriberSet<(), AnyObserver>,
     focus_lost_path: SmallVec<[FocusId; 8]>,
-    default_prevented: bool,
+    pub(crate) default_prevented: bool,
     pub(crate) mouse_position: Point<Pixels>,
     pub(crate) mouse_hit_test: HitTest,
     modifiers: Modifiers,
@@ -3696,6 +3702,7 @@ impl Window {
     fn draw_roots(&mut self, cx: &mut App) {
         crate::fast::retained::begin_frame(self, cx);
         self.invalidator.set_phase(DrawPhase::Prepaint);
+        crate::fast::composition::begin_input(self, false);
         self.tooltip_bounds.take();
 
         self.a11y.sync_active_flag();
@@ -3741,6 +3748,7 @@ impl Window {
         #[cfg(any(feature = "inspector", debug_assertions))]
         let inspector_element = self.prepaint_inspector(_inspector_width, cx);
 
+        crate::fast::composition::begin_input(self, true);
         self.prepaint_deferred_draws(cx);
 
         let mut prompt_element = None;
@@ -3767,6 +3775,7 @@ impl Window {
         }
 
         crate::fast::stats::FramePhaseTimes::end_prepaint(&mut self.fast_layout.phase_times);
+        crate::fast::composition::finish_input(self);
         self.mouse_hit_test = crate::fast::layers::hover_freeze::hit_test(self);
 
         // Now actually paint the elements.
@@ -5346,6 +5355,7 @@ impl Window {
             behavior,
         };
         self.next_frame.hitboxes.push(hitbox.clone());
+        crate::fast::composition::record_input(self, id);
         hitbox
     }
 
@@ -5768,6 +5778,7 @@ impl Window {
         crate::fast::dependencies::AmbientInput::stamp_changes(ambient, self, cx);
         crate::fast::layers::input::before_dispatch(self, cx, &event);
 
+        let native_target = crate::fast::composition::event_target(self, &event);
         if let Some(any_mouse_event) = event.mouse_event() {
             self.dispatch_mouse_event(any_mouse_event, cx);
         } else if let Some(any_key_event) = event.keyboard_event() {
@@ -5775,6 +5786,12 @@ impl Window {
         } else if let Some(touch_event) = event.touch_event() {
             self.dispatch_touch_event(touch_event, cx);
         }
+        crate::fast::composition::dispatch_native(
+            self,
+            &event,
+            native_target,
+            &mut cx.propagate_event,
+        );
         crate::fast::layers::wheel::end_dispatch(self, cx);
         if let PlatformInput::LongPress(long_press) = &event {
             match long_press.phase {
@@ -5999,7 +6016,7 @@ impl Window {
         }
 
         // Bubble phase, where most normal handlers do their work.
-        if cx.propagate_event {
+        if crate::fast::composition::bubble_mouse(self, event, cx) {
             for listener in mouse_listeners.iter_mut().rev() {
                 let listener = listener.as_mut().unwrap();
                 listener(event, DispatchPhase::Bubble, self, cx);
