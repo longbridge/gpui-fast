@@ -3736,11 +3736,13 @@ impl Window {
             .as_mut()
             .unwrap()
             .stretch_auto_size_to_fill(root_layout_id, root_size, scale_factor);
+        crate::fast::composition::begin_base_prepaint(self);
         root_element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         let inspector_element = self.prepaint_inspector(_inspector_width, cx);
 
+        crate::fast::composition::begin_overlay_prepaint(self);
         self.prepaint_deferred_draws(cx);
 
         let mut prompt_element = None;

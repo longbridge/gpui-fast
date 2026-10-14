@@ -25,6 +25,13 @@
 //! Unlike the upstream pull request, a view drawn again from last frame
 //! (every retained view, here) carries the surface switches it made with it:
 //! [`reuse_starts`] copies them along with its scene.
+//!
+//! Also unlike it, a native surface stacks with the element hosting it. One
+//! positioned while a deferred draw is prepainted, a web page in a dialog or
+//! sheet, is hosted on the overlay surface, so it moves above that surface
+//! instead of under the dialog's own background; positioned while the root
+//! view is prepainted, it moves back below it. Overlays drawn over a native
+//! surface hosted on the overlay surface are then covered by it.
 
 use crate::window::PaintIndex;
 use crate::{Bounds, DevicePixels, PlatformWindow, Point, Scene, Window, scene::PaintOperation};
@@ -527,14 +534,25 @@ impl SurfaceStarts {
     }
 }
 
+/// The GPUI surface an element hosting a native surface is drawn on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Host {
+    /// The root view, drawn on the base surface.
+    Base,
+    /// A deferred or window-level draw, drawn on the overlay surface.
+    Overlay,
+}
+
 /// A window's composition: its surface tree, the platform surfaces in it and
 /// whether the window presents through it.
 pub(crate) struct WindowCompositionState {
     tree: CompositionTree,
-    platform_surfaces: FxHashMap<CompositionSurfaceId, Rc<dyn PlatformSurfaceAttachment>>,
+    platform_surfaces: FxHashMap<CompositionSurfaceId, Rc<ManagedPlatformSurface>>,
     base_surface: CompositionSurfaceId,
     overlay_surface: CompositionSurfaceId,
     geometry_dirty: Rc<Cell<bool>>,
+    /// What the window is prepainting, while it prepaints a frame.
+    prepainting: Rc<Cell<Option<Host>>>,
     enabled: bool,
 }
 
@@ -556,6 +574,7 @@ impl Default for WindowCompositionHandle {
             base_surface,
             overlay_surface,
             geometry_dirty: Rc::new(Cell::new(false)),
+            prepainting: Rc::new(Cell::new(None)),
             enabled: false,
         })))
     }
@@ -567,10 +586,37 @@ struct ManagedPlatformSurface {
     platform_surface: Rc<dyn PlatformSurfaceAttachment>,
     bounds: Cell<Bounds<DevicePixels>>,
     geometry_dirty: Rc<Cell<bool>>,
+    prepainting: Rc<Cell<Option<Host>>>,
+    /// The surface its host was last prepainted on.
+    host: Cell<Host>,
+    /// Whether `host` changed since the surface was last restacked.
+    restack: Cell<bool>,
+}
+
+impl ManagedPlatformSurface {
+    fn new(
+        platform_surface: Rc<dyn PlatformSurfaceAttachment>,
+        state: &WindowCompositionState,
+    ) -> Self {
+        Self {
+            bounds: Cell::new(platform_surface.bounds()),
+            platform_surface,
+            geometry_dirty: state.geometry_dirty.clone(),
+            prepainting: state.prepainting.clone(),
+            host: Cell::new(Host::Base),
+            restack: Cell::new(false),
+        }
+    }
 }
 
 impl PlatformSurfaceAttachment for ManagedPlatformSurface {
     fn set_bounds(&self, bounds: Bounds<DevicePixels>) -> Result<()> {
+        if let Some(host) = self.prepainting.get()
+            && self.host.replace(host) != host
+        {
+            self.restack.set(true);
+            self.geometry_dirty.set(true);
+        }
         if self.bounds.get() == bounds {
             return Ok(());
         }
@@ -793,13 +839,10 @@ impl WindowComposition<'_> {
         kind: CompositionSurfaceKind,
         platform_surface: Rc<dyn PlatformSurfaceAttachment>,
     ) -> Result<WindowCompositionSurface> {
-        let initial_bounds = platform_surface.bounds();
-        let geometry_dirty = self.state.borrow().geometry_dirty.clone();
-        let platform_surface: Rc<dyn PlatformSurfaceAttachment> = Rc::new(ManagedPlatformSurface {
+        let platform_surface = Rc::new(ManagedPlatformSurface::new(
             platform_surface,
-            bounds: Cell::new(initial_bounds),
-            geometry_dirty,
-        });
+            &self.state.borrow(),
+        ));
         let mut state = self.state.borrow_mut();
         let id = state.tree.insert(kind, None)?;
         let overlay_surface = state.overlay_surface;
@@ -935,10 +978,43 @@ fn switch_surface(window: &mut Window, surface: CompositionSurfaceId) {
         .switch_to(surface, scene_len);
 }
 
+/// Stacks what the root view positions, as it prepaints, below the overlay
+/// surface.
+pub(crate) fn begin_base_prepaint(window: &mut Window) {
+    let state = window.fast_composition.0.borrow();
+    state.prepainting.set(Some(Host::Base));
+}
+
+/// Stacks what deferred and window-level draws position, as they prepaint,
+/// above the overlay surface.
+pub(crate) fn begin_overlay_prepaint(window: &mut Window) {
+    let state = window.fast_composition.0.borrow();
+    state.prepainting.set(Some(Host::Overlay));
+}
+
 /// Paints what follows, the root view, onto the base surface.
 pub(crate) fn begin_base(window: &mut Window) {
-    let surface = window.fast_composition.0.borrow().base_surface;
+    let state = window.fast_composition.0.borrow();
+    state.prepainting.set(None);
+    let surface = state.base_surface;
+    drop(state);
     switch_surface(window, surface);
+}
+
+/// Moves each root native surface whose host changed surface to that
+/// surface's side of the overlay surface.
+fn restack_native_surfaces(state: &mut WindowCompositionState) -> Result<()> {
+    let overlay = state.overlay_surface;
+    for (id, surface) in &state.platform_surfaces {
+        if !surface.restack.replace(false) || state.tree.parent(*id)?.is_some() {
+            continue;
+        }
+        match surface.host.get() {
+            Host::Base => state.tree.place_below(*id, overlay)?,
+            Host::Overlay => state.tree.place_above(*id, overlay)?,
+        }
+    }
+    Ok(())
 }
 
 /// Paints what follows, deferred and window-level draws, onto the overlay
@@ -986,6 +1062,9 @@ pub(crate) fn present(window: &mut Window) {
         return;
     }
     if state.borrow().geometry_dirty.get() {
+        if let Err(error) = restack_native_surfaces(&mut state.borrow_mut()) {
+            log::error!("restacking native composition surfaces: {error:#}");
+        }
         let composition = WindowComposition {
             platform_window: window.platform_window.as_ref(),
             state: state.clone(),
@@ -1017,13 +1096,15 @@ pub(crate) fn present(window: &mut Window) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompositionSurfaceId, CompositionSurfaceKind, CompositionTree, ManagedPlatformSurface,
-        PlatformSurfaceAttachment, composed_scene_layers,
+        CompositionSurfaceId, CompositionSurfaceKind, CompositionTree, Host,
+        ManagedPlatformSurface, PlatformSurfaceAttachment, composed_scene_layers,
+        restack_native_surfaces,
     };
     use crate::{
         AppContext as _, Bounds, ContentMask, Context, DevicePixels, Entity, IntoElement,
         ParentElement as _, Point, Quad, Render, ScaledPixels, Scene, Size, StyleRefinement,
-        Styled as _, TestAppContext, Window, canvas, div, fill, px, scene::PaintOperation, size,
+        Styled as _, TestAppContext, Window, canvas, deferred, div, fill, px,
+        scene::PaintOperation, size,
     };
     use anyhow::Result;
     use std::{any::Any, cell::Cell, rc::Rc};
@@ -1164,6 +1245,9 @@ mod tests {
             platform_surface: platform_surface.clone(),
             bounds: Cell::new(Bounds::default()),
             geometry_dirty: geometry_dirty.clone(),
+            prepainting: Rc::new(Cell::new(None)),
+            host: Cell::new(Host::Base),
+            restack: Cell::new(false),
         };
         let bounds = Bounds {
             origin: Point {
@@ -1200,6 +1284,9 @@ mod tests {
             platform_surface: platform.clone(),
             bounds: Cell::new(Bounds::default()),
             geometry_dirty: dirty.clone(),
+            prepainting: Rc::new(Cell::new(None)),
+            host: Cell::new(Host::Base),
+            restack: Cell::new(false),
         };
         surface.set_bounds(bounds)?;
         dirty.set(false);
@@ -1239,6 +1326,9 @@ mod tests {
             platform_surface: platform.clone(),
             bounds: Cell::new(Bounds::default()),
             geometry_dirty: dirty.clone(),
+            prepainting: Rc::new(Cell::new(None)),
+            host: Cell::new(Host::Base),
+            restack: Cell::new(false),
         };
         assert!(surface.set_bounds(bounds).is_err());
         assert_eq!(surface.bounds(), Bounds::default());
@@ -1446,5 +1536,108 @@ mod tests {
         let (second, _, _) = draw(cx);
         assert_eq!(builds.get(), 1, "the badge is drawn again from last frame");
         assert_eq!(second, first);
+    }
+
+    fn test_platform_surface() -> Rc<TestPlatformSurface> {
+        Rc::new(TestPlatformSurface {
+            bounds_writes: Cell::new(0),
+            fail_next_bounds: Cell::new(false),
+            bounds: Cell::new(Bounds::default()),
+            parent_origin: Cell::new(Point::default()),
+        })
+    }
+
+    /// Positions one native surface from the root view and another from a
+    /// deferred draw, or both from the root view.
+    struct Hosts {
+        page: Rc<ManagedPlatformSurface>,
+        dialog_page: Rc<ManagedPlatformSurface>,
+        dialog_open: bool,
+    }
+
+    fn native_host(surface: Rc<ManagedPlatformSurface>) -> impl IntoElement {
+        canvas(
+            move |bounds, window, _| {
+                surface
+                    .set_bounds(bounds.to_device_pixels(window.scale_factor()))
+                    .unwrap()
+            },
+            |_, _, _, _| {},
+        )
+        .size(px(50.))
+    }
+
+    impl Render for Hosts {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let dialog_page = native_host(self.dialog_page.clone());
+            let root = div().size_full().child(native_host(self.page.clone()));
+            if self.dialog_open {
+                root.child(deferred(
+                    div().size(px(80.)).bg(crate::white()).child(dialog_page),
+                ))
+            } else {
+                root.child(dialog_page)
+            }
+        }
+    }
+
+    /// A native surface hosted in a deferred draw, a web page in a dialog,
+    /// stacks above the overlay surface the dialog's background is drawn on,
+    /// and returns below it once hosted by the root view again.
+    #[crate::test]
+    fn native_surfaces_stack_with_their_hosts(cx: &mut TestAppContext) {
+        let names = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let names = names.clone();
+            move |window, _| {
+                let mut state = window.fast_composition.0.borrow_mut();
+                let overlay = state.overlay_surface;
+                let mut names = names.borrow_mut();
+                names.push((state.base_surface, "base"));
+                names.push((overlay, "overlay"));
+                let mut native = |name| {
+                    let id = state
+                        .tree
+                        .insert(CompositionSurfaceKind::Native, None)
+                        .unwrap();
+                    state.tree.place_below(id, overlay).unwrap();
+                    let surface =
+                        Rc::new(ManagedPlatformSurface::new(test_platform_surface(), &state));
+                    state.platform_surfaces.insert(id, surface.clone());
+                    names.push((id, name));
+                    surface
+                };
+                Hosts {
+                    page: native("page"),
+                    dialog_page: native("dialog page"),
+                    dialog_open: true,
+                }
+            }
+        });
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+                let mut state = window.fast_composition.0.borrow_mut();
+                restack_native_surfaces(&mut state).unwrap();
+                let names = names.borrow();
+                state
+                    .tree
+                    .flattened()
+                    .into_iter()
+                    .map(|id| names.iter().find(|(named, _)| *named == id).unwrap().1)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap()
+        };
+
+        assert_eq!(draw(cx), ["base", "page", "overlay", "dialog page"]);
+
+        window
+            .update(cx, |hosts, _, cx| {
+                hosts.dialog_open = false;
+                cx.notify();
+            })
+            .unwrap();
+        assert_eq!(draw(cx), ["base", "page", "dialog page", "overlay"]);
     }
 }
