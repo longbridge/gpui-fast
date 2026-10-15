@@ -1393,6 +1393,8 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
                     ..Default::default()
                 },
                 |window: &mut Window, cx: &mut App| {
+                    // Only Windows forwards input, with a call that can fail.
+                    #[cfg_attr(not(target_os = "windows"), allow(clippy::bind_instead_of_map))]
                     let webview = window.enable_window_composition().and_then(|composition| {
                         NativeWebView::new(window, &composition).and_then(|webview| {
                             let webview = Rc::new(webview);
