@@ -1323,7 +1323,7 @@ fn synchronize_geometry(window: &mut Window) {
         }
         let composition = WindowComposition {
             platform_window: window.platform_window.as_ref(),
-            state: state.clone(),
+            state,
         };
         if let Err(error) = composition.synchronize_platform_order() {
             log::error!("updating window composition geometry: {error:#}");
