@@ -32,6 +32,10 @@ keep merging upstream changes into. To keep those merges easy:
 - **Never commit to `main` directly; every change goes through a pull
   request.** Work on a topic branch off `origin/main`, and when the change is
   ready to merge, push the branch and open a PR.
+- **Prefix PR titles with the area they change**, not `gpui:`: `fast:` for
+  gpui-fast's own retained layout and performance work, `composition:` for
+  window composition (e.g. `composition: route pointer input to the correct
+  composition surface`).
 
 Upstream directories and the commit they came from are in `UPSTREAM`. The full
 rules, the check and the upstream sync procedure are in `docs/upstream-sync.md`.
