@@ -374,6 +374,43 @@ fn a_node_adopted_from_another_parent_keeps_its_position() {
     );
 }
 
+#[test]
+fn restores_reparented_children() {
+    use crate::TaffyLayoutEngine;
+
+    let mut engine = TaffyLayoutEngine::new();
+    let request = |engine: &mut TaffyLayoutEngine, key, children: &[_]| {
+        engine.request_layout(Some(key), crate::Style::default(), px(14.), 1., children)
+    };
+    let child = request(&mut engine, 1, &[]);
+    let original = request(&mut engine, 2, &[child]);
+    let replacement = request(&mut engine, 3, &[]);
+    engine.clear();
+
+    assert_eq!(request(&mut engine, 1, &[]), child);
+    assert_eq!(request(&mut engine, 3, &[child]), replacement);
+    assert!(engine.taffy.children(original.into()).unwrap().is_empty());
+    assert_eq!(engine.taffy.parent(child.into()), Some(replacement.into()));
+
+    // The original parent's retained request still names the child, even
+    // though Taffy removed it when the replacement adopted it.
+    assert_eq!(request(&mut engine, 2, &[child]), original);
+    assert_eq!(engine.taffy.parent(child.into()), Some(original.into()));
+    assert_eq!(
+        engine.taffy.children(original.into()).unwrap(),
+        [child.into()]
+    );
+    assert!(
+        engine
+            .taffy
+            .children(replacement.into())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(engine.layout_reaches(original, child));
+    assert!(!engine.layout_reaches(replacement, child));
+}
+
 /// Rows of a uniform list five rows tall, scrolled to `scroll_top`.
 struct ScrolledRows {
     row_ids: Vec<u64>,

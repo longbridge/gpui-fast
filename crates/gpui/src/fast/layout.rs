@@ -17,7 +17,7 @@ use std::{
     mem,
     rc::Rc,
 };
-use taffy::TaffyTree;
+use taffy::{TaffyTree, TraversePartialTree as _};
 
 /// What a Taffy call that cannot fail by construction panics with, as
 /// upstream's layout engine does.
@@ -648,14 +648,23 @@ impl TaffyLayoutEngine {
             .expect(EXPECT_MESSAGE);
     }
 
-    /// Writes `children` to a retained node, but only if the list changed.
+    /// Writes `children` when the requested or actual child list changed.
     fn apply_children(&mut self, key: u64, id: LayoutId, children: &[LayoutId]) {
         let retention = &mut self.retention;
         let node = retention
             .retained
             .get_mut(&key)
             .expect("a claimed key is always present");
-        if node.children.as_slice() == children {
+        // Reparenting removes a child from Taffy's previous parent, but not
+        // from that parent's retained request. Restore the actual tree even
+        // when the requested children have not changed.
+        if node.children.as_slice() == children
+            && self.taffy.child_count(id.into()) == children.len()
+            && children
+                .iter()
+                .enumerate()
+                .all(|(index, child)| self.taffy.get_child_id(id.into(), index) == (*child).into())
+        {
             return;
         }
         node.children.clear();

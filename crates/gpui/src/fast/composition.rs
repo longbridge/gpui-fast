@@ -33,8 +33,12 @@
 //! view is prepainted, it moves back below it. Overlays drawn over a native
 //! surface hosted on the overlay surface are then covered by it.
 
+#[cfg(any(target_os = "macos", test))]
+use crate::Hitbox;
 use crate::window::PaintIndex;
 use crate::{Bounds, DevicePixels, PlatformWindow, Point, Scene, Window, scene::PaintOperation};
+#[cfg(any(target_os = "macos", test))]
+use crate::{Pixels, px};
 use anyhow::{Context as _, Result, anyhow, bail};
 use collections::FxHashMap;
 use gpui_util::ResultExt as _;
@@ -515,22 +519,38 @@ impl Scene {
 /// Where each stretch of a frame's scene is presented: the GPUI surface
 /// painting switched to, and the scene length at the switch.
 #[derive(Default)]
-pub(crate) struct SurfaceStarts(Vec<(CompositionSurfaceId, usize)>);
+pub(crate) struct SurfaceStarts {
+    scene: Vec<(CompositionSurfaceId, usize)>,
+    overlay_hitbox_start: Option<usize>,
+}
 
 impl SurfaceStarts {
     pub(crate) fn clear(&mut self) {
-        self.0.clear();
+        self.scene.clear();
+        self.overlay_hitbox_start = None;
     }
 
     fn current(&self) -> Option<CompositionSurfaceId> {
-        self.0.last().map(|(surface, _)| *surface)
+        self.scene.last().map(|(surface, _)| *surface)
     }
 
     fn switch_to(&mut self, surface: CompositionSurfaceId, scene_len: usize) {
         if self.current() == Some(surface) {
             return;
         }
-        self.0.push((surface, scene_len));
+        self.scene.push((surface, scene_len));
+    }
+
+    fn begin_overlay_hitboxes(&mut self, start: usize) {
+        self.overlay_hitbox_start = Some(start);
+    }
+
+    fn overlay_items<'a, T>(&self, items: &'a [T]) -> &'a [T] {
+        let start = self
+            .overlay_hitbox_start
+            .unwrap_or(items.len())
+            .min(items.len());
+        &items[start..]
     }
 }
 
@@ -988,6 +1008,11 @@ pub(crate) fn begin_base_prepaint(window: &mut Window) {
 /// Stacks what deferred and window-level draws position, as they prepaint,
 /// above the overlay surface.
 pub(crate) fn begin_overlay_prepaint(window: &mut Window) {
+    let hitbox_start = window.next_frame.hitboxes.len();
+    window
+        .next_frame
+        .fast_composition_starts
+        .begin_overlay_hitboxes(hitbox_start);
     let state = window.fast_composition.0.borrow();
     state.prepainting.set(Some(Host::Overlay));
 }
@@ -1029,7 +1054,7 @@ pub(crate) fn begin_overlay(window: &mut Window) {
 /// leaves painting on the surface it was on before.
 pub(crate) fn reuse_starts(window: &mut Window, range: &Range<PaintIndex>) {
     let scenes = range.start.scene_index..range.end.scene_index;
-    let starts = &window.rendered_frame.fast_composition_starts.0;
+    let starts = &window.rendered_frame.fast_composition_starts.scene;
     let first = starts.partition_point(|(_, start)| *start < scenes.start);
     let last = starts.partition_point(|(_, start)| *start < scenes.end);
     if first == last {
@@ -1040,7 +1065,7 @@ pub(crate) fn reuse_starts(window: &mut Window, range: &Range<PaintIndex>) {
     };
     let offset = window.next_frame.scene.len();
     for index in first..last {
-        let (reused, start) = window.rendered_frame.fast_composition_starts.0[index];
+        let (reused, start) = window.rendered_frame.fast_composition_starts.scene[index];
         window
             .next_frame
             .fast_composition_starts
@@ -1077,7 +1102,7 @@ pub(crate) fn present(window: &mut Window) {
     let scene = &window.rendered_frame.scene;
     let layers = composed_scene_layers(
         &state.tree,
-        &window.rendered_frame.fast_composition_starts.0,
+        &window.rendered_frame.fast_composition_starts.scene,
         scene.len(),
     )
     .unwrap_or_else(|error| {
@@ -1088,26 +1113,173 @@ pub(crate) fn present(window: &mut Window) {
         }]
     });
     drop(state);
+    #[cfg(target_os = "macos")]
+    {
+        let input_region = overlay_input_region(
+            window
+                .rendered_frame
+                .fast_composition_starts
+                .overlay_items(&window.rendered_frame.hitboxes),
+        );
+        window.platform_window.set_input_region(Some(&input_region));
+    }
     window
         .platform_window
         .draw_composed(ComposedScene::new(scene, layers));
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn overlay_input_region(hitboxes: &[Hitbox]) -> Vec<Bounds<Pixels>> {
+    hitboxes
+        .iter()
+        .filter_map(|hitbox| clipped_input_bounds(hitbox.bounds, hitbox.content_mask.bounds))
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn clipped_input_bounds(
+    bounds: Bounds<Pixels>,
+    content_mask: Bounds<Pixels>,
+) -> Option<Bounds<Pixels>> {
+    let bounds = bounds.intersect(&content_mask);
+    (bounds.size.width > px(0.) && bounds.size.height > px(0.)).then_some(bounds)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         CompositionSurfaceId, CompositionSurfaceKind, CompositionTree, Host,
-        ManagedPlatformSurface, PlatformSurfaceAttachment, composed_scene_layers,
-        restack_native_surfaces,
+        ManagedPlatformSurface, PlatformSurfaceAttachment, SurfaceStarts, clipped_input_bounds,
+        composed_scene_layers, restack_native_surfaces,
     };
     use crate::{
-        AppContext as _, Bounds, ContentMask, Context, DevicePixels, Entity, IntoElement,
-        ParentElement as _, Point, Quad, Render, ScaledPixels, Scene, Size, StyleRefinement,
-        Styled as _, TestAppContext, Window, canvas, deferred, div, fill, px,
-        scene::PaintOperation, size,
+        AppContext as _, Bounds, ContentMask, Context, DevicePixels, Entity,
+        InteractiveElement as _, IntoElement, ParentElement as _, Point, Quad, Render,
+        ScaledPixels, Scene, Size, StyleRefinement, Styled as _, TestAppContext, Window, canvas,
+        deferred, div, fill, px, scene::PaintOperation, size,
     };
     use anyhow::Result;
     use std::{any::Any, cell::Cell, rc::Rc};
+
+    #[test]
+    fn input_regions_start_at_overlay_boundary() {
+        let mut starts = SurfaceStarts::default();
+        let hitboxes = [1, 2, 3];
+
+        assert!(starts.overlay_items(&hitboxes).is_empty());
+        starts.begin_overlay_hitboxes(1);
+        assert_eq!(starts.overlay_items(&hitboxes), [2, 3]);
+        starts.clear();
+        assert!(starts.overlay_items(&hitboxes).is_empty());
+    }
+
+    #[test]
+    fn input_regions_clip_to_content_mask() {
+        let bounds = Bounds::new(Point::new(px(10.), px(20.)), size(px(40.), px(50.)));
+        let mask = Bounds::new(Point::new(px(30.), px(0.)), size(px(50.), px(50.)));
+
+        assert_eq!(
+            clipped_input_bounds(bounds, mask),
+            Some(Bounds::new(
+                Point::new(px(30.), px(20.)),
+                size(px(20.), px(30.))
+            ))
+        );
+        assert_eq!(
+            clipped_input_bounds(
+                bounds,
+                Bounds::new(Point::new(px(100.), px(100.)), size(px(10.), px(10.)))
+            ),
+            None
+        );
+    }
+
+    fn current_overlay_input_region(window: &Window) -> Vec<Bounds<crate::Pixels>> {
+        let frame = &window.rendered_frame;
+        super::overlay_input_region(frame.fast_composition_starts.overlay_items(&frame.hitboxes))
+    }
+
+    struct DecorativeOverlay;
+
+    impl Render for DecorativeOverlay {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size(px(100.))
+                .child(deferred(div().size(px(40.)).border_1()))
+        }
+    }
+
+    #[crate::test]
+    fn decorative_overlay_has_no_input_region(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| DecorativeOverlay);
+
+        let input_region = cx
+            .update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+                current_overlay_input_region(window)
+            })
+            .unwrap();
+
+        assert!(input_region.is_empty());
+    }
+
+    struct OverlayControl {
+        builds: Rc<Cell<usize>>,
+    }
+
+    impl Render for OverlayControl {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.builds.set(self.builds.get() + 1);
+            div()
+                .size(px(100.))
+                .child(deferred(div().size(px(40.)).occlude()))
+        }
+    }
+
+    struct OverlayControlPanel {
+        control: Entity<OverlayControl>,
+    }
+
+    impl Render for OverlayControlPanel {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size(px(200.)).child(
+                self.control
+                    .clone()
+                    .cached(StyleRefinement::default().w(px(100.)).h(px(100.))),
+            )
+        }
+    }
+
+    #[crate::test]
+    fn retained_overlay_keeps_input_region(cx: &mut TestAppContext) {
+        let builds = Rc::new(Cell::new(0));
+        let window = cx.add_window({
+            let builds = builds.clone();
+            move |_, cx| OverlayControlPanel {
+                control: cx.new(|_| OverlayControl { builds }),
+            }
+        });
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+                current_overlay_input_region(window)
+            })
+            .unwrap()
+        };
+
+        let first = draw(cx);
+        assert_eq!(builds.get(), 1);
+        assert_eq!(first.len(), 1);
+
+        window.update(cx, |_, _, cx| cx.notify()).unwrap();
+        let second = draw(cx);
+        assert_eq!(
+            builds.get(),
+            1,
+            "the control is drawn again from last frame"
+        );
+        assert_eq!(second, first);
+    }
 
     #[test]
     fn composition_surfaces_have_stable_identity_and_explicit_order() -> Result<()> {
@@ -1484,7 +1656,7 @@ mod tests {
         let frame = &window.rendered_frame;
         let layers = composed_scene_layers(
             &state.tree,
-            &frame.fast_composition_starts.0,
+            &frame.fast_composition_starts.scene,
             frame.scene.len(),
         )
         .unwrap();

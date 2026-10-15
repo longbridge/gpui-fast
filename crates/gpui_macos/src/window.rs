@@ -2255,6 +2255,10 @@ impl PlatformWindow for MacWindow {
         }
     }
 
+    fn set_input_region(&self, region: Option<&[Bounds<Pixels>]>) {
+        crate::fast::composition::set_input_region(&self.0, region);
+    }
+
     fn can_start_external_drag(&self) -> bool {
         true
     }
