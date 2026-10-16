@@ -33,7 +33,6 @@ use std::{any::TypeId, cell::RefCell, mem, ops::Range, rc::Rc};
 #[inline(always)]
 pub(crate) fn begin_frame(window: &mut Window, cx: &App) {
     window.fast_layout.phase_times.begin();
-    crate::fast::layers::hover_freeze::begin_draw(window);
     crate::fast::a11y::new_frame(window);
     window.mark_changed_retained_views_dirty(cx);
 }
@@ -1969,7 +1968,12 @@ impl HitboxId {
     /// Whether the hitbox is hovered, as [`HitboxId::is_hovered`] answers,
     /// without noting that it was asked.
     pub(crate) fn hovered_now(self, window: &Window) -> bool {
-        window.captured_hitbox == Some(self)
-            || (!window.last_input_was_keyboard() && self.hit_test(window))
+        if window.captured_hitbox == Some(self) {
+            return true;
+        }
+        if window.last_input_was_keyboard() || crate::fast::layers::hover_freeze::frozen(window) {
+            return false;
+        }
+        self.hit_test(window)
     }
 }

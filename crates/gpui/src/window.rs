@@ -788,7 +788,7 @@ impl HitboxId {
         if window.captured_hitbox == Some(self) {
             return true;
         }
-        if window.last_input_was_keyboard() {
+        if window.last_input_was_keyboard() || crate::fast::layers::hover_freeze::frozen(window) {
             return false;
         }
         self.hit_test(window)
@@ -3013,6 +3013,18 @@ impl Window {
         } else {
             self.is_window_active()
         }
+    }
+
+    /// Marks this window as owning the pointer.
+    ///
+    /// The test platform reports a window as neither active nor hovered, and
+    /// the frame-end cursor update writes the platform cursor only while the
+    /// window owns the pointer: the active window on macOS, the hovered
+    /// window elsewhere.
+    #[cfg(test)]
+    pub(crate) fn set_owns_pointer(&mut self, owns: bool) {
+        self.active.set(owns);
+        self.hovered.set(owns);
     }
 
     /// Toggle zoom on the window.

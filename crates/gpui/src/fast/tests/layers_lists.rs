@@ -2655,9 +2655,9 @@ mod rows {
         expanded_quads, held_rows, open_at, row_color, wheel, with_window,
     };
     use crate::{
-        AnyWindowHandle, AppContext as _, Bounds, Context, Entity, IntoElement, ListAlignment,
-        ListState, ParentElement as _, Pixels, Render, StatefulInteractiveElement as _,
-        Styled as _, TestAppContext, Window, div, px, rgb,
+        AnyWindowHandle, AppContext as _, Bounds, Context, CursorStyle, Entity, IntoElement,
+        ListAlignment, ListState, ParentElement as _, Pixels, Render,
+        StatefulInteractiveElement as _, Styled as _, TestAppContext, Window, div, px, rgb,
     };
     use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 
@@ -2887,10 +2887,11 @@ mod rows {
         }
     }
 
-    /// While a wheel scrolls rows under a still pointer, hover is held
-    /// still: nothing is hovered, no row is rendered again for its hover,
-    /// and the list stays composited on every frame. A pointer that moves
-    /// hovers what is under it again at once.
+    /// While a wheel scrolls rows under a still pointer, hover styling is held
+    /// still: no row reports hovered, no row is rendered again for its hover,
+    /// and the list stays composited on every frame. The hit test stays the
+    /// geometry under the pointer. A pointer that moves hovers what is under
+    /// it again at once.
     #[crate::test]
     fn hover_held_still_while_the_wheel_scrolls_renders_no_row_for_it(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {
@@ -2912,8 +2913,15 @@ mod rows {
                     "uniform {uniform}, frame {frame}"
                 );
                 assert!(
-                    with_window(cx, window, |window, _| window.mouse_hit_test.ids.is_empty()),
-                    "uniform {uniform}, frame {frame}: nothing is hovered"
+                    with_window(cx, window, |window, _| {
+                        !window.mouse_hit_test.ids.is_empty()
+                            && window
+                                .rendered_frame
+                                .hitboxes
+                                .iter()
+                                .all(|hitbox| !hitbox.is_hovered(window))
+                    }),
+                    "uniform {uniform}, frame {frame}: geometry stays, hover styling does not"
                 );
             }
             assert_eq!(
@@ -2934,13 +2942,83 @@ mod rows {
             });
             draw(cx, window);
             assert!(
-                with_window(cx, window, |window, _| !window
-                    .mouse_hit_test
-                    .ids
-                    .is_empty()),
+                with_window(cx, window, |window, _| {
+                    window
+                        .rendered_frame
+                        .hitboxes
+                        .iter()
+                        .any(|hitbox| hitbox.is_hovered(window))
+                }),
                 "uniform {uniform}: the moved pointer hovers the row under it"
             );
         }
+    }
+
+    /// The platform cursor stays the text cursor while a wheel scrolls under a
+    /// still pointer. Hover styling is held still over that text. Moving the
+    /// pointer off the text sets the arrow.
+    #[crate::test]
+    fn the_cursor_follows_the_text_under_a_still_pointer_while_hover_is_frozen(
+        cx: &mut TestAppContext,
+    ) {
+        struct TextPage;
+
+        impl Render for TextPage {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .child(div().w(px(40.)).h(px(40.)).cursor(CursorStyle::IBeam))
+            }
+        }
+
+        let window = cx.add_window(|_, _| TextPage).into();
+        with_window(cx, window, |window, _| {
+            window.set_owns_pointer(true);
+            window.set_hover_freeze(true);
+        });
+        open_at(cx, window, 1.);
+        assert_eq!(
+            cx.test_platform().active_cursor_style(),
+            CursorStyle::IBeam,
+            "the text under the pointer sets the cursor before the wheel"
+        );
+
+        for frame in 0..8 {
+            wheel(cx, window, -7.);
+            assert_eq!(
+                cx.test_platform().active_cursor_style(),
+                CursorStyle::IBeam,
+                "frame {frame}: the cursor stays the text cursor while hover is held still"
+            );
+            assert!(
+                with_window(cx, window, |window, _| {
+                    !window.mouse_hit_test.ids.is_empty()
+                        && window
+                            .rendered_frame
+                            .hitboxes
+                            .iter()
+                            .all(|hitbox| !hitbox.is_hovered(window))
+                }),
+                "frame {frame}: geometry stays, hover styling does not"
+            );
+        }
+
+        with_window(cx, window, |window, cx| {
+            window.dispatch_event(
+                crate::PlatformInput::MouseMove(crate::MouseMoveEvent {
+                    position: crate::point(px(80.), px(80.)),
+                    pressed_button: None,
+                    modifiers: Default::default(),
+                }),
+                cx,
+            );
+        });
+        draw(cx, window);
+        assert_eq!(
+            cx.test_platform().active_cursor_style(),
+            CursorStyle::Arrow,
+            "the pointer off the text sets the arrow"
+        );
     }
 
     /// A list whose rows take input (a hover style: a hitbox, a listener,

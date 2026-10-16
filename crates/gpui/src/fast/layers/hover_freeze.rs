@@ -8,10 +8,12 @@
 //! costs without layers.
 //!
 //! So for [`HOVER_FREEZE`] after a wheel event, while the pointer stays where
-//! the event was, nothing is hovered: the frame's hit test, and the one a
-//! list foretells for its rows, are empty. When the wheel stops the window is
-//! drawn again, and hover follows the pointer as before. A pointer that moves
-//! ends the freeze at once.
+//! the event was, hover styling is held still: [`crate::HitboxId::is_hovered`]
+//! is false, and the hit test a list foretells for its rows is empty. The
+//! frame's hit test stays the geometry under the pointer, so the cursor
+//! follows that geometry. When the wheel stops the window is drawn again,
+//! and hover follows the pointer as before. A pointer that moves ends the
+//! freeze at once.
 
 use std::time::{Duration, Instant};
 
@@ -72,22 +74,11 @@ pub(crate) fn frozen(window: &Window) -> bool {
         })
 }
 
-/// Empties the last frame's hit test as a frame begins to be drawn while
-/// hover is held still, so that nothing rendered counts as hovered.
-pub(crate) fn begin_draw(window: &mut Window) {
-    if frozen(window) {
-        window.mouse_hit_test = HitTest::default();
-    }
-}
-
 /// The hit test of the frame being drawn, taken between its prepaint and its
-/// paint: empty while hover is held still.
+/// paint. This is the geometry under the pointer, including while hover
+/// styling is held still. Cursor resolution reads it; hover styling does not.
 pub(crate) fn hit_test(window: &Window) -> HitTest {
-    if frozen(window) {
-        HitTest::default()
-    } else {
-        window.next_frame.hit_test(window.mouse_position)
-    }
+    window.next_frame.hit_test(window.mouse_position)
 }
 
 impl Window {

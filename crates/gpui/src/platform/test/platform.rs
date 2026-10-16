@@ -425,6 +425,10 @@ impl TestPlatform {
                 .get_or_insert(callback);
         }
     }
+
+    pub(crate) fn active_cursor_style(&self) -> CursorStyle {
+        *self.active_cursor.lock()
+    }
 }
 
 impl Platform for TestPlatform {
