@@ -788,7 +788,7 @@ impl HitboxId {
         if window.captured_hitbox == Some(self) {
             return true;
         }
-        if window.last_input_was_keyboard() || crate::fast::layers::hover_freeze::frozen(window) {
+        if crate::fast::layers::hover_freeze::hides_hover(window) {
             return false;
         }
         self.hit_test(window)
@@ -1290,11 +1290,11 @@ pub struct Window {
     appearance: WindowAppearance,
     pub(crate) appearance_observers: SubscriberSet<(), AnyObserver>,
     pub(crate) button_layout_observers: SubscriberSet<(), AnyObserver>,
-    active: Rc<Cell<bool>>,
+    pub(crate) active: Rc<Cell<bool>>,
     visibility: WindowVisibility,
     pub(crate) visibility_observers:
         SubscriberSet<(), Box<dyn FnMut(WindowVisibility, &mut Window, &mut App) -> bool>>,
-    hovered: Rc<Cell<bool>>,
+    pub(crate) hovered: Rc<Cell<bool>>,
     pub(crate) needs_present: Rc<Cell<bool>>,
     /// Tracks recent input event timestamps to determine if input is arriving at a high rate.
     /// Used to selectively enable VRR optimization only when input rate exceeds 60fps.
@@ -3015,18 +3015,6 @@ impl Window {
         }
     }
 
-    /// Marks this window as owning the pointer.
-    ///
-    /// The test platform reports a window as neither active nor hovered, and
-    /// the frame-end cursor update writes the platform cursor only while the
-    /// window owns the pointer: the active window on macOS, the hovered
-    /// window elsewhere.
-    #[cfg(test)]
-    pub(crate) fn set_owns_pointer(&mut self, owns: bool) {
-        self.active.set(owns);
-        self.hovered.set(owns);
-    }
-
     /// Toggle zoom on the window.
     pub fn zoom_window(&self) {
         self.platform_window.zoom();
@@ -3788,7 +3776,7 @@ impl Window {
 
         crate::fast::stats::FramePhaseTimes::end_prepaint(&mut self.fast_layout.phase_times);
         crate::fast::composition::finish_input(self);
-        self.mouse_hit_test = crate::fast::layers::hover_freeze::hit_test(self);
+        self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
 
         // Now actually paint the elements.
         #[cfg(feature = "profiler")]

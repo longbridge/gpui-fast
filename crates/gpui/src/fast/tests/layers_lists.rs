@@ -2888,10 +2888,9 @@ mod rows {
     }
 
     /// While a wheel scrolls rows under a still pointer, hover styling is held
-    /// still: no row reports hovered, no row is rendered again for its hover,
-    /// and the list stays composited on every frame. The hit test stays the
-    /// geometry under the pointer. A pointer that moves hovers what is under
-    /// it again at once.
+    /// still: no row is rendered again for its hover, and the list stays
+    /// composited on every frame. The hit test stays the geometry under the
+    /// pointer. A pointer that moves hovers what is under it again at once.
     #[crate::test]
     fn hover_held_still_while_the_wheel_scrolls_renders_no_row_for_it(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {
@@ -2915,13 +2914,9 @@ mod rows {
                 assert!(
                     with_window(cx, window, |window, _| {
                         !window.mouse_hit_test.ids.is_empty()
-                            && window
-                                .rendered_frame
-                                .hitboxes
-                                .iter()
-                                .all(|hitbox| !hitbox.is_hovered(window))
+                            && crate::fast::layers::hover_freeze::frozen(window)
                     }),
-                    "uniform {uniform}, frame {frame}: geometry stays, hover styling does not"
+                    "uniform {uniform}, frame {frame}: the geometry stays while hover is held still"
                 );
             }
             assert_eq!(
@@ -2993,13 +2988,9 @@ mod rows {
             assert!(
                 with_window(cx, window, |window, _| {
                     !window.mouse_hit_test.ids.is_empty()
-                        && window
-                            .rendered_frame
-                            .hitboxes
-                            .iter()
-                            .all(|hitbox| !hitbox.is_hovered(window))
+                        && crate::fast::layers::hover_freeze::frozen(window)
                 }),
-                "frame {frame}: geometry stays, hover styling does not"
+                "frame {frame}: the geometry stays while hover is held still"
             );
         }
 
@@ -3019,6 +3010,74 @@ mod rows {
             CursorStyle::Arrow,
             "the pointer off the text sets the arrow"
         );
+    }
+
+    /// A click under a still pointer right after the wheel reaches its
+    /// handler. Hover styling is held still while frames are drawn; events
+    /// dispatched between them read the geometry under the pointer.
+    #[crate::test]
+    fn a_click_under_a_still_pointer_right_after_the_wheel_reaches_its_handler(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::InteractiveElement as _;
+
+        struct ClickPage {
+            clicks: Rc<RefCell<usize>>,
+        }
+
+        impl Render for ClickPage {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let clicks = self.clicks.clone();
+                div().size_full().child(
+                    div()
+                        .id("button")
+                        .w(px(40.))
+                        .h(px(40.))
+                        .on_click(move |_, _, _| *clicks.borrow_mut() += 1),
+                )
+            }
+        }
+
+        let clicks = Rc::new(RefCell::new(0));
+        let window = cx
+            .add_window({
+                let clicks = clicks.clone();
+                move |_, _| ClickPage { clicks }
+            })
+            .into();
+        with_window(cx, window, |window, _| window.set_hover_freeze(true));
+        open_at(cx, window, 1.);
+        wheel(cx, window, -7.);
+        assert!(
+            with_window(cx, window, |window, _| {
+                crate::fast::layers::hover_freeze::frozen(window)
+            }),
+            "the wheel holds hover still"
+        );
+
+        let position = crate::point(px(20.), px(20.));
+        with_window(cx, window, |window, cx| {
+            window.dispatch_event(
+                crate::PlatformInput::MouseDown(crate::MouseDownEvent {
+                    button: crate::MouseButton::Left,
+                    position,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                crate::PlatformInput::MouseUp(crate::MouseUpEvent {
+                    button: crate::MouseButton::Left,
+                    position,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                }),
+                cx,
+            );
+        });
+        assert_eq!(*clicks.borrow(), 1, "the click reached its handler");
     }
 
     /// A list whose rows take input (a hover style: a hitbox, a listener,

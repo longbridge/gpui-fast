@@ -3,9 +3,29 @@
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use crate::{
-    App, BackgroundExecutor, ForegroundExecutor, Platform as _, PlatformTextSystem, TestAppContext,
-    TestDispatcher, TestPlatform, TextSystem, app::GpuiMode,
+    App, BackgroundExecutor, CursorStyle, ForegroundExecutor, Platform as _, PlatformTextSystem,
+    TestAppContext, TestDispatcher, TestPlatform, TextSystem, Window, app::GpuiMode,
 };
+
+impl TestPlatform {
+    /// The cursor a window last set on the platform.
+    pub(crate) fn active_cursor_style(&self) -> CursorStyle {
+        *self.active_cursor.lock()
+    }
+}
+
+impl Window {
+    /// Marks this window as owning the pointer.
+    ///
+    /// The test platform reports a window as neither active nor hovered, and
+    /// the frame-end cursor update writes the platform cursor only while the
+    /// window owns the pointer: the active window on macOS, the hovered
+    /// window elsewhere.
+    pub(crate) fn set_owns_pointer(&mut self, owns: bool) {
+        self.active.set(owns);
+        self.hovered.set(owns);
+    }
+}
 
 impl TestAppContext {
     /// Creates a `TestAppContext` whose platform lays out and rasterizes text

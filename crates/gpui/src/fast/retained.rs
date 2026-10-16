@@ -1971,7 +1971,7 @@ impl HitboxId {
         if window.captured_hitbox == Some(self) {
             return true;
         }
-        if window.last_input_was_keyboard() || crate::fast::layers::hover_freeze::frozen(window) {
+        if crate::fast::layers::hover_freeze::hides_hover(window) {
             return false;
         }
         self.hit_test(window)
