@@ -135,7 +135,12 @@ unchanged, and a new entry needs as good a reason.
   list), `LAYER_TILE_TEXTURE_BASE`, `layer_tile_texture_id`, `layer_tile_id` and
   `decode_layer_tile`, because renderers live in other crates and read scroll
   layers from the scene. Polychrome sprites whose texture index is at or
-  above `LAYER_TILE_TEXTURE_BASE` are scroll layer tiles, not atlas textures.
+  above `LAYER_TILE_TEXTURE_BASE` are renderer layer references, not atlas
+  textures. Reserved ids from `0xF100_0000` identify rounded overflow groups
+  with `tile_size = 0`; their drawable scene carries padding-edge geometry
+  in a non-composited frame keyed by `u32::MAX`. The private wire format lives
+  in `fast::rounded_clip_scene`; Metal, WGPU and Direct3D evaluate the clip
+  stack directly without intermediate render targets.
 - `crates/gpui/Cargo.toml` names this repository and sets `publish = false`.
 - The workspace pins Taffy 0.14 where upstream pins 0.13. Taffy 0.13 keeps
   one cached size per kind of constraint, so a node measured under two widths
