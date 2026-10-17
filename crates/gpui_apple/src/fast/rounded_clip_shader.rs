@@ -1,5 +1,5 @@
 //! Build-time injection keeps the upstream Metal shader source unchanged.
-//! Each colour-producing fragment samples its scope's immutable mask. Path
+//! Each colour-producing fragment evaluates its immutable clip stack. Path
 //! rasterization itself is unmasked; its premultiplied result is masked when
 //! the path sprite is composited, avoiding applying coverage twice.
 
@@ -36,15 +36,41 @@ pub fn source(source: &str) -> String {
         let premultiplied = name == "path_sprite_fragment";
         let body = mask_returns(body, premultiplied);
         source.replace_range(body_start + 1..body_end, &body);
-        source.insert_str(signature_end, ", texture2d<float> fast_clip_texture [[texture(15)]], constant uint &fast_clip_enabled [[buffer(29)]]");
+        source.insert_str(signature_end, ", constant FastRoundedClip *fast_clip_shapes [[buffer(28)]], constant uint &fast_clip_enabled [[buffer(29)]]");
     }
     let helper = r#"
-float4 fast_rounded_clip_color(float4 color, float2 position, texture2d<float> mask, uint enabled, bool premultiplied) {
-  if (enabled != 0) {
-    float coverage = mask.read(uint2(position)).a;
-    if (premultiplied) color.rgb *= coverage;
-    color.a *= coverage;
+struct FastRoundedClip {
+  float4 bounds;
+  float4 horizontal;
+  float4 vertical;
+};
+float fast_rounded_clip_coverage(float2 position, constant FastRoundedClip &shape) {
+  float2 extent = shape.bounds.zw - shape.bounds.xy;
+  if (extent.x <= 0 || extent.y <= 0) return 0;
+  float2 local = position - shape.bounds.xy;
+  float distance = max(max(-local.x, -local.y), max(local.x - extent.x, local.y - extent.y));
+  for (uint corner = 0; corner < 4; ++corner) {
+    float2 radius = float2(shape.horizontal[corner], shape.vertical[corner]);
+    if (radius.x <= 0 || radius.y <= 0) continue;
+    bool right = corner == 1 || corner == 2;
+    bool bottom = corner >= 2;
+    float2 inward = float2(right ? extent.x - local.x : local.x, bottom ? extent.y - local.y : local.y);
+    if (inward.x < radius.x && inward.y < radius.y) {
+      float2 q = (inward - radius) / radius;
+      float length_q = length(q);
+      float gradient = length(q / radius) / max(length_q, 0.000001f);
+      distance = max(distance, (length_q - 1) / max(gradient, 0.000001f));
+    }
   }
+  return clamp(0.5f - distance, 0.0f, 1.0f);
+}
+float4 fast_rounded_clip_color(float4 color, float2 position, constant FastRoundedClip *shapes, uint count, bool premultiplied) {
+  float coverage = 1;
+  for (uint index = 0; index < count; ++index) {
+    coverage = min(coverage, fast_rounded_clip_coverage(position, shapes[index]));
+  }
+  if (premultiplied) color.rgb *= coverage;
+  color.a *= coverage;
   return color;
 }
 "#;
@@ -66,7 +92,7 @@ fn mask_returns(body: &str, premultiplied: bool) -> String {
                 .find(';')
                 .expect("fragment return semicolon");
         result.push_str(&remaining[..start]);
-        result.push_str(&format!("return fast_rounded_clip_color({}, input.position.xy, fast_clip_texture, fast_clip_enabled, {premultiplied});", &remaining[start + 7..end]));
+        result.push_str(&format!("return fast_rounded_clip_color({}, input.position.xy, fast_clip_shapes, fast_clip_enabled, {premultiplied});", &remaining[start + 7..end]));
         remaining = &remaining[end + 1..];
     }
     result.push_str(remaining);

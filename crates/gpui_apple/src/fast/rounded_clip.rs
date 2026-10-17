@@ -1,9 +1,7 @@
-//! Rounded scopes draw into the current colour target with independent mask
-//! textures. A child's mask is evaluated under its parent's mask. A mask
-//! stays unchanged while its scope is active; siblings reuse its storage in
-//! later render passes. Paths are masked on composition,
-//! and all the other primitive pipelines apply the same coverage in their
-//! fragment shader.
+//! Evaluate independent rounded padding edges directly in colour fragments.
+//! Nested scopes append geometry and siblings restore the enclosing stack.
+//! Only actual path batches restart the colour pass; rounded containers do
+//! not allocate textures or encode mask render passes.
 
 use anyhow::{Context as _, Result};
 use gpui::{AtlasTextureId, DevicePixels, LayerFrame, PrimitiveBatch, Scene, Size};
@@ -15,62 +13,14 @@ use crate::metal_renderer::{
 
 const CLIP_TEXTURE_BASE: u32 = 0xF100_0000;
 
-#[derive(Default)]
-pub(crate) struct MaskPool(Vec<MaskSlot>);
-
-struct MaskSlot {
-    depth: usize,
-    size: Size<DevicePixels>,
-    texture: metal::Texture,
-    used: bool,
-}
-
-impl MaskPool {
-    fn get(
-        &mut self,
-        device: &metal::DeviceRef,
-        size: Size<DevicePixels>,
-        depth: usize,
-    ) -> metal::Texture {
-        let index = self
-            .0
-            .iter()
-            .position(|slot| slot.depth == depth && slot.size == size)
-            .unwrap_or_else(|| {
-                let descriptor = metal::TextureDescriptor::new();
-                descriptor.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
-                descriptor.set_texture_type(metal::MTLTextureType::D2);
-                descriptor.set_width(size.width.0 as u64);
-                descriptor.set_height(size.height.0 as u64);
-                descriptor.set_storage_mode(metal::MTLStorageMode::Private);
-                descriptor.set_usage(
-                    metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead,
-                );
-                let texture = device.new_texture(&descriptor);
-                texture.set_label("rounded_overflow_mask");
-                self.0.push(MaskSlot {
-                    depth,
-                    size,
-                    texture,
-                    used: true,
-                });
-                self.0.len() - 1
-            });
-        self.0[index].used = true;
-        self.0[index].texture.clone()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.0.len()
-    }
-}
-
-pub(crate) fn begin_frame(renderer: &mut MetalRenderer) {
-    renderer.fast_rounded_clip.0.retain(|slot| slot.used);
-    for slot in &mut renderer.fast_rounded_clip.0 {
-        slot.used = false;
-    }
+/// Geometry is copied into Metal's command stream, never retained in a shared
+/// mutable texture. A stack remains valid when sibling scopes overlap.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Clip {
+    bounds: [f32; 4],
+    horizontal: [f32; 4],
+    vertical: [f32; 4],
 }
 
 fn group(scene: &Scene, texture: AtlasTextureId) -> Option<&LayerFrame> {
@@ -93,17 +43,28 @@ pub(crate) fn has_groups(scene: &Scene) -> bool {
 }
 
 pub(crate) fn default_mask(encoder: &metal::RenderCommandEncoderRef) {
-    bind(encoder, None);
+    let count = 0u32;
+    encoder.set_fragment_bytes(29, 4, &count as *const u32 as *const _);
+    let empty = [0f32; 12];
+    encoder.set_fragment_bytes(28, 48, empty.as_ptr().cast());
 }
 
-fn bind(encoder: &metal::RenderCommandEncoderRef, mask: Option<&metal::TextureRef>) {
-    let enabled = u32::from(mask.is_some());
-    encoder.set_fragment_bytes(
-        29,
-        size_of_val(&enabled) as u64,
-        &enabled as *const u32 as *const _,
-    );
-    encoder.set_fragment_texture(15, mask);
+fn bind(encoder: &metal::RenderCommandEncoderRef, clips: &[Clip], device: &metal::DeviceRef) {
+    let count = clips.len() as u32;
+    encoder.set_fragment_bytes(29, 4, &count as *const u32 as *const _);
+    if !clips.is_empty() {
+        let length = std::mem::size_of_val(clips) as u64;
+        if length <= 4096 {
+            encoder.set_fragment_bytes(28, length, clips.as_ptr().cast());
+        } else {
+            let buffer = device.new_buffer_with_data(
+                clips.as_ptr().cast(),
+                length,
+                metal::MTLResourceOptions::StorageModeShared,
+            );
+            encoder.set_fragment_buffer(28, Some(&buffer), 0);
+        }
+    }
 }
 
 pub(crate) fn raster_nested_tiles(renderer: &mut MetalRenderer, scene: &Scene) {
@@ -127,6 +88,12 @@ pub(crate) fn draw(
     let queue = renderer.command_queue.clone();
     let command_buffer = queue.new_command_buffer();
     let alpha = if renderer.opaque { 1. } else { 0. };
+    let encoder = new_command_encoder_for_texture(
+        command_buffer,
+        texture,
+        viewport,
+        Some(metal::MTLClearColor::new(0., 0., 0., alpha)),
+    );
     encode(
         renderer,
         scene,
@@ -135,10 +102,10 @@ pub(crate) fn draw(
         texture,
         viewport,
         command_buffer,
-        None,
-        Some(metal::MTLClearColor::new(0., 0., 0., alpha)),
-        0,
-    )?;
+        &mut Vec::new(),
+        encoder,
+    )?
+    .end_encoding();
     Ok(command_buffer.to_owned())
 }
 
@@ -156,6 +123,8 @@ pub(crate) fn draw_tile(
     renderer.update_path_intermediate_textures(viewport);
     let result = (|| {
         let bindings = write_instances(scene, writer)?;
+        let encoder =
+            new_command_encoder_for_texture(commands, texture, viewport, Some(background));
         encode(
             renderer,
             scene,
@@ -164,10 +133,11 @@ pub(crate) fn draw_tile(
             texture,
             viewport,
             commands,
-            None,
-            Some(background),
-            0,
-        )
+            &mut Vec::new(),
+            encoder,
+        )?
+        .end_encoding();
+        Ok(())
     })();
     renderer.path_intermediate_texture = old_texture;
     renderer.path_intermediate_msaa_texture = old_msaa;
@@ -175,22 +145,20 @@ pub(crate) fn draw_tile(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn encode(
+fn encode<'a>(
     renderer: &mut MetalRenderer,
     scene: &Scene,
     bindings: &InstanceBindings,
     writer: &mut InstanceBufferWriter,
-    texture: &metal::TextureRef,
+    texture: &'a metal::TextureRef,
     viewport: Size<DevicePixels>,
-    commands: &metal::CommandBufferRef,
-    mask: Option<&metal::TextureRef>,
-    clear: Option<metal::MTLClearColor>,
-    depth: usize,
-) -> Result<()> {
+    commands: &'a metal::CommandBufferRef,
+    clips: &mut Vec<Clip>,
+    mut encoder: &'a metal::RenderCommandEncoderRef,
+) -> Result<&'a metal::RenderCommandEncoderRef> {
     renderer.fast_layers.note_composited(scene);
-    let mut encoder = new_command_encoder_for_texture(commands, texture, viewport, clear);
     for batch in scene.batches() {
-        bind(encoder, mask);
+        bind(encoder, clips, &renderer.device);
         match batch {
             PrimitiveBatch::Shadows(range) => {
                 renderer.draw_shadows(range, bindings, viewport, encoder)
@@ -205,34 +173,29 @@ fn encode(
             PrimitiveBatch::PolychromeSprites { texture_id, range } => {
                 if let Some(frame) = group(scene, texture_id) {
                     let child = frame.content.scene().context("rounded clip content")?;
-                    let mask_scene = child
+                    let radii = child
                         .layers
                         .frames
                         .iter()
                         .find(|frame| frame.key.0 == u32::MAX)
-                        .and_then(|frame| frame.content.scene())
-                        .context("rounded clip mask")?;
-                    for _ in range {
-                        encoder.end_encoding();
-                        let child_mask =
-                            renderer
-                                .fast_rounded_clip
-                                .get(&renderer.device, viewport, depth);
-                        let mask_bindings = write_instances(mask_scene, writer)?;
-                        encode(
-                            renderer,
-                            mask_scene,
-                            &mask_bindings,
-                            writer,
-                            &child_mask,
-                            viewport,
-                            commands,
-                            mask,
-                            Some(metal::MTLClearColor::new(0., 0., 0., 0.)),
-                            depth + 1,
-                        )?;
+                        .context("rounded clip geometry")?
+                        .background;
+                    for index in range {
+                        let sprite = &scene.polychrome_sprites[index];
+                        let b = sprite.bounds;
+                        let r = sprite.corner_radii;
+                        clips.push(Clip {
+                            bounds: [b.origin.x.0, b.origin.y.0, b.right().0, b.bottom().0],
+                            horizontal: [
+                                r.top_left.0,
+                                r.top_right.0,
+                                r.bottom_right.0,
+                                r.bottom_left.0,
+                            ],
+                            vertical: [radii.r, radii.g, radii.b, radii.a],
+                        });
                         let child_bindings = write_instances(child, writer)?;
-                        encode(
+                        encoder = encode(
                             renderer,
                             child,
                             &child_bindings,
@@ -240,13 +203,11 @@ fn encode(
                             texture,
                             viewport,
                             commands,
-                            Some(&child_mask),
-                            None,
-                            depth + 1,
+                            clips,
+                            encoder,
                         )?;
+                        clips.pop();
                         renderer.fast_layers.note_composited(scene);
-                        encoder =
-                            new_command_encoder_for_texture(commands, texture, viewport, None);
                     }
                 } else {
                     renderer
@@ -259,7 +220,7 @@ fn encode(
                 let drawn =
                     renderer.draw_paths_to_intermediate(paths, writer, viewport, commands)?;
                 encoder = new_command_encoder_for_texture(commands, texture, viewport, None);
-                bind(encoder, mask);
+                bind(encoder, clips, &renderer.device);
                 if drawn {
                     renderer.draw_paths_from_intermediate(paths, writer, viewport, encoder)?;
                 }
@@ -274,6 +235,5 @@ fn encode(
             PrimitiveBatch::SubpixelSprites { .. } => unreachable!("Metal uses grayscale glyphs"),
         }
     }
-    encoder.end_encoding();
-    Ok(())
+    Ok(encoder)
 }

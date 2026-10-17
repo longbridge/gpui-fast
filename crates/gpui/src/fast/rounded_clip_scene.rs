@@ -3,6 +3,9 @@
 //! 0xF1000000.. identify clip groups, not atlas sprites or scroll tiles. Such a
 //! group's LayerFrame has tile_size=0 and contains its drawable scene plus a
 //! mask LayerFrame (key u32::MAX), whose scene paints the padding-edge shape.
+//! Analytic renderers read horizontal radii from the group sprite and vertical
+//! radii from that mask frame's background RGBA, in TL/TR/BR/BL order. Those
+//! fields are geometry in this private protocol, never composited colour.
 //! Renderers draw the group's content under that mask in the current target;
 //! the content is not flattened into a colour texture or a shared mask.
 
@@ -79,7 +82,7 @@ pub(crate) fn compile(scene: &mut Scene) {
                     content_mask: ContentMask {
                         bounds: shape.bounds,
                     },
-                    corner_radii: Default::default(),
+                    corner_radii: shape.radii.map(|radius| radius.width),
                     tile: AtlasTile {
                         texture_id: AtlasTextureId {
                             index: CLIP_TEXTURE_BASE + key.0 - 0x0100_0000,
@@ -151,7 +154,14 @@ fn mask(shape: Shape) -> LayerFrame {
     LayerFrame {
         key: MASK_KEY,
         generation: 0,
-        background: Rgba::default(),
+        // Private analytic geometry: horizontal radii are on the group sprite;
+        // this non-composited frame carries the corresponding vertical radii.
+        background: Rgba {
+            r: r.top_left.height.0,
+            g: r.top_right.height.0,
+            b: r.bottom_right.height.0,
+            a: r.bottom_left.height.0,
+        },
         tile_size: 0,
         content: Rc::new(scene).into(),
         dirty_tiles: Vec::new(),

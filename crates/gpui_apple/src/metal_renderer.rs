@@ -141,7 +141,6 @@ pub struct MetalRenderer {
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     headless_render_target: Option<metal::Texture>,
     pub(crate) fast_layers: crate::fast::layers::TileCache,
-    pub(crate) fast_rounded_clip: crate::fast::rounded_clip::MaskPool,
 }
 
 #[repr(C)]
@@ -415,7 +414,6 @@ impl MetalRenderer {
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
             fast_layers: crate::fast::layers::TileCache::default(),
-            fast_rounded_clip: crate::fast::rounded_clip::MaskPool::default(),
         }
     }
 
@@ -547,7 +545,6 @@ impl MetalRenderer {
         texture: &metal::TextureRef,
         viewport_size: Size<DevicePixels>,
     ) -> Result<metal::CommandBuffer> {
-        crate::fast::rounded_clip::begin_frame(self);
         crate::fast::layers::raster::rasterize_tiles(self, scene);
         let mut writer = InstanceBufferWriter::new(
             &self.device,
