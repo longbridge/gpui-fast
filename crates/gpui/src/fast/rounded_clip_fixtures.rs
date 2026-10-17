@@ -23,6 +23,120 @@ fn rounded_overflow_deep_stack_preserves_clips(cx: &mut gpui::TestAppContext) {
     assert_eq!(pixel(&pixels, side, side / 2, side / 2), [0, 0, 0, 255]);
 }
 
+#[gpui::test]
+fn rounded_overflow_transparent_unequal_borders_clip_padding_edge(cx: &mut gpui::TestAppContext) {
+    use gpui::{ParentElement as _, Styled as _};
+    let (pixels, side) = render_div_fixture(cx, || {
+        let mut parent = gpui::div().size(px(64.)).rounded(px(24.)).overflow_hidden();
+        parent.style().border_widths.left = Some(px(8.).into());
+        parent.style().border_widths.top = Some(px(4.).into());
+        parent.style().border_widths.right = Some(px(2.).into());
+        parent.style().border_widths.bottom = Some(px(6.).into());
+        gpui::div()
+            .size(px(64.))
+            .bg(gpui::white())
+            .child(parent.child(gpui::div().size(px(64.)).bg(gpui::black())))
+    });
+    let sample = |x, y| pixel(&pixels, side, x * side / 64, y * side / 64);
+    assert_eq!(sample(9, 5), [255, 255, 255, 255]);
+    assert_eq!(sample(24, 5), [0, 0, 0, 255]);
+    assert_eq!(sample(9, 24), [0, 0, 0, 255]);
+    assert_eq!(sample(60, 24), [0, 0, 0, 255]);
+    assert_eq!(sample(63, 32), [255, 255, 255, 255]);
+    assert_eq!(sample(32, 60), [255, 255, 255, 255]);
+}
+
+#[gpui::test]
+fn rounded_overflow_empty_padding_edge_hides_descendants(cx: &mut gpui::TestAppContext) {
+    use gpui::{ParentElement as _, Styled as _};
+    let (pixels, _) = render_div_fixture(cx, || {
+        let mut parent = gpui::div().size(px(64.)).rounded(px(24.)).overflow_hidden();
+        parent.style().border_widths.left = Some(px(40.).into());
+        parent.style().border_widths.right = Some(px(40.).into());
+        gpui::div()
+            .size(px(64.))
+            .bg(gpui::white())
+            .child(parent.child(gpui::div().size(px(64.)).bg(gpui::black())))
+    });
+    assert!(
+        pixels
+            .chunks_exact(4)
+            .all(|pixel| pixel == [255, 255, 255, 255])
+    );
+}
+
+/// Change only the ancestor's clip while the child's rendered output remains
+/// retained. The replayed child must not bring its previous parent's clip back.
+pub(super) fn retained_frames(
+    cx: &mut gpui::TestAppContext,
+    mut rasterize: impl FnMut(&gpui::Scene, gpui::Size<gpui::DevicePixels>) -> Vec<u8>,
+) {
+    use gpui::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+    };
+    use std::{cell::Cell, rc::Rc};
+    struct Child(Rc<Cell<usize>>);
+    impl Render for Child {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.0.set(self.0.get() + 1);
+            gpui::div().size(px(64.)).bg(gpui::black())
+        }
+    }
+    struct Parent {
+        radius: f32,
+        child: Entity<Child>,
+    }
+    impl Render for Parent {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
+            gpui::div().size(px(64.)).bg(gpui::white()).child(
+                gpui::div()
+                    .size(px(64.))
+                    .rounded(px(self.radius))
+                    .overflow_hidden()
+                    .child(self.child.clone()),
+            )
+        }
+    }
+    let renders = Rc::new(Cell::new(0));
+    let window = cx.update(|cx| {
+        let child = cx.new(|_| Child(renders.clone()));
+        cx.open_window(Default::default(), |_, cx| {
+            cx.new(|_| Parent { radius: 24., child })
+        })
+        .unwrap()
+    });
+    for radius in [24., 0., 24.] {
+        window
+            .update(cx, |parent, _, cx| {
+                parent.radius = radius;
+                cx.notify();
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            let side = (64. * window.scale_factor()) as usize;
+            let extent = gpui::size(
+                gpui::DevicePixels(side as i32),
+                gpui::DevicePixels(side as i32),
+            );
+            let pixels = rasterize(window.painted_scene(), extent);
+            let corner = if radius == 0. {
+                [0, 0, 0, 255]
+            } else {
+                [255, 255, 255, 255]
+            };
+            assert_eq!(pixel(&pixels, side, 1, 1), corner);
+            assert_eq!(pixel(&pixels, side, side / 2, side / 2), [0, 0, 0, 255]);
+        })
+        .unwrap();
+    }
+    assert_eq!(
+        renders.get(),
+        1,
+        "child must remain retained while ancestor clip changes"
+    );
+}
+
 pub(super) fn square_fixture() -> gpui::Div {
     use gpui::{ParentElement as _, Styled as _};
     gpui::div().size(px(64.)).bg(gpui::white()).child(

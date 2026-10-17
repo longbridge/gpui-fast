@@ -36,6 +36,16 @@ fn texture_renderer() -> crate::wgpu_renderer::WgpuHeadlessRenderer {
     renderer
 }
 
+#[gpui::test]
+fn rounded_overflow_retained_child_follows_ancestor_clip(cx: &mut gpui::TestAppContext) {
+    let mut renderer = texture_renderer();
+    fixtures::retained_frames(cx, |scene, size| {
+        gpui::PlatformHeadlessRenderer::render_scene_to_image(&mut renderer, scene, size)
+            .expect("retained texture-transport frame rendered")
+            .into_raw()
+    });
+}
+
 fn render_div_fixture(cx: &mut gpui::TestAppContext, build: fn() -> gpui::Div) -> (Vec<u8>, usize) {
     let mut renderer = texture_renderer();
     fixtures::render_with(cx, build, |scene, size| {

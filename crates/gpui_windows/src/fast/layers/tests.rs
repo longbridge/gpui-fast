@@ -54,6 +54,15 @@ const TILE: u32 = 512;
 mod rounded_clip_tests;
 
 #[cfg(feature = "test-support")]
+#[gpui::test]
+fn rounded_overflow_retained_child_follows_ancestor_clip(cx: &mut gpui::TestAppContext) {
+    let mut harness = Harness::new().expect("retained clipping regression requires a GPU");
+    rounded_clip_tests::retained_frames(cx, |scene, size| {
+        harness.render(scene, size, rgba(0xffffffff))
+    });
+}
+
+#[cfg(feature = "test-support")]
 fn render_div_fixture(cx: &mut gpui::TestAppContext, build: fn() -> gpui::Div) -> (Vec<u8>, usize) {
     let mut harness =
         Harness::new().expect("rounded clipping regression requires Direct3D or WARP");
