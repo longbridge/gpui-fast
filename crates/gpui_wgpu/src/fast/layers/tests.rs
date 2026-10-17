@@ -42,6 +42,53 @@ fn harness_renders_a_quad_at_the_right_pixels() {
 
 const TILE: u32 = 512;
 
+#[cfg(feature = "test-support")]
+#[path = "../../../../gpui/src/fast/rounded_clip_fixtures.rs"]
+mod rounded_clip_tests;
+
+#[cfg(all(feature = "test-support", not(target_family = "wasm")))]
+#[path = "rounded_clip_texture_tests.rs"]
+mod rounded_clip_texture_tests;
+
+#[cfg(feature = "test-support")]
+fn render_div_fixture(cx: &mut gpui::TestAppContext, build: fn() -> gpui::Div) -> (Vec<u8>, usize) {
+    let mut harness = Harness::new().expect("rounded clipping regression requires a wgpu adapter");
+    rounded_clip_tests::render_with(cx, build, |scene, size| {
+        harness.render(scene, size, rgba(0xffffffff))
+    })
+}
+
+#[cfg(feature = "test-support")]
+#[gpui::test]
+fn rounded_overflow_many_siblings_reuse_one_mask(cx: &mut gpui::TestAppContext) {
+    let mut harness = Harness::new().expect("rounded clipping regression requires a wgpu adapter");
+    let (pixels, side) =
+        rounded_clip_tests::render_with(cx, rounded_clip_tests::sibling_fixture, |scene, size| {
+            let pixels = harness.render(scene, size, rgba(0xffffffff));
+            assert_eq!(
+                harness.state.rounded_masks.len(),
+                1,
+                "siblings retained independent full-frame textures"
+            );
+            pixels
+        });
+    assert_eq!(pixel(&pixels, side, side / 16, side / 16), [0, 0, 0, 255]);
+    assert_eq!(pixel(&pixels, side, 0, 0), [255, 255, 255, 255]);
+}
+
+#[cfg(feature = "test-support")]
+#[gpui::test]
+fn rounded_overflow_inside_scroll_tiles_matches_direct_pixels(cx: &mut gpui::TestAppContext) {
+    let mut harness = Harness::new().expect("rounded clipping regression requires a wgpu adapter");
+    rounded_clip_tests::render_with(cx, rounded_clip_tests::square_fixture, |scene, size| {
+        let direct = harness.render(scene, size, rgba(0xffffffff));
+        let tiled = rounded_clip_tests::tiled_scene(scene, size);
+        let actual = harness.render(&tiled, size, rgba(0xffffffff));
+        assert_same_pixels(&actual, &direct, size.width.0 as usize);
+        actual
+    });
+}
+
 #[test]
 fn a_rasterized_tile_equals_the_same_content_drawn_directly() {
     let Some(mut harness) = Harness::new() else {
@@ -743,7 +790,7 @@ impl Harness {
     /// `None` when there is none (the tests then skip).
     pub(super) fn new() -> Option<Harness> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL | wgpu::Backends::METAL,
             flags: wgpu::InstanceFlags::default(),
             backend_options: wgpu::BackendOptions::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
@@ -997,7 +1044,7 @@ impl FrameHost for Harness {
             path_globals_bind_group: &self.path_globals_bind_group,
             path_intermediate_view: path_targets.map(|targets| &targets.intermediate_view),
             path_msaa_view: path_targets.and_then(|targets| targets.msaa_view.as_ref()),
-            instance_buffer: &self.instance_buffer,
+            instance_data: crate::fast::frame::InstanceSource::Storage(&self.instance_buffer),
             globals_buffer: &self.globals_buffer,
             gamma_offset: self.gamma_offset,
             gamma_size: size_of::<GammaParams>() as u64,

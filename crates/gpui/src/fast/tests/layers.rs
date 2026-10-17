@@ -225,6 +225,9 @@ fn content_in_parts_draws_each_tile_as_one_scene_does() {
             PaintOperation::Primitive(primitive) => whole.insert_primitive(primitive.clone()),
             PaintOperation::StartLayer(bounds) => whole.push_layer(*bounds),
             PaintOperation::EndLayer => whole.pop_layer(),
+            PaintOperation::FastRoundedClip(clip) => {
+                crate::fast::rounded_clip::record(&mut whole, *clip)
+            }
         }
     }
     whole.finish();
@@ -239,6 +242,7 @@ fn content_in_parts_draws_each_tile_as_one_scene_does() {
                 }
                 PaintOperation::StartLayer(bounds) => PaintOperation::StartLayer(*bounds),
                 PaintOperation::EndLayer => PaintOperation::EndLayer,
+                PaintOperation::FastRoundedClip(clip) => PaintOperation::FastRoundedClip(*clip),
             })
             .collect();
         LayerPart {

@@ -11,5 +11,6 @@
 pub(crate) mod composition;
 pub(crate) mod layers;
 pub(crate) mod paths;
+pub(crate) mod rounded_clip;
 #[cfg(feature = "font-kit")]
 pub(crate) mod text_system;

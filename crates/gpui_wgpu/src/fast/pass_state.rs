@@ -14,7 +14,7 @@
 #[derive(Default)]
 pub(crate) struct PassState {
     pipeline: Option<wgpu::RenderPipeline>,
-    bind_groups: [Option<wgpu::BindGroup>; 3],
+    bind_groups: [Option<wgpu::BindGroup>; 4],
 }
 
 impl PassState {

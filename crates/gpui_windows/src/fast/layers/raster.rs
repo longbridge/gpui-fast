@@ -55,6 +55,7 @@ pub(crate) fn rasterize(
     frame: &mut FrameState,
     scene: &Scene,
 ) -> Result<()> {
+    crate::fast::rounded_clip::begin_frame(&mut frame.rounded_masks);
     let planned = frame
         .layers
         .begin_frame(&scene.layers, composite::composited_tiles(scene));

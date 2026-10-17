@@ -17,8 +17,8 @@
 //! most of the renderer's CPU time. A frame with six path batches (six
 //! sparklines) had thirteen render passes.
 //!
-//! Here all of the frame's instance data, path vertices and path sprites
-//! included, goes through one staging buffer; bind groups are kept by
+//! With storage buffers all of the frame's instance data, path vertices and
+//! path sprites included, goes through one staging buffer; bind groups are kept by
 //! [`BindGroupCache`]; pass state is set only when it changes; and path
 //! batches are rasterized in groups: consecutive batches that don't come near
 //! each other share one rasterization pass, the first group's before the main
@@ -63,6 +63,7 @@ pub(crate) struct FrameState {
     pub(crate) bind_groups: BindGroupCache,
     pub(crate) globals: UploadedGlobals,
     pub(crate) layers: TileCache,
+    pub(crate) rounded_masks: crate::fast::rounded_clip::MaskPool,
     vertices: Vec<PathRasterizationVertex>,
     sprites: Vec<PathSprite>,
     path_batches: Vec<PathBatch>,
@@ -81,7 +82,7 @@ pub(crate) struct FrameTarget<'a> {
     pub(crate) path_globals_bind_group: &'a wgpu::BindGroup,
     pub(crate) path_intermediate_view: Option<&'a wgpu::TextureView>,
     pub(crate) path_msaa_view: Option<&'a wgpu::TextureView>,
-    pub(crate) instance_buffer: &'a wgpu::Buffer,
+    pub(crate) instance_data: InstanceSource<'a>,
     /// The buffer behind the globals bind groups, and where in it the gamma
     /// parameters are, for tile globals to share them.
     pub(crate) globals_buffer: &'a wgpu::Buffer,
@@ -93,6 +94,12 @@ pub(crate) struct FrameTarget<'a> {
     pub(crate) premultiplied_alpha: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum InstanceSource<'a> {
+    Storage(&'a wgpu::Buffer),
+    Texture(&'a wgpu::TextureView),
+}
+
 /// The owner of the GPU objects a frame is recorded with.
 pub(crate) trait FrameHost {
     fn frame_state(&mut self) -> &mut FrameState;
@@ -101,9 +108,16 @@ pub(crate) trait FrameHost {
     /// Makes the instance buffer hold at least `size` bytes.
     fn reserve_instance_data(&mut self, size: u64) -> Result<()>;
     fn target(&self) -> Result<FrameTarget<'_>>;
+    fn write_instance_texture(&self, _offset: u64, _data: &[u8]) {
+        unreachable!("the storage-buffer host does not write an instance texture")
+    }
 }
 
 impl FrameHost for WgpuRendererCore {
+    fn write_instance_texture(&self, offset: u64, data: &[u8]) {
+        WgpuRendererCore::write_instance_texture(self.resources(), offset, data);
+    }
+
     fn frame_state(&mut self) -> &mut FrameState {
         &mut self.fast_frame
     }
@@ -121,8 +135,9 @@ impl FrameHost for WgpuRendererCore {
 
     fn target(&self) -> Result<FrameTarget<'_>> {
         let resources = self.resources();
-        let InstanceData::Storage(instance_buffer) = &resources.instance_data else {
-            anyhow::bail!("the storage buffer transport has no instance buffer");
+        let instance_data = match &resources.instance_data {
+            InstanceData::Storage(buffer) => InstanceSource::Storage(buffer),
+            InstanceData::Texture { view, .. } => InstanceSource::Texture(view),
         };
         Ok(FrameTarget {
             device: &resources.device,
@@ -135,7 +150,7 @@ impl FrameHost for WgpuRendererCore {
             path_globals_bind_group: &resources.path_globals_bind_group,
             path_intermediate_view: resources.path_intermediate_view.as_ref(),
             path_msaa_view: resources.path_msaa_view.as_ref(),
-            instance_buffer,
+            instance_data,
             globals_buffer: &resources.globals_buffer,
             gamma_offset: self.gamma_offset,
             gamma_size: size_of::<crate::wgpu_renderer::GammaParams>() as u64,
@@ -159,40 +174,92 @@ pub(crate) struct PathBatch {
 
 /// Where one scene's primitives landed in the instance buffer.
 pub(crate) struct SceneUpload {
-    quads: wgpu::BindGroup,
-    shadows: wgpu::BindGroup,
-    underlines: wgpu::BindGroup,
-    monochrome_sprites: wgpu::BindGroup,
-    subpixel_sprites: wgpu::BindGroup,
-    polychrome_sprites: wgpu::BindGroup,
+    quads: InstanceBinding,
+    shadows: InstanceBinding,
+    underlines: InstanceBinding,
+    monochrome_sprites: InstanceBinding,
+    subpixel_sprites: InstanceBinding,
+    polychrome_sprites: InstanceBinding,
+}
+
+struct InstanceBinding {
+    group: wgpu::BindGroup,
+    first: u32,
 }
 
 /// Where the frame's path vertices and sprites, those of every scene it
 /// draws, landed in the instance buffer.
 pub(crate) struct PathUpload {
-    vertices: wgpu::BindGroup,
-    sprites: wgpu::BindGroup,
+    vertices: InstanceBinding,
+    sprites: InstanceBinding,
 }
 
 /// A scene the frame draws, with its paths planned.
 struct PlannedScene<'a> {
     scene: &'a Scene,
     path_batches: Vec<PathBatch>,
+    groups: Vec<GroupPlan>,
+}
+
+struct GroupPlan {
+    texture: u32,
+    content: usize,
+    mask: usize,
+}
+
+pub(crate) struct DrawGraph<'a> {
+    scenes: &'a [PlannedScene<'a>],
+    uploads: &'a [SceneUpload],
+}
+
+fn plan_scene<'a>(
+    scene: &'a Scene,
+    scenes: &mut Vec<PlannedScene<'a>>,
+    vertices: &mut Vec<PathRasterizationVertex>,
+    sprites: &mut Vec<PathSprite>,
+    mut path_batches: Vec<PathBatch>,
+) -> usize {
+    let mut groups = Vec::new();
+    for sprite in &scene.polychrome_sprites {
+        let Some(frame) = crate::fast::rounded_clip::group(scene, sprite.tile.texture_id) else {
+            continue;
+        };
+        let child = frame.content.scene().expect("rounded clip content");
+        let mask = child
+            .layers
+            .frames
+            .iter()
+            .find(|frame| frame.key.0 == u32::MAX)
+            .and_then(|frame| frame.content.scene())
+            .expect("rounded clip mask");
+        let mask = plan_scene(mask, scenes, vertices, sprites, Vec::new());
+        let content = plan_scene(child, scenes, vertices, sprites, Vec::new());
+        groups.push(GroupPlan {
+            texture: sprite.tile.texture_id.index,
+            content,
+            mask,
+        });
+    }
+    plan_paths(scene, vertices, sprites, &mut path_batches);
+    let index = scenes.len();
+    scenes.push(PlannedScene {
+        scene,
+        path_batches,
+        groups,
+    });
+    index
 }
 
 /// Forwarded to by `WgpuRendererCore::record_frame`, which draws both the
 /// windows' frames and the headless renderer's. Records and submits the
-/// frame, or returns `None` for upstream to record it: the WebGL instance
-/// texture keeps upstream's way.
+/// frame. The storage-buffer and WebGL instance-texture transports share the
+/// scene graph and path planning, including rounded clip scopes.
 pub(crate) fn record_frame(
     renderer: &mut WgpuRendererCore,
     scene: &Scene,
     frame_view: &wgpu::TextureView,
     clear_color: wgpu::Color,
 ) -> Result<Option<wgpu::SubmissionIndex>> {
-    if renderer.uses_webgl_instance_data {
-        return Ok(None);
-    }
     record_into(renderer, scene, frame_view, clear_color).map(Some)
 }
 
@@ -222,6 +289,7 @@ fn record_with(
     clear: wgpu::Color,
 ) -> Result<wgpu::SubmissionIndex> {
     state.bind_groups.begin_frame();
+    state.rounded_masks.begin_frame();
 
     // The layer tiles to rasterize before the frame draws them.
     let planned = state
@@ -232,25 +300,24 @@ fn record_with(
     let mut vertices = std::mem::take(&mut state.vertices);
     let mut sprites = std::mem::take(&mut state.sprites);
     let mut scenes = Vec::with_capacity(rasters.len() + 1);
+    let mut raster_indices = Vec::with_capacity(rasters.len());
     for raster in &rasters {
-        let mut path_batches = Vec::new();
-        plan_paths(
+        raster_indices.push(plan_scene(
             &raster.scene,
+            &mut scenes,
             &mut vertices,
             &mut sprites,
-            &mut path_batches,
-        );
-        scenes.push(PlannedScene {
-            scene: &raster.scene,
-            path_batches,
-        });
+            Vec::new(),
+        ));
     }
-    let mut path_batches = std::mem::take(&mut state.path_batches);
-    plan_paths(scene, &mut vertices, &mut sprites, &mut path_batches);
-    scenes.push(PlannedScene {
+    let path_batches = std::mem::take(&mut state.path_batches);
+    plan_scene(
         scene,
+        &mut scenes,
+        &mut vertices,
+        &mut sprites,
         path_batches,
-    });
+    );
 
     let result = upload(host, &state.bind_groups, &scenes, &vertices, &sprites)
         .with_context(|| {
@@ -270,7 +337,7 @@ fn record_with(
             let target = host.target()?;
             state.layers.prepare(&target, &scene.layers, &planned);
             Ok(record(
-                &target, state, scene, frame_view, clear, &rasters, &scenes, &uploads, &paths,
+                &target, state, scene, frame_view, clear, &rasters, &raster_indices, &scenes, &uploads, &paths,
             ))
         });
     if result.is_err() {
@@ -363,9 +430,9 @@ fn close_group(group: &mut [PathBatch]) {
     }
 }
 
-/// Writes the frame's instance data, that of every scene it draws, through
-/// one staging buffer, laid out as upstream's `write_instance_binding` lays
-/// out each array.
+/// Writes every scene's instance data. Storage arrays share one staging
+/// buffer; WebGL arrays start on both a texel boundary and a whole record,
+/// so its shaders can index them absolutely through the instance texture.
 fn upload(
     host: &mut impl FrameHost,
     bind_groups: &BindGroupCache,
@@ -393,21 +460,44 @@ fn upload(
     }
 
     let alignment = host.instance_data_alignment();
+    let texture_transport = matches!(host.target()?.instance_data, InstanceSource::Texture(_));
+    let mut strides = [
+        size_of::<gpui::Quad>(),
+        size_of::<gpui::Shadow>(),
+        size_of::<gpui::Underline>(),
+        size_of::<gpui::MonochromeSprite>(),
+        size_of::<gpui::SubpixelSprite>(),
+        size_of::<gpui::PolychromeSprite>(),
+    ]
+    .repeat(scenes.len());
+    strides.extend([
+        size_of::<PathRasterizationVertex>(),
+        size_of::<PathSprite>(),
+    ]);
     let mut offsets = Vec::with_capacity(arrays.len());
     let mut end = 0u64;
-    for data in &arrays {
+    for (data, &stride) in arrays.iter().zip(&strides) {
+        let alignment = if texture_transport {
+            common_multiple(alignment, stride as u64)
+        } else {
+            alignment
+        };
         let offset = end.next_multiple_of(alignment);
         offsets.push(offset);
         // wgpu rejects zero-sized bindings, so empty arrays still reserve the
         // 16-byte minimum.
         end = offset + binding_size(data);
+        if texture_transport {
+            end = end.next_multiple_of(16);
+        }
     }
     let end = end.next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
     host.reserve_instance_data(end)?;
 
     let target = host.target()?;
-    let buffer = target.instance_buffer;
-    if arrays.iter().any(|data| !data.is_empty()) {
+    if let InstanceSource::Storage(buffer) = target.instance_data
+        && arrays.iter().any(|data| !data.is_empty())
+    {
         let size = wgpu::BufferSize::new(end).context("empty instance upload")?;
         let mut view = target
             .queue
@@ -422,15 +512,45 @@ fn upload(
         }
     }
 
+    let texture_binding = if let InstanceSource::Texture(view) = target.instance_data {
+        for (&offset, data) in offsets.iter().zip(&arrays) {
+            if !data.is_empty() {
+                host.write_instance_texture(offset, data);
+            }
+        }
+        Some(target.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("frame_instance_texture"),
+            layout: &target.bind_group_layouts.instances,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            }],
+        }))
+    } else {
+        None
+    };
+
     let bind = |index: usize, label: &str| {
-        bind_groups.storage(
-            target.device,
-            &target.bind_group_layouts.instances,
-            label,
-            buffer,
-            offsets[index],
-            binding_size(arrays[index]),
-        )
+        if let Some(group) = &texture_binding {
+            return InstanceBinding {
+                group: group.clone(),
+                first: (offsets[index] / strides[index] as u64) as u32,
+            };
+        }
+        let InstanceSource::Storage(buffer) = target.instance_data else {
+            unreachable!()
+        };
+        InstanceBinding {
+            group: bind_groups.storage(
+                target.device,
+                &target.bind_group_layouts.instances,
+                label,
+                buffer,
+                offsets[index],
+                binding_size(arrays[index]),
+            ),
+            first: 0,
+        }
     };
     let uploads = (0..scenes.len())
         .map(|scene| {
@@ -457,6 +577,14 @@ fn binding_size(data: &[u8]) -> u64 {
     (data.len() as u64).max(16)
 }
 
+fn common_multiple(left: u64, right: u64) -> u64 {
+    let (mut a, mut b) = (left, right);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    left / a * right
+}
+
 unsafe fn bytes_of<T>(instances: &[T]) -> &[u8] {
     unsafe {
         std::slice::from_raw_parts(
@@ -474,10 +602,12 @@ fn record(
     frame_view: &wgpu::TextureView,
     clear: wgpu::Color,
     rasters: &[raster::TileRaster],
+    raster_indices: &[usize],
     scenes: &[PlannedScene],
     uploads: &[SceneUpload],
     paths: &PathUpload,
 ) -> wgpu::SubmissionIndex {
+    let graph = DrawGraph { scenes, uploads };
     let mut encoder = target
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -485,15 +615,17 @@ fn record(
         });
     // Scenes are planned and uploaded tiles first, the frame's own last.
     for (index, tile) in rasters.iter().enumerate() {
+        let scene_index = raster_indices[index];
         raster::rasterize(
             target,
             state,
             &mut encoder,
             &scene.layers,
             tile,
-            &uploads[index],
+            &uploads[scene_index],
             paths,
-            &scenes[index].path_batches,
+            &scenes[scene_index].path_batches,
+            &graph,
         );
     }
     let main = scenes.len() - 1;
@@ -507,7 +639,7 @@ fn record(
             paths,
             path_batches: &scenes[main].path_batches,
             view: frame_view,
-            clear,
+            clear: Some(clear),
             label: "main_pass",
             globals: target.globals_bind_group,
             path_targets: PathTargets {
@@ -515,6 +647,9 @@ fn record(
                 intermediate: target.path_intermediate_view,
                 msaa: target.path_msaa_view,
             },
+            graph: &graph,
+            mask: None,
+            clip_depth: 0,
         },
     );
     target.queue.submit(std::iter::once(encoder.finish()))
@@ -527,11 +662,14 @@ pub(crate) struct SceneDraw<'a> {
     pub(crate) paths: &'a PathUpload,
     pub(crate) path_batches: &'a [PathBatch],
     pub(crate) view: &'a wgpu::TextureView,
-    pub(crate) clear: wgpu::Color,
+    pub(crate) clear: Option<wgpu::Color>,
     pub(crate) label: &'a str,
     /// The globals the scene's primitives are drawn with.
     pub(crate) globals: &'a wgpu::BindGroup,
     pub(crate) path_targets: PathTargets<'a>,
+    pub(crate) graph: &'a DrawGraph<'a>,
+    pub(crate) mask: Option<&'a wgpu::BindGroup>,
+    pub(crate) clip_depth: usize,
 }
 
 /// What a scene's paths are rasterized with: the globals and the
@@ -578,11 +716,19 @@ pub(crate) fn draw_scene(
         )
     });
 
-    let mut pass = begin_main_pass(encoder, draw.view, draw.label, Some(draw.clear));
+    let mut pass = begin_main_pass(encoder, draw.view, draw.label, draw.clear);
     let mut bound = PassState::default();
     let mut path_batches = draw.path_batches.iter().enumerate();
+    let mut current_group = draw
+        .path_batches
+        .first()
+        .and_then(|batch| batch.group.clone());
+    let clip_binding = draw
+        .mask
+        .unwrap_or(&target.bind_group_layouts.fast_rounded_clip.unmasked);
 
     for batch in draw.scene.batches() {
+        bound.set_bind_group(&mut pass, 3, clip_binding);
         match batch {
             PrimitiveBatch::Quads(range) => draw_batch(
                 &mut pass,
@@ -609,17 +755,21 @@ pub(crate) fn draw_scene(
                 let Some((index, batch)) = path_batches.next() else {
                     continue;
                 };
-                if index > 0 && batch.group.is_some() {
+                if let Some(group) = &batch.group {
+                    current_group = Some(group.clone());
+                }
+                if !rasterized || index > 0 && batch.group.is_some() {
                     drop(pass);
                     rasterized = rasterize_group(
                         target,
                         encoder,
                         draw.path_targets,
                         draw.paths,
-                        batch.group.clone(),
+                        current_group.clone(),
                     );
                     pass = begin_main_pass(encoder, draw.view, "main_pass_continued", None);
                     bound.forget();
+                    bound.set_bind_group(&mut pass, 3, clip_binding);
                 }
                 if !rasterized || batch.vertices.is_empty() {
                     continue;
@@ -629,9 +779,13 @@ pub(crate) fn draw_scene(
                 };
                 bound.set_pipeline(&mut pass, &pipelines.paths);
                 bound.set_bind_group(&mut pass, 0, draw.globals);
-                bound.set_bind_group(&mut pass, 1, &draw.paths.sprites);
+                bound.set_bind_group(&mut pass, 1, &draw.paths.sprites.group);
                 bound.set_bind_group(&mut pass, 2, intermediate);
-                pass.draw(0..4, batch.sprites.clone());
+                pass.draw(
+                    0..4,
+                    (draw.paths.sprites.first + batch.sprites.start)
+                        ..(draw.paths.sprites.first + batch.sprites.end),
+                );
             }
             PrimitiveBatch::Underlines(range) => draw_batch(
                 &mut pass,
@@ -674,6 +828,78 @@ pub(crate) fn draw_scene(
                     Some(&texture),
                     range,
                 );
+            }
+            PrimitiveBatch::PolychromeSprites { texture_id, range }
+                if crate::fast::rounded_clip::group(draw.scene, texture_id).is_some() =>
+            {
+                let plan = draw
+                    .graph
+                    .scenes
+                    .iter()
+                    .find(|plan| std::ptr::eq(plan.scene, draw.scene))
+                    .expect("planned clip scene");
+                let group = plan
+                    .groups
+                    .iter()
+                    .find(|group| group.texture == texture_id.index)
+                    .expect("planned clip group");
+                drop(pass);
+                for _ in range {
+                    let size = draw.view.texture().size();
+                    let (mask_view, mask) = state.rounded_masks.get(
+                        target.device,
+                        &target.bind_group_layouts.fast_rounded_clip,
+                        target.format,
+                        size,
+                        draw.clip_depth,
+                    );
+                    let mask_plan = &draw.graph.scenes[group.mask];
+                    draw_scene(
+                        target,
+                        state,
+                        encoder,
+                        &SceneDraw {
+                            scene: mask_plan.scene,
+                            upload: &draw.graph.uploads[group.mask],
+                            paths: draw.paths,
+                            path_batches: &mask_plan.path_batches,
+                            view: &mask_view,
+                            clear: Some(wgpu::Color::TRANSPARENT),
+                            label: "rounded_clip_mask",
+                            globals: draw.globals,
+                            path_targets: draw.path_targets,
+                            graph: draw.graph,
+                            mask: draw.mask,
+                            clip_depth: draw.clip_depth + 1,
+                        },
+                    );
+                    let content = &draw.graph.scenes[group.content];
+                    draw_scene(
+                        target,
+                        state,
+                        encoder,
+                        &SceneDraw {
+                            scene: content.scene,
+                            upload: &draw.graph.uploads[group.content],
+                            paths: draw.paths,
+                            path_batches: &content.path_batches,
+                            view: draw.view,
+                            clear: None,
+                            label: "rounded_clip_content",
+                            globals: draw.globals,
+                            path_targets: draw.path_targets,
+                            graph: draw.graph,
+                            mask: Some(&mask),
+                            clip_depth: draw.clip_depth + 1,
+                        },
+                    );
+                }
+                // The mask and child may have overwritten the shared path
+                // intermediate. Re-rasterize this scene's group on its next
+                // path batch, including when that batch shares the first group.
+                rasterized = false;
+                pass = begin_main_pass(encoder, draw.view, "rounded_clip_continued", None);
+                bound.forget();
             }
             PrimitiveBatch::PolychromeSprites { texture_id, range }
                 if composite::is_layer_texture(texture_id) =>
@@ -767,7 +993,7 @@ fn draw_batch(
     state: &mut PassState,
     globals: &wgpu::BindGroup,
     pipeline: &wgpu::RenderPipeline,
-    instances: &wgpu::BindGroup,
+    instances: &InstanceBinding,
     texture: Option<&wgpu::BindGroup>,
     range: Range<usize>,
 ) {
@@ -776,11 +1002,14 @@ fn draw_batch(
     }
     state.set_pipeline(pass, pipeline);
     state.set_bind_group(pass, 0, globals);
-    state.set_bind_group(pass, 1, instances);
+    state.set_bind_group(pass, 1, &instances.group);
     if let Some(texture) = texture {
         state.set_bind_group(pass, 2, texture);
     }
-    pass.draw(0..4, range.start as u32..range.end as u32);
+    pass.draw(
+        0..4,
+        (instances.first + range.start as u32)..(instances.first + range.end as u32),
+    );
 }
 
 /// Rasterizes a group's range of the frame's path vertices into the cleared
@@ -820,7 +1049,15 @@ fn rasterize_group(
     });
     pass.set_pipeline(&target.pipelines.path_rasterization);
     pass.set_bind_group(0, targets.globals, &[]);
-    pass.set_bind_group(1, &paths.vertices, &[]);
-    pass.draw(vertices, 0..1);
+    pass.set_bind_group(1, &paths.vertices.group, &[]);
+    pass.set_bind_group(
+        3,
+        &target.bind_group_layouts.fast_rounded_clip.unmasked,
+        &[],
+    );
+    pass.draw(
+        (paths.vertices.first + vertices.start)..(paths.vertices.first + vertices.end),
+        0..1,
+    );
     true
 }

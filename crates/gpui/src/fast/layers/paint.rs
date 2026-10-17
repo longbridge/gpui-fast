@@ -664,6 +664,9 @@ pub(crate) fn draw_into_frame<'a>(
                 scene.push_layer(bounds.intersect(&viewport));
             }
             PaintOperation::EndLayer => scene.pop_layer(),
+            PaintOperation::FastRoundedClip(clip) => {
+                crate::fast::rounded_clip::record(scene, clip.translated(delta))
+            }
         }
     }
 }
@@ -748,6 +751,10 @@ fn repaint(
         size: region.size,
     };
     let (content, overlay) = crate::fast::layers::overlay::lift(content);
+    let has_paths = content
+        .paint_operations
+        .iter()
+        .any(|operation| matches!(operation, PaintOperation::Primitive(Primitive::Path(_))));
     let mut visible = painting.viewport.scale(scale_factor);
     visible.origin += to_content;
     let mut rendered_work = 0;
@@ -787,7 +794,7 @@ fn repaint(
         hovers,
         dependencies: painting.dependencies.union(&paint_dependencies),
         views,
-        has_paths: false,
+        has_paths,
         overlay,
         view_layouts: Rc::new(mem::take(&mut painting.view_layouts)),
         a11y: painting.a11y.take(),
@@ -914,6 +921,9 @@ fn translated_scene(scene: &Scene, delta: Point<ScaledPixels>) -> Scene {
                 size: bounds.size,
             }),
             PaintOperation::EndLayer => translated.pop_layer(),
+            PaintOperation::FastRoundedClip(clip) => {
+                crate::fast::rounded_clip::record(&mut translated, clip.translated(delta))
+            }
         }
     }
     translated.finish();

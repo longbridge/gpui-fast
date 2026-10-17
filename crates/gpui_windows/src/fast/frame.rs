@@ -41,6 +41,7 @@ pub(crate) struct FrameState {
     path_sprites: Vec<PathSprite>,
     /// The scroll layer tiles the frames composite.
     pub(crate) layers: TileCache,
+    pub(crate) rounded_masks: crate::fast::rounded_clip::Masks,
 }
 
 /// The Direct3D objects a scene is drawn with.
@@ -57,6 +58,7 @@ pub(crate) struct Target<'a> {
 /// The render target a frame's paths are drawn into and upstream's path
 /// intermediate textures they are rasterized through: the window's, from its
 /// [`DirectXResources`], or ones the layer pixel tests make for their target.
+#[derive(Clone, Copy)]
 pub(crate) struct PathTargets<'a> {
     pub(crate) render_target_view: &'a Option<ID3D11RenderTargetView>,
     pub(crate) intermediate_texture: &'a ID3D11Texture2D,
@@ -151,28 +153,61 @@ pub(crate) fn draw_scene(
     frame: &mut FrameState,
     scene: &Scene,
 ) -> Result<()> {
+    let result = draw_scene_masked(target, pipelines, frame, scene, None, 0);
+    crate::fast::rounded_clip::bind(target, &mut frame.rounded_masks, None)?;
+    result
+}
+
+pub(crate) fn draw_scene_masked(
+    target: &Target<'_>,
+    pipelines: &mut DirectXRenderPipelines,
+    frame: &mut FrameState,
+    scene: &Scene,
+    mask: Option<&ID3D11ShaderResourceView>,
+    depth: usize,
+) -> Result<()> {
     let batch_params = target
         .globals
         .batch_params_buffer
         .as_ref()
         .context("batch params buffer missing")?;
-    let FrameState {
-        state,
-        path_vertices,
-        path_sprites,
-        layers,
-        ..
-    } = frame;
     let device_context = target.device_context;
-    state.forget();
+    frame.state.forget();
+    let mut restore_upload = false;
 
-    let mut draw = Draw {
-        device_context,
-        state,
-        batch_params,
-        sampler: &target.globals.sampler,
-    };
     for batch in scene.batches() {
+        if let PrimitiveBatch::PolychromeSprites {
+            texture_id,
+            ref range,
+        } = batch
+            && let Some(group) = crate::fast::rounded_clip::group(scene, texture_id)
+        {
+            for _ in range.clone() {
+                crate::fast::rounded_clip::draw_group(
+                    target, pipelines, frame, group, mask, depth,
+                )?;
+            }
+            restore_upload = true;
+            continue;
+        }
+        if restore_upload {
+            upload(target, pipelines, scene)?;
+            restore_upload = false;
+        }
+        crate::fast::rounded_clip::bind(target, &mut frame.rounded_masks, mask)?;
+        let FrameState {
+            state,
+            path_vertices,
+            path_sprites,
+            layers,
+            ..
+        } = frame;
+        let mut draw = Draw {
+            device_context,
+            state,
+            batch_params,
+            sampler: &target.globals.sampler,
+        };
         match batch {
             PrimitiveBatch::Shadows(range) => {
                 draw.instances(&pipelines.shadow_pipeline, range.start, range.len(), None)

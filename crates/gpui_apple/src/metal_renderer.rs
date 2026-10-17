@@ -141,6 +141,7 @@ pub struct MetalRenderer {
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     headless_render_target: Option<metal::Texture>,
     pub(crate) fast_layers: crate::fast::layers::TileCache,
+    pub(crate) fast_rounded_clip: crate::fast::rounded_clip::MaskPool,
 }
 
 #[repr(C)]
@@ -414,6 +415,7 @@ impl MetalRenderer {
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
             fast_layers: crate::fast::layers::TileCache::default(),
+            fast_rounded_clip: crate::fast::rounded_clip::MaskPool::default(),
         }
     }
 
@@ -447,7 +449,7 @@ impl MetalRenderer {
         crate::fast::layers::TileCache::clear(&mut self.fast_layers);
     }
 
-    fn update_path_intermediate_textures(&mut self, size: Size<DevicePixels>) {
+    pub(crate) fn update_path_intermediate_textures(&mut self, size: Size<DevicePixels>) {
         // We are uncertain when this happens, but sometimes size can be 0 here. Most likely before
         // the layout pass on window creation. Zero-sized texture creation causes SIGABRT.
         // https://github.com/zed-industries/zed/issues/36229
@@ -545,6 +547,7 @@ impl MetalRenderer {
         texture: &metal::TextureRef,
         viewport_size: Size<DevicePixels>,
     ) -> Result<metal::CommandBuffer> {
+        crate::fast::rounded_clip::begin_frame(self);
         crate::fast::layers::raster::rasterize_tiles(self, scene);
         let mut writer = InstanceBufferWriter::new(
             &self.device,
@@ -819,7 +822,7 @@ impl MetalRenderer {
         Ok(command_buffer.to_owned())
     }
 
-    fn draw_paths_to_intermediate(
+    pub(crate) fn draw_paths_to_intermediate(
         &self,
         paths: &[Path<ScaledPixels>],
         writer: &mut InstanceBufferWriter,
@@ -1333,6 +1336,7 @@ pub(crate) fn new_command_encoder_for_texture<'a>(
         znear: 0.0,
         zfar: 1.0,
     });
+    crate::fast::rounded_clip::default_mask(command_encoder);
     command_encoder
 }
 
@@ -1488,7 +1492,7 @@ pub(crate) struct InstanceBindings {
     pub(crate) surfaces: InstanceBinding,
 }
 
-fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<InstanceBindings> {
+pub(crate) fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<InstanceBindings> {
     Ok(InstanceBindings {
         quads: writer.write(&scene.quads)?,
         shadows: writer.write(&scene.shadows)?,

@@ -37,6 +37,7 @@ const TILE_FORMAT: metal::MTLPixelFormat = metal::MTLPixelFormat::BGRA8Unorm;
 /// rasterizes the layer tiles `scene` needs that the cache lacks, and notes
 /// the tiles it composites for `composite::draw_tiles`.
 pub(crate) fn rasterize_tiles(renderer: &mut MetalRenderer, scene: &Scene) {
+    crate::fast::rounded_clip::raster_nested_tiles(renderer, scene);
     let cache = &mut renderer.fast_layers;
     if cache.take_failure() {
         cache.clear();
@@ -52,6 +53,7 @@ pub(crate) fn rasterize_tiles(renderer: &mut MetalRenderer, scene: &Scene) {
         // The tiles this frame was to rasterize were not.
         renderer.fast_layers.clear();
     }
+    renderer.fast_layers.note_composited(scene);
 }
 
 /// The layer tiles `scene` composites, in the order it lists them.
@@ -103,6 +105,21 @@ fn encode(
             continue;
         };
         let tile_scene = layer.tile_scene(tile);
+        if crate::fast::rounded_clip::has_groups(&tile_scene) {
+            crate::fast::rounded_clip::draw_tile(
+                renderer,
+                &tile_scene,
+                &mut writer,
+                &texture,
+                size(
+                    DevicePixels(layer.tile_size as i32),
+                    DevicePixels(layer.tile_size as i32),
+                ),
+                command_buffer,
+                clear_color(layer.background),
+            )?;
+            continue;
+        }
         let bindings = match write_instances(&tile_scene, &mut writer) {
             Ok(bindings) => bindings,
             Err(error) => {

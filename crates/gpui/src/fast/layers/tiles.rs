@@ -66,6 +66,15 @@ pub(crate) fn tile_hashes(
                     });
                 }
             }
+            PaintOperation::FastRoundedClip(clip) => {
+                for (coord, hasher) in &mut hashers {
+                    let delta = point(
+                        ScaledPixels(-(coord.x as f32) * tile_size as f32),
+                        ScaledPixels(-(coord.y as f32) * tile_size as f32),
+                    );
+                    clip.translated(delta).hash(hasher);
+                }
+            }
         }
     }
     hashers
@@ -105,6 +114,7 @@ pub(crate) fn part_tile_hashes(
             }
             PaintOperation::StartLayer(_) => hasher.write_u8(1),
             PaintOperation::EndLayer => hasher.write_u8(2),
+            PaintOperation::FastRoundedClip(clip) => clip.hash(&mut hasher),
         }
     }
     let hash = hasher.finish();

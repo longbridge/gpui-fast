@@ -500,6 +500,7 @@ impl Scene {
             .get(range.clone())
             .context("scene replay range ends past the scene")?;
         let mut active_layers = Vec::new();
+        let mut active_clips = Vec::new();
         for operation in prefix {
             match operation {
                 PaintOperation::StartLayer(bounds) => active_layers.push(*bounds),
@@ -510,12 +511,21 @@ impl Scene {
                     );
                 }
                 PaintOperation::Primitive(_) => {}
+                PaintOperation::FastRoundedClip(clip) => {
+                    crate::fast::rounded_clip::track(*clip, &mut active_clips)?
+                }
             }
         }
 
         crate::fast::layers::paint::replay_layers(self, range, previous_scene);
         for bounds in &active_layers {
             self.push_layer(*bounds);
+        }
+        for shape in &active_clips {
+            crate::fast::rounded_clip::record(
+                self,
+                crate::fast::rounded_clip::ClipOperation::Begin(*shape),
+            );
         }
         for operation in operations {
             match operation {
@@ -531,10 +541,17 @@ impl Scene {
                     );
                     self.pop_layer();
                 }
+                PaintOperation::FastRoundedClip(clip) => {
+                    crate::fast::rounded_clip::track(*clip, &mut active_clips)?;
+                    crate::fast::rounded_clip::record(self, *clip);
+                }
             }
         }
         for _ in active_layers {
             self.pop_layer();
+        }
+        for _ in active_clips {
+            crate::fast::rounded_clip::record(self, crate::fast::rounded_clip::ClipOperation::End);
         }
         Ok(())
     }

@@ -24,6 +24,43 @@ use crate::metal_renderer::{InstanceBufferPool, MetalRenderer};
 
 const TILE: u32 = 512;
 
+#[path = "../../../../gpui/src/fast/rounded_clip_fixtures.rs"]
+mod rounded_clip_tests;
+
+fn render_div_fixture(cx: &mut gpui::TestAppContext, build: fn() -> gpui::Div) -> (Vec<u8>, usize) {
+    let mut harness = Harness::new().expect("rounded clipping regression requires a Metal device");
+    rounded_clip_tests::render_with(cx, build, |scene, size| harness.render(scene, size))
+}
+
+#[gpui::test]
+fn rounded_overflow_many_siblings_reuse_one_mask(cx: &mut gpui::TestAppContext) {
+    let mut harness = Harness::new().expect("rounded clipping regression requires a Metal device");
+    let (pixels, side) =
+        rounded_clip_tests::render_with(cx, rounded_clip_tests::sibling_fixture, |scene, size| {
+            let pixels = harness.render(scene, size);
+            assert_eq!(
+                harness.renderer.fast_rounded_clip.len(),
+                1,
+                "siblings retained independent full-frame textures"
+            );
+            pixels
+        });
+    assert_eq!(pixel(&pixels, side, side / 16, side / 16), [0, 0, 0, 255]);
+    assert_eq!(pixel(&pixels, side, 0, 0), [255, 255, 255, 255]);
+}
+
+#[gpui::test]
+fn rounded_overflow_inside_scroll_tiles_matches_direct_pixels(cx: &mut gpui::TestAppContext) {
+    let mut harness = Harness::new().expect("rounded clipping regression requires a Metal device");
+    rounded_clip_tests::render_with(cx, rounded_clip_tests::square_fixture, |scene, size| {
+        let direct = harness.render(scene, size);
+        let tiled = rounded_clip_tests::tiled_scene(scene, size);
+        let actual = harness.render(&tiled, size);
+        assert_same_pixels(&actual, &direct, size.width.0 as usize);
+        actual
+    });
+}
+
 #[test]
 fn harness_renders_a_quad_at_the_right_pixels() {
     let Some(mut harness) = Harness::new() else {

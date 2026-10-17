@@ -125,6 +125,9 @@ impl LayerFrame {
                     scene.push_layer(translate_bounds(*layer_bounds, delta))
                 }
                 PaintOperation::EndLayer => scene.pop_layer(),
+                PaintOperation::FastRoundedClip(clip) => {
+                    crate::fast::rounded_clip::record(&mut scene, clip.translated(delta))
+                }
             }
         }
         scene.finish();

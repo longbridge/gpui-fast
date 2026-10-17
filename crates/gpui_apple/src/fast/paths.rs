@@ -61,6 +61,17 @@ pub(crate) fn draw_primitives_to_texture(
     texture: &metal::TextureRef,
     viewport_size: Size<DevicePixels>,
 ) -> Result<Option<metal::CommandBuffer>> {
+    if crate::fast::rounded_clip::has_groups(scene) {
+        return crate::fast::rounded_clip::draw(
+            renderer,
+            scene,
+            instance_bindings,
+            writer,
+            texture,
+            viewport_size,
+        )
+        .map(Some);
+    }
     if scene.paths.is_empty() {
         return Ok(None);
     }

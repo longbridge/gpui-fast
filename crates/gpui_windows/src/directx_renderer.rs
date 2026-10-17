@@ -1844,6 +1844,7 @@ pub(crate) mod shader_resources {
             let shader_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join(&format!("src/{}", shader_name))
                 .canonicalize()?;
+            let shader_path = crate::fast::rounded_clip::shader_path(shader_path, env!("OUT_DIR"));
 
             let entry_point = PCSTR::from_raw(entry.as_ptr());
             let target_cstr = PCSTR::from_raw(target.as_ptr());

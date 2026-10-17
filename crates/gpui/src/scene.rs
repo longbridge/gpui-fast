@@ -51,12 +51,14 @@ pub struct Scene {
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
     pub(crate) sort_scratch: crate::fast::scene::SortScratch,
+    pub(crate) fast_rounded_clip: crate::fast::rounded_clip::SceneClips,
     pub layers: crate::fast::layers::scene::SceneLayers,
 }
 
 #[expect(missing_docs)]
 impl Scene {
     pub fn clear(&mut self) {
+        crate::fast::rounded_clip::clear(self);
         self.paint_operations.clear();
         self.primitive_bounds.clear();
         self.layer_stack.clear();
@@ -148,6 +150,9 @@ impl Scene {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
+                PaintOperation::FastRoundedClip(fast_clip) => {
+                    crate::fast::rounded_clip::record(self, *fast_clip)
+                }
             }
         }
     }
@@ -209,6 +214,7 @@ pub(crate) enum PaintOperation {
     Primitive(Primitive),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
+    FastRoundedClip(crate::fast::rounded_clip::ClipOperation),
 }
 
 #[derive(Clone)]

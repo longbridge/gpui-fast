@@ -1,5 +1,8 @@
 #![allow(clippy::disallowed_methods, reason = "build scripts are exempt")]
 
+#[path = "src/fast/rounded_clip_shader.rs"]
+mod fast_rounded_clip_shader;
+
 fn main() {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     apple_build::run();
@@ -109,7 +112,7 @@ mod apple_build {
     fn emit_stitched_shaders(header_path: &Path) {
         fn stitch_header(header: &Path, shader_path: &Path) -> std::io::Result<PathBuf> {
             let header_contents = std::fs::read_to_string(header)?;
-            let shader_contents = std::fs::read_to_string(shader_path)?;
+            let shader_contents = crate::fast_rounded_clip_shader::source(&std::fs::read_to_string(shader_path)?);
             let stitched_contents = format!("{header_contents}\n{shader_contents}");
             let out_path =
                 PathBuf::from(env::var("OUT_DIR").unwrap()).join("stitched_shaders.metal");
@@ -156,7 +159,7 @@ mod apple_build {
         // location is the build's canonical output directory, never the
         // checkout (corgi rejects artifacts that embed the build path).
         let staged_shader_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("shaders.metal");
-        std::fs::copy(shader_path, &staged_shader_path).unwrap();
+        crate::fast_rounded_clip_shader::stage(shader_path, &staged_shader_path);
 
         let output = Command::new("xcrun")
             .args([

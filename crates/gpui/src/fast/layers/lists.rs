@@ -1626,6 +1626,9 @@ fn drawn_alike(a: &Row, b: &Row) -> bool {
                     size: bounds.size,
                 }),
                 PaintOperation::EndLayer => PaintOperation::EndLayer,
+                PaintOperation::FastRoundedClip(clip) => {
+                    PaintOperation::FastRoundedClip(clip.translated(to_row))
+                }
             })
             .collect();
         let (tiles, _) = part_tile_hashes(&operations, paint::TILE_SIZE);
@@ -2830,6 +2833,7 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
                 PaintOperation::Primitive(primitive) => move_primitive(primitive, to_content),
                 PaintOperation::StartLayer(bounds) => bounds.origin = bounds.origin + to_content,
                 PaintOperation::EndLayer => {}
+                PaintOperation::FastRoundedClip(clip) => *clip = clip.translated(to_content),
             }
         }
         let (row_operations, overlay, whole) =
