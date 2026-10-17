@@ -61,6 +61,52 @@ fn rounded_overflow_inside_scroll_tiles_matches_direct_pixels(cx: &mut gpui::Tes
     });
 }
 
+/// Manual timing includes synchronous GPU completion and readback. Compare the
+/// same 64 descendants with and without curved overflow, at two target sizes,
+/// to expose full-viewport mask work even when the clipped elements are small.
+#[gpui::test]
+#[ignore = "manual GPU performance measurement"]
+fn rounded_overflow_mask_cost(cx: &mut gpui::TestAppContext) {
+    fn rectangular() -> gpui::Div {
+        use gpui::{ParentElement as _, Styled as _};
+        gpui::div()
+            .flex()
+            .flex_wrap()
+            .size(px(64.))
+            .bg(gpui::white())
+            .children((0..64).map(|_| {
+                gpui::div()
+                    .size(px(8.))
+                    .overflow_hidden()
+                    .child(gpui::div().size(px(8.)).bg(gpui::black()))
+            }))
+    }
+    for side in [128, 1024] {
+        for (name, build) in [
+            ("rectangle", rectangular as fn() -> gpui::Div),
+            ("rounded", rounded_clip_tests::sibling_fixture),
+        ] {
+            let mut harness = Harness::new().expect("timing requires Metal");
+            rounded_clip_tests::render_with(cx, build, |scene, _| {
+                let extent = device_size(side, side);
+                for _ in 0..3 {
+                    harness.render(scene, extent);
+                }
+                let mut samples = Vec::new();
+                let mut pixels = Vec::new();
+                for _ in 0..15 {
+                    let start = std::time::Instant::now();
+                    pixels = harness.render(scene, extent);
+                    samples.push(start.elapsed());
+                }
+                samples.sort();
+                eprintln!("64 {name} clips, {side}px target: median {:?}", samples[7]);
+                pixels
+            });
+        }
+    }
+}
+
 #[test]
 fn harness_renders_a_quad_at_the_right_pixels() {
     let Some(mut harness) = Harness::new() else {
