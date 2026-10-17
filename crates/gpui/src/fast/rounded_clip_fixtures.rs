@@ -3,6 +3,59 @@
 use super::{assert_same_pixels, pixel, render_div_fixture};
 use gpui::{Path, px};
 
+/// The command-palette regression from zed#37480: a rounded palette has a
+/// header above the input and list. Its radius belongs only to the palette's
+/// outer corners, never to the input's or list row's own clipping rectangle.
+#[gpui::test]
+fn rounded_overflow_command_palette_rows_keep_square_corners(cx: &mut gpui::TestAppContext) {
+    use gpui::{ParentElement as _, Styled as _};
+    let (pixels, side) = render_div_fixture(cx, || {
+        let row = |height, color| {
+            gpui::div()
+                .w_full()
+                .h(px(height))
+                .flex_shrink_0()
+                .overflow_hidden()
+                .bg(color)
+        };
+        gpui::div().size(px(64.)).bg(gpui::white()).child(
+            gpui::div()
+                .flex()
+                .flex_col()
+                .size(px(64.))
+                .rounded(px(16.))
+                .overflow_hidden()
+                .child(row(16., gpui::black()))
+                .child(row(16., gpui::red()))
+                .child(row(8., gpui::blue()))
+                .child(row(8., gpui::black()))
+                .child(row(16., gpui::green())),
+        )
+    });
+    let sample = |x, y| pixel(&pixels, side, x * side / 64, y * side / 64);
+    // Check all four input and selected-row corners, not just their centres.
+    for x in [0, 63] {
+        for y in [16, 31] {
+            assert_eq!(
+                sample(x, y),
+                [255, 0, 0, 255],
+                "input corner acquired the palette radius at ({x}, {y})"
+            );
+        }
+        for y in [32, 39] {
+            assert_eq!(
+                sample(x, y),
+                [0, 0, 255, 255],
+                "selected row acquired the palette radius at ({x}, {y})"
+            );
+        }
+        assert_eq!(sample(x, 0), [255, 255, 255, 255]);
+        assert_eq!(sample(x, 63), [255, 255, 255, 255]);
+    }
+    assert_eq!(sample(32, 0), [0, 0, 0, 255]);
+    assert_eq!(sample(32, 63), [0, 128, 0, 255]);
+}
+
 #[gpui::test]
 fn rounded_overflow_deep_stack_preserves_clips(cx: &mut gpui::TestAppContext) {
     use gpui::{ParentElement as _, Styled as _};
