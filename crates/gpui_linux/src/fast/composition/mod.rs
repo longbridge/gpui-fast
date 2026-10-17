@@ -5,3 +5,6 @@
 pub(crate) mod wayland;
 #[cfg(feature = "x11")]
 pub(crate) mod x11;
+
+#[cfg(feature = "x11")]
+mod occluders;

@@ -953,3 +953,6 @@ impl Harness {
             .into_raw()
     }
 }
+
+#[path = "../../../../gpui_linux/src/fast/composition/occluders.rs"]
+mod x11_occluder_tests;
