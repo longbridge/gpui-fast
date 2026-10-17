@@ -1,4 +1,4 @@
-//! Rounded scopes evaluate an immutable structured buffer of padding edges
+//! Rounded scopes evaluate an immutable geometry texture of padding edges
 //! directly in the colour shader. Each child appends its geometry and restores
 //! the enclosing stack afterward; no mask render targets or passes are needed.
 
@@ -9,10 +9,10 @@ use gpui::{AtlasTextureId, LayerFrame, Scene};
 use windows::{
     Win32::Graphics::Direct3D11::{
         D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_SHADER_RESOURCE, D3D11_BUFFER_DESC,
-        D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
-        D3D11_USAGE_IMMUTABLE, ID3D11Buffer, ID3D11Device, ID3D11RenderTargetView,
-        ID3D11ShaderResourceView, ID3D11Texture2D,
+        D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_IMMUTABLE, ID3D11Buffer,
+        ID3D11Device, ID3D11RenderTargetView, ID3D11ShaderResourceView, ID3D11Texture2D,
     },
+    Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_SAMPLE_DESC},
     core::Interface as _,
 };
 
@@ -86,24 +86,33 @@ impl Masks {
     }
 
     fn clip_view(&self, device: &ID3D11Device) -> Result<Option<ID3D11ShaderResourceView>> {
-        let desc = D3D11_BUFFER_DESC {
-            ByteWidth: u32::try_from(std::mem::size_of_val(self.clips.as_slice()))?,
+        // ps_4_1 does not support StructuredBuffer. Three full-precision
+        // texels per edge preserve the same geometry on the existing profile.
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: 3,
+            Height: u32::try_from(self.clips.len())?,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_R32G32B32A32_FLOAT,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
             Usage: D3D11_USAGE_IMMUTABLE,
             BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
-            MiscFlags: D3D11_RESOURCE_MISC_BUFFER_STRUCTURED.0 as u32,
-            StructureByteStride: std::mem::size_of::<Clip>() as u32,
             ..Default::default()
         };
         let data = D3D11_SUBRESOURCE_DATA {
             pSysMem: self.clips.as_ptr().cast(),
+            SysMemPitch: std::mem::size_of::<Clip>() as u32,
             ..Default::default()
         };
-        let mut buffer = None;
+        let mut texture = None;
         let mut view = None;
         unsafe {
-            device.CreateBuffer(&desc, Some(&data), Some(&mut buffer))?;
+            device.CreateTexture2D(&desc, Some(&data), Some(&mut texture))?;
             device.CreateShaderResourceView(
-                buffer.as_ref().context("clip buffer")?,
+                texture.as_ref().context("clip geometry texture")?,
                 None,
                 Some(&mut view),
             )?;

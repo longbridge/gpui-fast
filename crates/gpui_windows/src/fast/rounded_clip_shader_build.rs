@@ -103,15 +103,19 @@ float fast_rounded_clip_coverage(float2 position, FastRoundedClip shape) {{
   }}
   return clamp(0.5f - distance, 0.0f, 1.0f);
 }}
-StructuredBuffer<FastRoundedClip> fast_clip_shapes : register(t15);
+Texture2D<float4> fast_clip_shapes : register(t15);
 cbuffer FastClipParams : register(b2) {{ uint fast_clip_enabled; uint3 fast_clip_pad; }};
 float fast_clip_coverage(float2 position) {{
     if (fast_clip_enabled == 0) return 1.0;
-    uint count, stride;
-    fast_clip_shapes.GetDimensions(count, stride);
+    uint width = 0, count = 0;
+    fast_clip_shapes.GetDimensions(width, count);
     float coverage = 1.0;
     [loop] for (uint index = 0; index < count; ++index) {{
-        coverage = min(coverage, fast_rounded_clip_coverage(position, fast_clip_shapes[index]));
+        FastRoundedClip shape;
+        shape.bounds = fast_clip_shapes.Load(int3(0, index, 0));
+        shape.horizontal = fast_clip_shapes.Load(int3(1, index, 0));
+        shape.vertical = fast_clip_shapes.Load(int3(2, index, 0));
+        coverage = min(coverage, fast_rounded_clip_coverage(position, shape));
     }}
     return coverage;
 }}
