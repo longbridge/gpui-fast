@@ -541,7 +541,7 @@ impl MetalRenderer {
         }
     }
 
-    fn render_frame(
+    pub(crate) fn render_frame(
         &mut self,
         scene: &Scene,
         texture: &metal::TextureRef,

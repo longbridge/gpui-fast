@@ -61,7 +61,8 @@ fn rounded_overflow_inside_scroll_tiles_matches_direct_pixels(cx: &mut gpui::Tes
     });
 }
 
-/// Manual timing includes synchronous GPU completion and readback. Compare the
+/// Manual timing reuses a private target and waits for GPU completion without
+/// reading pixels back. Compare the
 /// same 64 descendants with and without curved overflow, at two target sizes,
 /// to expose full-viewport mask work even when the clipped elements are small.
 #[gpui::test]
@@ -89,19 +90,36 @@ fn rounded_overflow_mask_cost(cx: &mut gpui::TestAppContext) {
             let mut harness = Harness::new().expect("timing requires Metal");
             rounded_clip_tests::render_with(cx, build, |scene, _| {
                 let extent = device_size(side, side);
-                for _ in 0..3 {
-                    harness.render(scene, extent);
-                }
+                let descriptor = metal::TextureDescriptor::new();
+                descriptor.set_width(side as u64);
+                descriptor.set_height(side as u64);
+                descriptor.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
+                descriptor.set_storage_mode(metal::MTLStorageMode::Private);
+                descriptor.set_usage(metal::MTLTextureUsage::RenderTarget);
+                let target = harness.renderer.device.new_texture(&descriptor);
+                harness.renderer.update_path_intermediate_textures(extent);
                 let mut samples = Vec::new();
-                let mut pixels = Vec::new();
-                for _ in 0..15 {
-                    let start = std::time::Instant::now();
-                    pixels = harness.render(scene, extent);
-                    samples.push(start.elapsed());
+                for frame in 0..18 {
+                    objc2::rc::autoreleasepool(|_| {
+                        let start = std::time::Instant::now();
+                        let commands = harness
+                            .renderer
+                            .render_frame(scene, &target, extent)
+                            .unwrap();
+                        let encoded = start.elapsed();
+                        commands.commit();
+                        commands.wait_until_completed();
+                        if frame >= 3 {
+                            samples.push((start.elapsed(), encoded));
+                        }
+                    });
                 }
                 samples.sort();
-                eprintln!("64 {name} clips, {side}px target: median {:?}", samples[7]);
-                pixels
+                eprintln!(
+                    "64 {name} clips, {side}px target: median {:?}, encode {:?}",
+                    samples[7].0, samples[7].1
+                );
+                Vec::new()
             });
         }
     }
