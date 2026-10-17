@@ -63,7 +63,6 @@ pub(crate) struct FrameState {
     pub(crate) bind_groups: BindGroupCache,
     pub(crate) globals: UploadedGlobals,
     pub(crate) layers: TileCache,
-    pub(crate) rounded_masks: crate::fast::rounded_clip::MaskPool,
     vertices: Vec<PathRasterizationVertex>,
     sprites: Vec<PathSprite>,
     path_batches: Vec<PathBatch>,
@@ -204,7 +203,6 @@ struct PlannedScene<'a> {
 struct GroupPlan {
     texture: u32,
     content: usize,
-    mask: usize,
 }
 
 pub(crate) struct DrawGraph<'a> {
@@ -225,19 +223,10 @@ fn plan_scene<'a>(
             continue;
         };
         let child = frame.content.scene().expect("rounded clip content");
-        let mask = child
-            .layers
-            .frames
-            .iter()
-            .find(|frame| frame.key.0 == u32::MAX)
-            .and_then(|frame| frame.content.scene())
-            .expect("rounded clip mask");
-        let mask = plan_scene(mask, scenes, vertices, sprites, Vec::new());
         let content = plan_scene(child, scenes, vertices, sprites, Vec::new());
         groups.push(GroupPlan {
             texture: sprite.tile.texture_id.index,
             content,
-            mask,
         });
     }
     plan_paths(scene, vertices, sprites, &mut path_batches);
@@ -289,7 +278,6 @@ fn record_with(
     clear: wgpu::Color,
 ) -> Result<wgpu::SubmissionIndex> {
     state.bind_groups.begin_frame();
-    state.rounded_masks.begin_frame();
 
     // The layer tiles to rasterize before the frame draws them.
     let planned = state
@@ -648,8 +636,6 @@ fn record(
                 msaa: target.path_msaa_view,
             },
             graph: &graph,
-            mask: None,
-            clip_depth: 0,
         },
     );
     target.queue.submit(std::iter::once(encoder.finish()))
@@ -668,8 +654,6 @@ pub(crate) struct SceneDraw<'a> {
     pub(crate) globals: &'a wgpu::BindGroup,
     pub(crate) path_targets: PathTargets<'a>,
     pub(crate) graph: &'a DrawGraph<'a>,
-    pub(crate) mask: Option<&'a wgpu::BindGroup>,
-    pub(crate) clip_depth: usize,
 }
 
 /// What a scene's paths are rasterized with: the globals and the
@@ -681,6 +665,94 @@ pub(crate) struct PathTargets<'a> {
     pub(crate) msaa: Option<&'a wgpu::TextureView>,
 }
 
+struct DrawStep<'a> {
+    scene: &'a Scene,
+    upload: &'a SceneUpload,
+    batch: PrimitiveBatch,
+    clip: Option<usize>,
+    path: Option<&'a PathBatch>,
+    path_group: Option<Range<u32>>,
+}
+
+impl DrawStep<'_> {
+    fn path_key(&self) -> (usize, Option<Range<u32>>) {
+        (self.scene as *const Scene as usize, self.path_group.clone())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_steps<'a>(
+    scene: &'a Scene,
+    upload: &'a SceneUpload,
+    paths: &'a [PathBatch],
+    graph: &'a DrawGraph<'a>,
+    clips: &mut Vec<crate::fast::rounded_clip::Clip>,
+    binding: Option<usize>,
+    steps: &mut Vec<DrawStep<'a>>,
+    clip_sets: &mut Vec<Vec<crate::fast::rounded_clip::Clip>>,
+) {
+    let mut path_index = 0;
+    let mut path_group = None;
+    for batch in scene.batches() {
+        if let PrimitiveBatch::PolychromeSprites {
+            texture_id,
+            ref range,
+        } = batch
+            && crate::fast::rounded_clip::group(scene, texture_id).is_some()
+        {
+            let plan = graph
+                .scenes
+                .iter()
+                .find(|plan| std::ptr::eq(plan.scene, scene))
+                .expect("planned clip scene");
+            let group = plan
+                .groups
+                .iter()
+                .find(|group| group.texture == texture_id.index)
+                .expect("planned clip group");
+            let child = &graph.scenes[group.content];
+            for index in range.clone() {
+                clips.push(crate::fast::rounded_clip::Clip::new(
+                    &scene.polychrome_sprites[index],
+                    child.scene,
+                ));
+                let child_binding = clip_sets.len();
+                clip_sets.push(clips.clone());
+                collect_steps(
+                    child.scene,
+                    &graph.uploads[group.content],
+                    &child.path_batches,
+                    graph,
+                    clips,
+                    Some(child_binding),
+                    steps,
+                    clip_sets,
+                );
+                clips.pop();
+            }
+            continue;
+        }
+        let path = if matches!(&batch, PrimitiveBatch::Paths(range) if !range.is_empty()) {
+            let path = paths.get(path_index);
+            path_index += 1;
+            if let Some(group) = path.and_then(|path| path.group.clone()) {
+                path_group = Some(group);
+            }
+            path
+        } else {
+            None
+        };
+        steps.push(DrawStep {
+            scene,
+            upload,
+            batch,
+            clip: binding,
+            path,
+            path_group: path_group.clone(),
+        });
+    }
+}
+
 /// Records the passes that draw `draw.scene` into `draw.view`.
 pub(crate) fn draw_scene(
     target: &FrameTarget,
@@ -689,7 +761,6 @@ pub(crate) fn draw_scene(
     draw: &SceneDraw,
 ) {
     let pipelines = target.pipelines;
-    let upload = draw.upload;
     let texture_bind_group = |label: &str, view: &wgpu::TextureView| {
         state.bind_groups.texture(
             target.device,
@@ -704,31 +775,52 @@ pub(crate) fn draw_scene(
         .intermediate
         .map(|view| texture_bind_group("path_intermediate_texture_bind_group", view));
 
-    // The first group is rasterized before the main pass, which saves ending
-    // the main pass for it.
-    let mut rasterized = draw.path_batches.first().is_some_and(|first| {
+    let mut steps = Vec::new();
+    let mut clip_sets = Vec::new();
+    collect_steps(
+        draw.scene,
+        draw.upload,
+        draw.path_batches,
+        draw.graph,
+        &mut Vec::new(),
+        None,
+        &mut steps,
+        &mut clip_sets,
+    );
+    let clip_data = (!clip_sets.is_empty()).then(|| {
+        target.bind_group_layouts.fast_rounded_clip.clip_sets(
+            target.device,
+            target.queue,
+            &clip_sets,
+        )
+    });
+    let clip_binding = clip_data
+        .as_ref()
+        .map(|data| &data.0)
+        .unwrap_or(&target.bind_group_layouts.fast_rounded_clip.unmasked);
+    let clip_alignment = clip_data.as_ref().map_or(0, |data| data.1);
+    let first_path = steps.iter().find(|step| step.path.is_some());
+    let mut rasterized_group = first_path.and_then(|step| {
         rasterize_group(
             target,
             encoder,
             draw.path_targets,
             draw.paths,
-            first.group.clone(),
+            step.path_group.clone(),
         )
+        .then_some(step.path_key())
     });
-
     let mut pass = begin_main_pass(encoder, draw.view, draw.label, draw.clear);
     let mut bound = PassState::default();
-    let mut path_batches = draw.path_batches.iter().enumerate();
-    let mut current_group = draw
-        .path_batches
-        .first()
-        .and_then(|batch| batch.group.clone());
-    let clip_binding = draw
-        .mask
-        .unwrap_or(&target.bind_group_layouts.fast_rounded_clip.unmasked);
-
-    for batch in draw.scene.batches() {
-        bound.set_bind_group(&mut pass, 3, clip_binding);
+    for step in steps {
+        let path_key = step.path_key();
+        let upload = step.upload;
+        let scene = step.scene;
+        let clip_offset = step
+            .clip
+            .map_or(0, |index| (index as u32 + 1) * clip_alignment);
+        pass.set_bind_group(3, clip_binding, &[clip_offset]);
+        let batch = step.batch;
         match batch {
             PrimitiveBatch::Quads(range) => draw_batch(
                 &mut pass,
@@ -752,26 +844,24 @@ pub(crate) fn draw_scene(
                 if range.is_empty() {
                     continue;
                 }
-                let Some((index, batch)) = path_batches.next() else {
+                let Some(batch) = step.path else {
                     continue;
                 };
-                if let Some(group) = &batch.group {
-                    current_group = Some(group.clone());
-                }
-                if !rasterized || index > 0 && batch.group.is_some() {
+                if rasterized_group != Some(path_key.clone()) {
                     drop(pass);
-                    rasterized = rasterize_group(
+                    rasterized_group = rasterize_group(
                         target,
                         encoder,
                         draw.path_targets,
                         draw.paths,
-                        current_group.clone(),
-                    );
+                        step.path_group.clone(),
+                    )
+                    .then_some(path_key);
                     pass = begin_main_pass(encoder, draw.view, "main_pass_continued", None);
                     bound.forget();
-                    bound.set_bind_group(&mut pass, 3, clip_binding);
+                    pass.set_bind_group(3, clip_binding, &[clip_offset]);
                 }
-                if !rasterized || batch.vertices.is_empty() {
+                if rasterized_group.is_none() || batch.vertices.is_empty() {
                     continue;
                 }
                 let Some(intermediate) = &intermediate else {
@@ -830,81 +920,9 @@ pub(crate) fn draw_scene(
                 );
             }
             PrimitiveBatch::PolychromeSprites { texture_id, range }
-                if crate::fast::rounded_clip::group(draw.scene, texture_id).is_some() =>
-            {
-                let plan = draw
-                    .graph
-                    .scenes
-                    .iter()
-                    .find(|plan| std::ptr::eq(plan.scene, draw.scene))
-                    .expect("planned clip scene");
-                let group = plan
-                    .groups
-                    .iter()
-                    .find(|group| group.texture == texture_id.index)
-                    .expect("planned clip group");
-                drop(pass);
-                for _ in range {
-                    let size = draw.view.texture().size();
-                    let (mask_view, mask) = state.rounded_masks.get(
-                        target.device,
-                        &target.bind_group_layouts.fast_rounded_clip,
-                        target.format,
-                        size,
-                        draw.clip_depth,
-                    );
-                    let mask_plan = &draw.graph.scenes[group.mask];
-                    draw_scene(
-                        target,
-                        state,
-                        encoder,
-                        &SceneDraw {
-                            scene: mask_plan.scene,
-                            upload: &draw.graph.uploads[group.mask],
-                            paths: draw.paths,
-                            path_batches: &mask_plan.path_batches,
-                            view: &mask_view,
-                            clear: Some(wgpu::Color::TRANSPARENT),
-                            label: "rounded_clip_mask",
-                            globals: draw.globals,
-                            path_targets: draw.path_targets,
-                            graph: draw.graph,
-                            mask: draw.mask,
-                            clip_depth: draw.clip_depth + 1,
-                        },
-                    );
-                    let content = &draw.graph.scenes[group.content];
-                    draw_scene(
-                        target,
-                        state,
-                        encoder,
-                        &SceneDraw {
-                            scene: content.scene,
-                            upload: &draw.graph.uploads[group.content],
-                            paths: draw.paths,
-                            path_batches: &content.path_batches,
-                            view: draw.view,
-                            clear: None,
-                            label: "rounded_clip_content",
-                            globals: draw.globals,
-                            path_targets: draw.path_targets,
-                            graph: draw.graph,
-                            mask: Some(&mask),
-                            clip_depth: draw.clip_depth + 1,
-                        },
-                    );
-                }
-                // The mask and child may have overwritten the shared path
-                // intermediate. Re-rasterize this scene's group on its next
-                // path batch, including when that batch shares the first group.
-                rasterized = false;
-                pass = begin_main_pass(encoder, draw.view, "rounded_clip_continued", None);
-                bound.forget();
-            }
-            PrimitiveBatch::PolychromeSprites { texture_id, range }
                 if composite::is_layer_texture(texture_id) =>
             {
-                let sprites = &draw.scene.polychrome_sprites;
+                let sprites = &scene.polychrome_sprites;
                 for run in composite::tile_runs(sprites, range) {
                     let Some(view) = composite::texture_for_batch(
                         &state.layers,
@@ -1053,7 +1071,7 @@ fn rasterize_group(
     pass.set_bind_group(
         3,
         &target.bind_group_layouts.fast_rounded_clip.unmasked,
-        &[],
+        &[0],
     );
     pass.draw(
         (paths.vertices.first + vertices.start)..(paths.vertices.first + vertices.end),

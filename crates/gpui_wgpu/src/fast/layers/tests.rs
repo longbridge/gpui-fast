@@ -26,6 +26,81 @@ use crate::wgpu_renderer::{
     WgpuRendererCore,
 };
 
+/// Reuse a target and wait for GPU completion, excluding pixel readback.
+#[gpui::test]
+#[ignore = "manual GPU performance measurement"]
+fn rounded_overflow_frame_cost(cx: &mut gpui::TestAppContext) {
+    fn rectangular() -> gpui::Div {
+        use gpui::{ParentElement as _, Styled as _};
+        gpui::div()
+            .flex()
+            .flex_wrap()
+            .size(px(64.))
+            .bg(gpui::white())
+            .children((0..64).map(|_| {
+                gpui::div()
+                    .size(px(8.))
+                    .overflow_hidden()
+                    .child(gpui::div().size(px(8.)).bg(gpui::black()))
+            }))
+    }
+    for side in [128, 1024] {
+        for (name, build) in [
+            ("rectangle", rectangular as fn() -> gpui::Div),
+            ("rounded", rounded_clip_tests::sibling_fixture),
+        ] {
+            let mut harness = Harness::new().expect("timing requires a GPU");
+            rounded_clip_tests::render_with(cx, build, |scene, _| {
+                harness.write_globals(side, side);
+                harness.ensure_path_targets(device_size(side as i32, side as i32));
+                let texture = harness.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("clip_timing_target"),
+                    size: wgpu::Extent3d {
+                        width: side,
+                        height: side,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: harness.format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&Default::default());
+                let mut samples = Vec::new();
+                for frame in 0..18 {
+                    let start = std::time::Instant::now();
+                    let submission = crate::fast::frame::record_into(
+                        &mut harness,
+                        scene,
+                        &view,
+                        wgpu::Color::WHITE,
+                    )
+                    .unwrap();
+                    let encoded = start.elapsed();
+                    harness
+                        .device
+                        .poll(wgpu::PollType::Wait {
+                            submission_index: Some(submission),
+                            timeout: None,
+                        })
+                        .unwrap();
+                    if frame >= 3 {
+                        samples.push((start.elapsed(), encoded));
+                    }
+                }
+                samples.sort();
+                eprintln!(
+                    "64 {name} clips, {side}px target: median {:?}, encode {:?}",
+                    samples[7].0, samples[7].1
+                );
+                Vec::new()
+            });
+        }
+    }
+}
+
 #[test]
 fn harness_renders_a_quad_at_the_right_pixels() {
     let Some(mut harness) = Harness::new() else {
@@ -56,24 +131,6 @@ fn render_div_fixture(cx: &mut gpui::TestAppContext, build: fn() -> gpui::Div) -
     rounded_clip_tests::render_with(cx, build, |scene, size| {
         harness.render(scene, size, rgba(0xffffffff))
     })
-}
-
-#[cfg(feature = "test-support")]
-#[gpui::test]
-fn rounded_overflow_many_siblings_reuse_one_mask(cx: &mut gpui::TestAppContext) {
-    let mut harness = Harness::new().expect("rounded clipping regression requires a wgpu adapter");
-    let (pixels, side) =
-        rounded_clip_tests::render_with(cx, rounded_clip_tests::sibling_fixture, |scene, size| {
-            let pixels = harness.render(scene, size, rgba(0xffffffff));
-            assert_eq!(
-                harness.state.rounded_masks.len(),
-                1,
-                "siblings retained independent full-frame textures"
-            );
-            pixels
-        });
-    assert_eq!(pixel(&pixels, side, side / 16, side / 16), [0, 0, 0, 255]);
-    assert_eq!(pixel(&pixels, side, 0, 0), [255, 255, 255, 255]);
 }
 
 #[cfg(feature = "test-support")]

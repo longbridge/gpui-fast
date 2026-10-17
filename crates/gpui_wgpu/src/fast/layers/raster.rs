@@ -90,8 +90,6 @@ pub(crate) fn rasterize(
                 msaa: tile_paths.msaa.as_ref(),
             },
             graph,
-            mask: None,
-            clip_depth: 0,
         },
     );
 }
