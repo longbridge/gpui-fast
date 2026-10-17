@@ -847,9 +847,9 @@ mod list {
         wheel, wheel_deltas, with_window,
     };
     use crate::{
-        AnyWindowHandle, AppContext as _, Context, Entity, IntoElement, ListAlignment, ListState,
-        ParentElement as _, Render, Styled as _, TestAppContext, Window, WindowHandle, div,
-        prelude::FluentBuilder as _, px, rgb,
+        AnyWindowHandle, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+        ListAlignment, ListState, ParentElement as _, Render, Styled as _, TestAppContext, Window,
+        WindowHandle, div, prelude::FluentBuilder as _, px, rgb,
     };
     use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 
@@ -2644,6 +2644,91 @@ mod list {
         wheel(cx, without, -7.);
         let composited = compare_with_layers_off(cx, with, without, &[-7.; 8], "widened");
         assert!(composited > 0, "the layer was composited");
+    }
+
+    /// A white panel holding a list of rows of varying heights, 100 px tall,
+    /// each row found in tests as `row-<ix>`.
+    struct LabelledListPage {
+        state: ListState,
+    }
+
+    impl Render for LabelledListPage {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().bg(rgb(0xffffff)).child(
+                crate::list(self.state.clone(), move |row, _, _| {
+                    div()
+                        .debug_selector(move || format!("row-{row}"))
+                        .w(px(VIEWPORT_WIDTH))
+                        .h(px(row_height(row)))
+                        .bg(row_color(row))
+                        .into_any_element()
+                })
+                .w(px(VIEWPORT_WIDTH))
+                .h(px(VIEWPORT_HEIGHT)),
+            )
+        }
+    }
+
+    /// The rows of the list in `window` that its viewport shows, as the
+    /// frame last drawn records them for tests to find.
+    fn rows_shown(cx: &mut TestAppContext, window: AnyWindowHandle) -> Vec<(usize, String)> {
+        with_window(cx, window, |window, _| {
+            let viewport = crate::Bounds::new(
+                crate::point(px(0.), px(0.)),
+                crate::size(px(VIEWPORT_WIDTH), px(VIEWPORT_HEIGHT)),
+            );
+            let mut rows: Vec<(usize, String)> = window
+                .rendered_frame
+                .debug_bounds
+                .iter()
+                .filter_map(|(selector, bounds)| {
+                    let row = selector.strip_prefix("row-")?.parse().ok()?;
+                    viewport
+                        .intersects(bounds)
+                        .then(|| (row, format!("{bounds:?}")))
+                })
+                .collect();
+            rows.sort();
+            rows
+        })
+    }
+
+    /// The rows a list's layer keeps on a frame that only scrolled it are
+    /// found where they are drawn, as a list without a layer finds them.
+    #[crate::test]
+    fn rows_a_layer_keeps_are_found_where_they_are_drawn(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let open = |cx: &mut TestAppContext| -> AnyWindowHandle {
+            let state = ListState::new(300, ListAlignment::Top, px(0.)).measure_all();
+            let window = cx.add_window(move |_, _| LabelledListPage { state });
+            open_at(cx, window.into(), 1.);
+            window.into()
+        };
+        let with_layers = open(cx);
+        let without_layers = open(cx);
+        with_window(cx, without_layers, |window, _| {
+            window.set_scroll_layers(false)
+        });
+        draw(cx, without_layers);
+
+        let extended = extended_frames();
+        for (step, dy) in wheel_deltas(40).into_iter().enumerate() {
+            wheel(cx, with_layers, dy);
+            wheel(cx, without_layers, dy);
+            let expected = rows_shown(cx, without_layers);
+            assert!(!expected.is_empty(), "step {step}: rows are shown");
+            assert_eq!(
+                rows_shown(cx, with_layers),
+                expected,
+                "step {step}, scrolled by {dy}"
+            );
+        }
+        assert!(
+            extended_frames() - extended > 20,
+            "frames kept the rows the layer held"
+        );
     }
 }
 

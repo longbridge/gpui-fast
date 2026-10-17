@@ -40,6 +40,7 @@ pub(crate) fn carry_prepaint(
     let a11y = record.a11y.clone();
     let input = &mut layer.input;
     let moved = delta != input.stale;
+    input.scrolled = delta - input.stale;
     input.stale = delta;
     input.viewport = viewport;
     input.handle_offset.set(delta);
@@ -136,8 +137,9 @@ pub(crate) fn carry_paint(window: &mut Window, id: &GlobalElementId) {
     };
     let range = record.paint_range.clone();
     let delta = layer.input.stale;
+    let scrolled = layer.input.scrolled;
     let viewport = layer.input.viewport;
-    let mut carried = carry_paint_records(window, &range, delta, viewport, true);
+    let mut carried = carry_paint_records(window, &range, delta, scrolled, viewport, true);
     let Some(layer) = window.fast_layers.layers.get_mut(id) else {
         return;
     };
@@ -155,13 +157,15 @@ pub(crate) fn carry_paint(window: &mut Window, id: &GlobalElementId) {
 /// again, returning where they lie in it: its window control hitboxes,
 /// moved by `delta` and clipped to `viewport`, cursor styles, input
 /// handlers, mouse listeners, element states if `element_states`, tab stops,
-/// line layouts and, for tests, debug bounds, moved by `delta`. The scene is
-/// not carried.
+/// line layouts and, for tests, debug bounds, moved by `scrolled`: the
+/// rendered frame holds them where it showed what added them, which has
+/// scrolled by as much since. The scene is not carried.
 #[inline]
 pub(crate) fn carry_paint_records(
     window: &mut Window,
     range: &Range<PaintIndex>,
     delta: Point<Pixels>,
+    scrolled: Point<Pixels>,
     viewport: Bounds<Pixels>,
     element_states: bool,
 ) -> Range<PaintIndex> {
@@ -214,9 +218,10 @@ pub(crate) fn carry_paint_records(
     for (selector, bounds) in
         &rendered.debug_bounds_records[range.start.debug_bounds_index..range.end.debug_bounds_index]
     {
-        let moved = Bounds::new(bounds.origin + delta, bounds.size);
+        let moved = Bounds::new(bounds.origin + scrolled, bounds.size);
         next.record_debug_bounds(selector.clone(), moved);
     }
+    let _ = scrolled;
     window
         .text_system
         .reuse_layouts(range.start.line_layout_index.clone()..range.end.line_layout_index.clone());

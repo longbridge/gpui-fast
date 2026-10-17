@@ -3573,6 +3573,65 @@ mod input {
         assert_eq!(drags_with, drags(cx, without));
     }
 
+    /// A 200 × 100 px scroll container of forty 20 px rows, 100 px wide, at
+    /// the top left of the window, each row found in tests as `row-<index>`.
+    struct LabelledRows {
+        handle: ScrollHandle,
+    }
+
+    impl Render for LabelledRows {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().bg(rgb(0xffffff)).child(
+                div()
+                    .id("scroller")
+                    .overflow_y_scroll()
+                    .track_scroll(&self.handle)
+                    .w(px(200.))
+                    .h(px(100.))
+                    .children((0..ROWS).map(|index| {
+                        div()
+                            .debug_selector(move || format!("row-{index}"))
+                            .w(px(100.))
+                            .h(px(ROW_HEIGHT))
+                            .bg(rgb(0x100000 + index as u32 * 0x10))
+                    })),
+            )
+        }
+    }
+
+    /// The content of a layer composited on frame after frame is found
+    /// where it shows on each of them.
+    #[crate::test]
+    fn a_composited_layer_s_content_is_found_where_it_shows(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let handle = cx.add_window(|_, _| LabelledRows {
+            handle: ScrollHandle::new(),
+        });
+        let window: AnyWindowHandle = handle.into();
+        draw(cx, window);
+        draw(cx, window);
+        let mut composited = 0;
+        for step in 0..8 {
+            if scroll(cx, window, -7.) == Some(Decision::Composite) {
+                composited += 1;
+            }
+            let offset = handle
+                .update(cx, |page, _, _| page.handle.offset())
+                .unwrap();
+            let found = with_window(cx, window, |window, _| {
+                window.rendered_frame.debug_bounds.get("row-3").copied()
+            });
+            assert_eq!(
+                found.map(|bounds| bounds.origin),
+                Some(point(px(0.), px(3. * ROW_HEIGHT) + offset.y)),
+                "step {step}, scrolled to {offset:?}"
+            );
+        }
+        assert!(composited >= 4, "the layer was composited ({composited})");
+    }
+
     #[crate::test]
     fn wheel_events_do_not_rebuild(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {

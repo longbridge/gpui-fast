@@ -38,6 +38,10 @@ pub(crate) struct LayerInput {
     /// painted: how far behind the positions its closures and element
     /// states hold are.
     pub(crate) stale: Point<Pixels>,
+    /// How far the content shown scrolled since last frame, on a frame that
+    /// composites it: the rendered frame holds the content's debug bounds
+    /// where it showed then.
+    pub(crate) scrolled: Point<Pixels>,
     /// Whether the content is to be painted again at the offset shown the
     /// next time the container is prepainted, though nothing it is built
     /// from changed: it is about to see input (see [`before_dispatch`]).
