@@ -2595,3 +2595,84 @@ fn a_view_written_inside_a_cached_view_is_rendered_again_with_it() {
         .unwrap();
     assert_eq!(red, backgrounds(&mut cx, window.into()));
 }
+
+/// A view that draws a box tests find by its selector, counting its builds.
+struct Labelled {
+    builds: Rc<Cell<usize>>,
+}
+
+impl Render for Labelled {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.builds.set(self.builds.get() + 1);
+        div()
+            .debug_selector(|| "kept".into())
+            .size(px(40.))
+            .bg(crate::blue())
+    }
+}
+
+/// A root holding a [`Labelled`] view, and a box of its own while `shown`.
+struct Shelf {
+    kept: Entity<Labelled>,
+    shown: bool,
+}
+
+impl Render for Shelf {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size(px(300.))
+            .child(self.kept.clone())
+            .when(self.shown, |this| {
+                this.child(
+                    div()
+                        .debug_selector(|| "gone".into())
+                        .size(px(20.))
+                        .bg(crate::red()),
+                )
+            })
+    }
+}
+
+/// An element the frame no longer draws is gone from the frame's debug
+/// bounds, though a view beside it was drawn again from the last frame, and
+/// that view's elements are still found where they are drawn.
+#[test]
+fn an_element_no_longer_drawn_leaves_the_debug_bounds_of_a_retained_frame() {
+    let mut cx = TestAppContext::single();
+    let builds = Rc::new(Cell::new(0));
+    let window = cx.add_window({
+        let builds = builds.clone();
+        move |_, cx| Shelf {
+            kept: cx.new(|_| Labelled { builds }),
+            shown: true,
+        }
+    });
+    let bounds = |cx: &mut TestAppContext, selector: &str| {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.rendered_frame.debug_bounds.get(selector).copied()
+        })
+        .unwrap()
+    };
+    let kept = bounds(&mut cx, "kept").expect("the view's box is drawn");
+    assert!(bounds(&mut cx, "gone").is_some(), "the root's box is drawn");
+    let builds_before = builds.get();
+
+    window
+        .update(&mut cx, |shelf, _, cx| {
+            shelf.shown = false;
+            cx.notify();
+        })
+        .unwrap();
+    assert_eq!(
+        bounds(&mut cx, "gone"),
+        None,
+        "the root's box is no longer drawn"
+    );
+    assert_eq!(
+        builds.get(),
+        builds_before,
+        "the view beside it was drawn from the last frame"
+    );
+    assert_eq!(bounds(&mut cx, "kept"), Some(kept));
+}
