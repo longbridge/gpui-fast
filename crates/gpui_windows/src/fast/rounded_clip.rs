@@ -1,7 +1,6 @@
-//! Rounded scopes use the same mask-scene protocol as Metal and WGPU. Colour
-//! is drawn into the existing target; only mask coverage is rasterized into
-//! separate textures. Siblings reuse storage after a scope finishes, while
-//! active ancestors keep their masks at separate depths.
+//! Rounded scopes evaluate an immutable structured buffer of padding edges
+//! directly in the colour shader. Each child appends its geometry and restores
+//! the enclosing stack afterward; no mask render targets or passes are needed.
 
 use std::{path::PathBuf, slice};
 
@@ -9,9 +8,10 @@ use anyhow::{Context as _, Result};
 use gpui::{AtlasTextureId, LayerFrame, Scene};
 use windows::{
     Win32::Graphics::Direct3D11::{
-        D3D11_BIND_CONSTANT_BUFFER, D3D11_BUFFER_DESC, D3D11_SUBRESOURCE_DATA,
-        D3D11_TEXTURE2D_DESC, D3D11_USAGE_IMMUTABLE, ID3D11Buffer, ID3D11Device,
-        ID3D11RenderTargetView, ID3D11ShaderResourceView, ID3D11Texture2D,
+        D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_SHADER_RESOURCE, D3D11_BUFFER_DESC,
+        D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
+        D3D11_USAGE_IMMUTABLE, ID3D11Buffer, ID3D11Device, ID3D11RenderTargetView,
+        ID3D11ShaderResourceView, ID3D11Texture2D,
     },
     core::Interface as _,
 };
@@ -49,21 +49,16 @@ pub(crate) fn group(scene: &Scene, texture: AtlasTextureId) -> Option<&LayerFram
 pub(crate) struct Masks {
     device: Option<ID3D11Device>,
     flags: Option<ID3D11Buffer>,
-    masks: Vec<MaskSlot>,
+    clips: Vec<Clip>,
     paths: Vec<PathSlot>,
 }
 
-struct MaskSlot {
-    size: (u32, u32),
-    depth: usize,
-    used: bool,
-    image: MaskImage,
-}
-
-#[derive(Clone)]
-struct MaskImage {
-    target: Option<ID3D11RenderTargetView>,
-    view: Option<ID3D11ShaderResourceView>,
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Clip {
+    bounds: [f32; 4],
+    horizontal: [f32; 4],
+    vertical: [f32; 4],
 }
 
 struct PathSlot {
@@ -90,34 +85,30 @@ impl Masks {
         }
     }
 
-    fn image(
-        &mut self,
-        device: &ID3D11Device,
-        size: (u32, u32),
-        depth: usize,
-    ) -> Result<MaskImage> {
-        self.for_device(device);
-        if let Some(slot) = self
-            .masks
-            .iter_mut()
-            .find(|slot| slot.size == size && slot.depth == depth)
-        {
-            slot.used = true;
-            return Ok(slot.image.clone());
-        }
-        let (texture, view) = create_path_intermediate_texture(device, size.0, size.1)?;
-        let mut target = None;
+    fn clip_view(&self, device: &ID3D11Device) -> Result<Option<ID3D11ShaderResourceView>> {
+        let desc = D3D11_BUFFER_DESC {
+            ByteWidth: u32::try_from(std::mem::size_of_val(self.clips.as_slice()))?,
+            Usage: D3D11_USAGE_IMMUTABLE,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            MiscFlags: D3D11_RESOURCE_MISC_BUFFER_STRUCTURED.0 as u32,
+            StructureByteStride: std::mem::size_of::<Clip>() as u32,
+            ..Default::default()
+        };
+        let data = D3D11_SUBRESOURCE_DATA {
+            pSysMem: self.clips.as_ptr().cast(),
+            ..Default::default()
+        };
+        let mut buffer = None;
+        let mut view = None;
         unsafe {
-            device.CreateRenderTargetView(&texture, None, Some(&mut target))?;
+            device.CreateBuffer(&desc, Some(&data), Some(&mut buffer))?;
+            device.CreateShaderResourceView(
+                buffer.as_ref().context("clip buffer")?,
+                None,
+                Some(&mut view),
+            )?;
         }
-        let image = MaskImage { target, view };
-        self.masks.push(MaskSlot {
-            size,
-            depth,
-            used: true,
-            image: image.clone(),
-        });
-        Ok(image)
+        Ok(view)
     }
 
     fn paths(&mut self, device: &ID3D11Device, size: (u32, u32)) -> Result<PathImage> {
@@ -141,19 +132,11 @@ impl Masks {
         });
         Ok(image)
     }
-
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.masks.len()
-    }
 }
 
 pub(crate) fn begin_frame(masks: &mut Masks) {
-    masks.masks.retain(|slot| slot.used);
+    masks.clips.clear();
     masks.paths.retain(|slot| slot.used);
-    for slot in &mut masks.masks {
-        slot.used = false;
-    }
     for slot in &mut masks.paths {
         slot.used = false;
     }
@@ -204,70 +187,61 @@ pub(crate) fn draw_group(
     pipelines: &mut DirectXRenderPipelines,
     frame: &mut FrameState,
     group: &LayerFrame,
+    sprite: &gpui::PolychromeSprite,
     parent_mask: Option<&ID3D11ShaderResourceView>,
-    depth: usize,
 ) -> Result<()> {
     let child = group.content.scene().context("rounded clip content")?;
-    let mask = child
+    let radii = child
         .layers
         .frames
         .iter()
         .find(|frame| frame.key.0 == u32::MAX)
-        .and_then(|frame| frame.content.scene())
-        .context("rounded clip mask")?;
-    let context = target.device_context;
-    let mut parent = [None];
-    unsafe {
-        context.OMGetRenderTargets(Some(&mut parent), None);
-    }
-    let render_target = parent[0].clone().context("rounded clip render target")?;
-    let resource = unsafe { render_target.GetResource()? };
-    let texture: ID3D11Texture2D = resource.cast()?;
-    let mut desc = D3D11_TEXTURE2D_DESC::default();
-    unsafe {
-        texture.GetDesc(&mut desc);
-    }
-    let size = (desc.Width, desc.Height);
-    let image = frame.rounded_masks.image(target.device, size, depth)?;
-    let fallback = if target.paths.is_none() {
-        Some(frame.rounded_masks.paths(target.device, size)?)
-    } else {
-        None
-    };
-    let parent_view = Some(render_target);
-    let paths = target.paths.unwrap_or_else(|| {
-        let image = fallback.as_ref().unwrap();
-        PathTargets {
-            render_target_view: &parent_view,
-            intermediate_texture: &image.intermediate,
-            intermediate_srv: &image.view,
-            msaa_texture: &image.msaa,
-            msaa_view: &image.msaa_target,
-        }
+        .context("rounded clip geometry")?
+        .background;
+    frame.rounded_masks.for_device(target.device);
+    let b = sprite.bounds;
+    let r = sprite.corner_radii;
+    frame.rounded_masks.clips.push(Clip {
+        bounds: [b.origin.x.0, b.origin.y.0, b.right().0, b.bottom().0],
+        horizontal: [
+            r.top_left.0,
+            r.top_right.0,
+            r.bottom_right.0,
+            r.bottom_left.0,
+        ],
+        vertical: [radii.r, radii.g, radii.b, radii.a],
     });
     let result = (|| {
+        let view = frame.rounded_masks.clip_view(target.device)?;
+        let context = target.device_context;
+        let mut parent = [None];
         unsafe {
-            context.OMSetRenderTargets(Some(slice::from_ref(&image.target)), None);
-            context.ClearRenderTargetView(
-                image.target.as_ref().context("rounded clip mask target")?,
-                &[0.; 4],
-            );
+            context.OMGetRenderTargets(Some(&mut parent), None);
         }
-        let mask_target = Target {
-            device: target.device,
-            device_context: context,
-            atlas: target.atlas,
-            globals: target.globals,
-            paths: Some(PathTargets {
-                render_target_view: &image.target,
-                ..paths
-            }),
+        let render_target = parent[0].clone().context("rounded clip render target")?;
+        let resource = unsafe { render_target.GetResource()? };
+        let texture: ID3D11Texture2D = resource.cast()?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe {
+            texture.GetDesc(&mut desc);
+        }
+        let size = (desc.Width, desc.Height);
+        let fallback = if target.paths.is_none() {
+            Some(frame.rounded_masks.paths(target.device, size)?)
+        } else {
+            None
         };
-        upload(&mask_target, pipelines, mask)?;
-        draw_scene_masked(&mask_target, pipelines, frame, mask, parent_mask, depth + 1)?;
-        unsafe {
-            context.OMSetRenderTargets(Some(slice::from_ref(&parent_view)), None);
-        }
+        let parent_view = Some(render_target);
+        let paths = target.paths.unwrap_or_else(|| {
+            let image = fallback.as_ref().unwrap();
+            PathTargets {
+                render_target_view: &parent_view,
+                intermediate_texture: &image.intermediate,
+                intermediate_srv: &image.view,
+                msaa_texture: &image.msaa,
+                msaa_view: &image.msaa_target,
+            }
+        });
         let content_target = Target {
             device: target.device,
             device_context: context,
@@ -279,18 +253,9 @@ pub(crate) fn draw_group(
             }),
         };
         upload(&content_target, pipelines, child)?;
-        draw_scene_masked(
-            &content_target,
-            pipelines,
-            frame,
-            child,
-            image.view.as_ref(),
-            depth + 1,
-        )
+        draw_scene_masked(&content_target, pipelines, frame, child, view.as_ref())
     })();
-    unsafe {
-        context.OMSetRenderTargets(Some(slice::from_ref(&parent_view)), None);
-    }
+    frame.rounded_masks.clips.pop();
     bind(target, &mut frame.rounded_masks, parent_mask)?;
     frame.state.forget();
     result

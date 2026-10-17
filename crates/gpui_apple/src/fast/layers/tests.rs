@@ -33,26 +33,6 @@ fn render_div_fixture(cx: &mut gpui::TestAppContext, build: fn() -> gpui::Div) -
 }
 
 #[gpui::test]
-fn rounded_overflow_deep_stack_uses_buffer_binding(cx: &mut gpui::TestAppContext) {
-    use gpui::{ParentElement as _, Styled as _};
-    let (pixels, side) = render_div_fixture(cx, || {
-        let mut child = gpui::div().size(px(64.)).bg(gpui::black());
-        // More than 4096 bytes of distinct geometry must use a Metal buffer,
-        // rather than exceeding setFragmentBytes' inline payload limit.
-        for depth in 0..100 {
-            child = gpui::div()
-                .size(px(64.))
-                .rounded(px(20. + depth as f32 * 0.01))
-                .overflow_hidden()
-                .child(child);
-        }
-        gpui::div().size(px(64.)).bg(gpui::white()).child(child)
-    });
-    assert_eq!(pixel(&pixels, side, 0, 0), [255, 255, 255, 255]);
-    assert_eq!(pixel(&pixels, side, side / 2, side / 2), [0, 0, 0, 255]);
-}
-
-#[gpui::test]
 fn rounded_overflow_inside_scroll_tiles_matches_direct_pixels(cx: &mut gpui::TestAppContext) {
     let mut harness = Harness::new().expect("rounded clipping regression requires a Metal device");
     rounded_clip_tests::render_with(cx, rounded_clip_tests::square_fixture, |scene, size| {

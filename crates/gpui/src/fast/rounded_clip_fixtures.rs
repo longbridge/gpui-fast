@@ -3,6 +3,26 @@
 use super::{assert_same_pixels, pixel, render_div_fixture};
 use gpui::{Path, px};
 
+#[gpui::test]
+fn rounded_overflow_deep_stack_preserves_clips(cx: &mut gpui::TestAppContext) {
+    use gpui::{ParentElement as _, Styled as _};
+    let (pixels, side) = render_div_fixture(cx, || {
+        let mut child = gpui::div().size(px(64.)).bg(gpui::black());
+        // Distinct geometry prevents identical-scope deduplication. This also
+        // exceeds Metal's 4096-byte inline fragment parameter limit.
+        for depth in 0..100 {
+            child = gpui::div()
+                .size(px(64.))
+                .rounded(px(20. + depth as f32 * 0.01))
+                .overflow_hidden()
+                .child(child);
+        }
+        gpui::div().size(px(64.)).bg(gpui::white()).child(child)
+    });
+    assert_eq!(pixel(&pixels, side, 0, 0), [255, 255, 255, 255]);
+    assert_eq!(pixel(&pixels, side, side / 2, side / 2), [0, 0, 0, 255]);
+}
+
 pub(super) fn square_fixture() -> gpui::Div {
     use gpui::{ParentElement as _, Styled as _};
     gpui::div().size(px(64.)).bg(gpui::white()).child(

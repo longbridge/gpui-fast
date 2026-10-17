@@ -153,7 +153,7 @@ pub(crate) fn draw_scene(
     frame: &mut FrameState,
     scene: &Scene,
 ) -> Result<()> {
-    let result = draw_scene_masked(target, pipelines, frame, scene, None, 0);
+    let result = draw_scene_masked(target, pipelines, frame, scene, None);
     crate::fast::rounded_clip::bind(target, &mut frame.rounded_masks, None)?;
     result
 }
@@ -164,7 +164,6 @@ pub(crate) fn draw_scene_masked(
     frame: &mut FrameState,
     scene: &Scene,
     mask: Option<&ID3D11ShaderResourceView>,
-    depth: usize,
 ) -> Result<()> {
     let batch_params = target
         .globals
@@ -182,9 +181,14 @@ pub(crate) fn draw_scene_masked(
         } = batch
             && let Some(group) = crate::fast::rounded_clip::group(scene, texture_id)
         {
-            for _ in range.clone() {
+            for index in range.clone() {
                 crate::fast::rounded_clip::draw_group(
-                    target, pipelines, frame, group, mask, depth,
+                    target,
+                    pipelines,
+                    frame,
+                    group,
+                    &scene.polychrome_sprites[index],
+                    mask,
                 )?;
             }
             restore_upload = true;

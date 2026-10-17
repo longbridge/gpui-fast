@@ -64,25 +64,6 @@ fn render_div_fixture(cx: &mut gpui::TestAppContext, build: fn() -> gpui::Div) -
 
 #[cfg(feature = "test-support")]
 #[gpui::test]
-fn rounded_overflow_many_siblings_reuse_one_mask(cx: &mut gpui::TestAppContext) {
-    let mut harness =
-        Harness::new().expect("rounded clipping regression requires Direct3D or WARP");
-    let (pixels, side) =
-        rounded_clip_tests::render_with(cx, rounded_clip_tests::sibling_fixture, |scene, size| {
-            let pixels = harness.render(scene, size, rgba(0xffffffff));
-            assert_eq!(
-                harness.frame.rounded_masks.len(),
-                1,
-                "sibling masks must be depth bounded"
-            );
-            pixels
-        });
-    assert_eq!(pixel(&pixels, side, side / 16, side / 16), [0, 0, 0, 255]);
-    assert_eq!(pixel(&pixels, side, 0, 0), [255, 255, 255, 255]);
-}
-
-#[cfg(feature = "test-support")]
-#[gpui::test]
 fn rounded_overflow_inside_scroll_tiles_matches_direct_pixels(cx: &mut gpui::TestAppContext) {
     let mut harness =
         Harness::new().expect("rounded clipping regression requires Direct3D or WARP");

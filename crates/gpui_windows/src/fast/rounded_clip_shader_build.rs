@@ -78,11 +78,42 @@ pub fn source(original: &str, alpha: &str) -> String {
     }
     format!(
         r#"
-Texture2D<float4> fast_clip_texture : register(t15);
+struct FastRoundedClip {{
+  float4 bounds;
+  float4 horizontal;
+  float4 vertical;
+}};
+float fast_rounded_clip_coverage(float2 position, FastRoundedClip shape) {{
+  float2 extent = shape.bounds.zw - shape.bounds.xy;
+  if (extent.x <= 0 || extent.y <= 0) return 0;
+  float2 local = position - shape.bounds.xy;
+  float distance = max(max(-local.x, -local.y), max(local.x - extent.x, local.y - extent.y));
+  [unroll] for (uint corner = 0; corner < 4; ++corner) {{
+    float2 radius = float2(shape.horizontal[corner], shape.vertical[corner]);
+    if (radius.x <= 0 || radius.y <= 0) continue;
+    bool right = corner == 1 || corner == 2;
+    bool bottom = corner >= 2;
+    float2 inward = float2(right ? extent.x - local.x : local.x, bottom ? extent.y - local.y : local.y);
+    if (inward.x < radius.x && inward.y < radius.y) {{
+      float2 q = (inward - radius) / radius;
+      float length_q = length(q);
+      float gradient = length(q / radius) / max(length_q, 0.000001f);
+      distance = max(distance, (length_q - 1) / max(gradient, 0.000001f));
+    }}
+  }}
+  return clamp(0.5f - distance, 0.0f, 1.0f);
+}}
+StructuredBuffer<FastRoundedClip> fast_clip_shapes : register(t15);
 cbuffer FastClipParams : register(b2) {{ uint fast_clip_enabled; uint3 fast_clip_pad; }};
 float fast_clip_coverage(float2 position) {{
     if (fast_clip_enabled == 0) return 1.0;
-    return fast_clip_texture.Load(int3(int2(position), 0)).a;
+    uint count, stride;
+    fast_clip_shapes.GetDimensions(count, stride);
+    float coverage = 1.0;
+    [loop] for (uint index = 0; index < count; ++index) {{
+        coverage = min(coverage, fast_rounded_clip_coverage(position, fast_clip_shapes[index]));
+    }}
+    return coverage;
 }}
 float4 fast_clip_color(float4 color, float2 position, bool premultiplied) {{
     float coverage = fast_clip_coverage(position);
