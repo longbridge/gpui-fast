@@ -18,6 +18,10 @@ name = "gpui_perf"
 path = "src/main.rs"
 
 [[example]]
+name = "content_mask"
+required-features = ["fast"]
+
+[[example]]
 name = "views_frames"
 required-features = ["fast"]
 
