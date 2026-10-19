@@ -10,6 +10,7 @@ export interface ReleaseConfig {
   repository: string;
   homepage: string;
   windows_capture_version: string;
+  wgpu_version: string;
   crates: string[];
 }
 

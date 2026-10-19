@@ -4,6 +4,11 @@ repository = "https://github.com/longbridge/gpui-fast"
 homepage = "https://github.com/longbridge/gpui-fast"
 # zed-scap's Windows backend requires the five-argument capture settings API.
 windows_capture_version = "=1.4.2"
+# Upstream pins a wgpu git revision for its unreleased Vulkan surface-drop fix
+# (gfx-rs/wgpu#10230), which crates.io cannot take. Releases use this registry
+# version instead, with gpui_wgpu adapted to it; drop both once a release
+# ships the fix and upstream moves to it.
+wgpu_version = "=30.0.1"
 
 # Dependencies come before their consumers.
 crates = [

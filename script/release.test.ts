@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { dependency } from "./prepare-release";
+import { adaptToReleasedWgpu, dependency } from "./prepare-release";
 import { validate } from "./publish-release";
 import { fastName, readConfig, readToml } from "./release-common";
 
@@ -58,6 +58,24 @@ test("release dependencies retain inherited features and pin support snapshots",
   expect(dependency("util", { workspace: true }, workspace, config, "0.1.5")).toEqual({
     package: "gpui-pre-util", version: "=" + config.snapshot_version,
   });
+});
+
+test("release dependencies replace wgpu's Git revision with its registry release", () => {
+  const workspace = { dependencies: { wgpu: {
+    git: "https://github.com/gfx-rs/wgpu", rev: "3b3506ea31154edc04de64debda0e780cba2639c",
+    "default-features": false,
+  } } };
+  expect(dependency("wgpu", { workspace: true, features: ["wgsl"] }, workspace, config, "0.1.5")).toEqual({
+    version: config.wgpu_version, "default-features": false, features: ["wgsl"],
+  });
+});
+
+test("gpui_wgpu is adapted to the registry wgpu, and unknown queue setup is refused", () => {
+  const descriptor = "wgpu::DeviceDescriptor {\n    label: None,\n    default_queue: wgpu::QueueDescriptor::default(),\n}\n";
+  expect(adaptToReleasedWgpu(descriptor)).toBe("wgpu::DeviceDescriptor {\n    label: None,\n}\n");
+  expect(adaptToReleasedWgpu("!format.has_srgb_suffix()")).toBe("!format.is_srgb()");
+  expect(() => adaptToReleasedWgpu(descriptor.replace("::default()", " { label: None }")))
+    .toThrow("queue configuration changed");
 });
 
 test("Cargo can update only gpui-fast while its platform remains locked", () => {

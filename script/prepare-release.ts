@@ -40,6 +40,7 @@ export function dependency(key: string, input: any, workspace: Manifest, config:
       : { package: snapshotName(key), version: "=" + config.snapshot_version });
   }
   if ("git" in value) {
+    if (key === "wgpu") value.version = config.wgpu_version;
     if (!value.version) {
       if (key !== "proptest") throw new Error(`${key}: Git dependency has no registry version`);
       value.version = "1";
@@ -47,6 +48,17 @@ export function dependency(key: string, input: any, workspace: Manifest, config:
     for (const field of ["git", "rev", "branch", "tag"]) delete value[field];
   }
   return value;
+}
+
+/** Adapts the unreleased wgpu APIs upstream uses to `config.wgpu_version`. */
+export function adaptToReleasedWgpu(source: string): string {
+  const adapted = source
+    .replace(/^[ \t]*default_queue: wgpu::QueueDescriptor::default\(\),\r?\n/gm, "")
+    .replaceAll(".has_srgb_suffix()", ".is_srgb()");
+  if (adapted.includes("default_queue") || adapted.includes("QueueDescriptor")) {
+    throw new Error("gpui_wgpu's wgpu queue configuration changed; review adaptToReleasedWgpu");
+  }
+  return adapted;
 }
 
 export function prepare(config: ReleaseConfig, version: string, dest = DEST): void {
@@ -131,6 +143,17 @@ export function prepare(config: ReleaseConfig, version: string, dest = DEST): vo
   }
   writeFileSync(build, "// Modified for gpui-fast releases: bundle cbindgen inputs inside this package.\n"
     + original.replace(needle, '.join("src/fast/release_gpui")'));
+
+  const adapted = new Bun.Glob("**/*.rs").scanSync(resolve(dest, "gpui_wgpu/src"));
+  for (const file of [...adapted].map(path => resolve(dest, "gpui_wgpu/src", path))) {
+    const original = readFileSync(file, "utf8");
+    const source = adaptToReleasedWgpu(original);
+    if (source !== original) {
+      writeFileSync(file, `// Modified for gpui-fast releases: adapted to wgpu ${config.wgpu_version}.\n` + source);
+    }
+  }
+  console.warn(`wgpu: releasing against ${config.wgpu_version}, without upstream's unreleased`
+    + " Vulkan surface-drop fix (gfx-rs/wgpu#10230)");
 
   // Apache-2.0 section 4(b) requires change notices in distributed copies.
   const upstream = readToml(resolve(ROOT, "UPSTREAM"));

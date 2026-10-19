@@ -55,6 +55,12 @@ root or crate NOTICE files are included in the corresponding package.
 Release manifests do not inherit workspace Git patches. The Apple package
 bundles the GPUI source inputs used by cbindgen so its shader build does not
 depend on a sibling checkout directory.
+Upstream pins wgpu to a Git revision for its unreleased Vulkan surface-drop
+fix (gfx-rs/wgpu#10230). Release manifests use the registry version in
+`release.toml` (`wgpu_version`) instead, and the generated `gpui_wgpu` sources
+are adapted to it; preparation fails if upstream's wgpu usage changes in a way
+the adaptation does not cover. Published crates lack that fix until a wgpu
+release ships it.
 The core's Windows screen-capture feature constrains `windows-capture` to
 the registry version in `release.toml`; version 1.5 changed the constructor
 used by `zed-scap` and cannot compile that backend.
