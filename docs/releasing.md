@@ -30,7 +30,9 @@ dependency order. Cargo verifies each unpacked package before uploading it
 and waits until its version is available in the registry index.
 
 Changes to release configuration also run the validation jobs on pull requests,
-using version `0.1.0` for rehearsal; the publish job is disabled for PRs.
+using version `0.999.0` for rehearsal, above any published release so that
+sibling requirements resolve to the packages being rehearsed rather than to
+releases on crates.io; the publish job is disabled for PRs.
 Validation includes `cargo publish --workspace --dry-run`, which packages and
 builds all nine archives against Cargo's temporary registry without uploading
 anything. Packaging the entire workspace supports unpublished sibling packages.
