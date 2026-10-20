@@ -1111,6 +1111,51 @@ fn a_view_that_read_the_pointer_or_modifiers_is_rendered_again_when_they_change(
     assert_ne!(moved, shifted, "and which modifiers are held");
 }
 
+/// An interactive text with a clickable range, counting its renders.
+struct ClickableText {
+    builds: Rc<Cell<usize>>,
+}
+
+impl Render for ClickableText {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.builds.set(self.builds.get() + 1);
+        div().size(px(300.)).child(
+            crate::InteractiveText::new("text", crate::StyledText::new("a link"))
+                .on_click(vec![2..6], |_, _, _| {}),
+        )
+    }
+}
+
+/// An interactive text with clickable ranges reads where the pointer is, to
+/// show the hand over them, only while the pointer is over it: the view
+/// drawing it is not rendered again as the pointer moves elsewhere.
+#[test]
+fn a_clickable_text_reads_the_pointer_only_while_it_is_over_the_text() {
+    let mut cx = TestAppContext::single();
+    let builds = Rc::new(Cell::new(0));
+    let window = cx.add_window({
+        let builds = builds.clone();
+        move |_, _| ClickableText { builds }
+    });
+    let move_to = |cx: &mut TestAppContext, x: f32, y: f32| {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.simulate_mouse_move(crate::point(px(x), px(y)), cx);
+        })
+        .unwrap();
+        backgrounds(cx, window.into());
+    };
+    move_to(&mut cx, 200., 200.);
+    move_to(&mut cx, 205., 200.);
+    let away = builds.get();
+    for x in [210., 220., 230., 240.] {
+        move_to(&mut cx, x, 200.);
+    }
+    assert_eq!(builds.get(), away, "the pointer moving away from the text");
+    move_to(&mut cx, 1., 5.);
+    move_to(&mut cx, 20., 5.);
+    assert!(builds.get() > away, "the pointer moving over the text");
+}
+
 /// A text field that hands the platform its own input handler, and can
 /// notify itself once while the window asks it whether it accepts text.
 struct TextField {

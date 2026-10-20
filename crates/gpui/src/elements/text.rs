@@ -1019,8 +1019,8 @@ impl Element for InteractiveText {
             |interactive_state, window| {
                 let mut interactive_state = interactive_state.unwrap_or_default();
                 if let Some(click_listener) = self.click_listener.take() {
-                    let mouse_position = window.mouse_position();
-                    if let Ok(ix) = text_layout.index_for_position(mouse_position)
+                    if let Some(ix) =
+                        crate::fast::text::hovered_text_index(&text_layout, hitbox, window)
                         && self
                             .clickable_ranges
                             .iter()

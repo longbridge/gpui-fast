@@ -1152,6 +1152,27 @@ fn resolve_font_uncached(text_system: &crate::TextSystem, font: &crate::Font) ->
     );
 }
 
+/// The index in `layout`'s text under the pointer, for an interactive text
+/// showing the hand over its clickable ranges as it paints: none while its
+/// `hitbox` is not hovered, the pointer then not read.
+///
+/// Upstream reads the pointer as every interactive text with clickable ranges
+/// paints. Reading it makes the view painting the text depend on it
+/// ([`crate::fast::dependencies::read_pointer`]), so that view was rendered
+/// again for every move of the pointer anywhere in the window. Whether the
+/// hitbox is hovered changes only as the pointer comes in or goes out, and
+/// the hand is set for the hitbox, so it shows only while it is hovered.
+pub(crate) fn hovered_text_index(
+    layout: &TextLayout,
+    hitbox: &crate::Hitbox,
+    window: &Window,
+) -> Option<usize> {
+    if !hitbox.is_hovered(window) {
+        return None;
+    }
+    layout.index_for_position(window.mouse_position()).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{TextMeasureInputs, measure_text};
