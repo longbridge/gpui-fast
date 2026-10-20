@@ -2673,6 +2673,9 @@ unsafe fn is_ime_input_source_active() -> bool {
 }
 
 extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: bool) -> BOOL {
+    if crate::fast::native_focus::leaves_key_to_native_view(this, native_event) {
+        return NO;
+    }
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
 

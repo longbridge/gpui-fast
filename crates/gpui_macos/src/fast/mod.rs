@@ -8,3 +8,4 @@
 //! tests — is written here, one file per topic.
 
 pub(crate) mod composition;
+pub(crate) mod native_focus;
