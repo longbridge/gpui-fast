@@ -281,10 +281,10 @@ impl Element for &'static str {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         text_layout: &mut Self::RequestLayoutState,
-        fast_window: &mut Window,
-        fast_cx: &mut App,
+        _window: &mut Window,
+        _cx: &mut App,
     ) {
-        text_layout.prepaint(bounds, self, fast_window, fast_cx)
+        crate::fast::text::prepaint_text(text_layout, bounds, self, _window, _cx)
     }
 
     fn paint(
@@ -355,10 +355,10 @@ impl Element for SharedString {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         text_layout: &mut Self::RequestLayoutState,
-        fast_window: &mut Window,
-        fast_cx: &mut App,
+        _window: &mut Window,
+        _cx: &mut App,
     ) {
-        text_layout.prepaint(bounds, self.as_ref(), fast_window, fast_cx)
+        crate::fast::text::prepaint_text(text_layout, bounds, self.as_ref(), _window, _cx)
     }
 
     fn paint(
@@ -581,11 +581,10 @@ impl Element for StyledText {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
-        fast_window: &mut Window,
-        fast_cx: &mut App,
+        _window: &mut Window,
+        _cx: &mut App,
     ) {
-        self.layout
-            .prepaint(bounds, &self.text, fast_window, fast_cx)
+        crate::fast::text::prepaint_text(&self.layout, bounds, &self.text, _window, _cx)
     }
 
     fn paint(
@@ -640,16 +639,6 @@ impl TextLayout {
         fast_cx: &mut App,
     ) -> LayoutId {
         crate::fast::text::layout_text(self, text, runs, window, fast_cx)
-    }
-
-    fn prepaint(
-        &self,
-        bounds: Bounds<Pixels>,
-        text: &str,
-        fast_window: &mut Window,
-        fast_cx: &mut App,
-    ) {
-        crate::fast::text::prepaint_text(self, bounds, text, fast_window, fast_cx)
     }
 
     fn paint(&self, text: &str, window: &mut Window, cx: &mut App) {
