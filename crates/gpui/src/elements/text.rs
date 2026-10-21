@@ -281,10 +281,10 @@ impl Element for &'static str {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         text_layout: &mut Self::RequestLayoutState,
-        _window: &mut Window,
-        _cx: &mut App,
+        fast_window: &mut Window,
+        fast_cx: &mut App,
     ) {
-        text_layout.prepaint(bounds, self)
+        text_layout.prepaint(bounds, self, fast_window, fast_cx)
     }
 
     fn paint(
@@ -355,10 +355,10 @@ impl Element for SharedString {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         text_layout: &mut Self::RequestLayoutState,
-        _window: &mut Window,
-        _cx: &mut App,
+        fast_window: &mut Window,
+        fast_cx: &mut App,
     ) {
-        text_layout.prepaint(bounds, self.as_ref())
+        text_layout.prepaint(bounds, self.as_ref(), fast_window, fast_cx)
     }
 
     fn paint(
@@ -581,10 +581,11 @@ impl Element for StyledText {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
-        _window: &mut Window,
-        _cx: &mut App,
+        fast_window: &mut Window,
+        fast_cx: &mut App,
     ) {
-        self.layout.prepaint(bounds, &self.text)
+        self.layout
+            .prepaint(bounds, &self.text, fast_window, fast_cx)
     }
 
     fn paint(
@@ -641,16 +642,20 @@ impl TextLayout {
         crate::fast::text::layout_text(self, text, runs, window, fast_cx)
     }
 
-    fn prepaint(&self, bounds: Bounds<Pixels>, text: &str) {
-        let mut element_state = self.0.borrow_mut();
-        let element_state = element_state
-            .as_mut()
-            .with_context(|| format!("measurement has not been performed on {text}"))
-            .unwrap();
-        element_state.bounds = Some(bounds);
+    fn prepaint(
+        &self,
+        bounds: Bounds<Pixels>,
+        text: &str,
+        fast_window: &mut Window,
+        fast_cx: &mut App,
+    ) {
+        crate::fast::text::prepaint_text(self, bounds, text, fast_window, fast_cx)
     }
 
     fn paint(&self, text: &str, window: &mut Window, cx: &mut App) {
+        if !crate::fast::text::paintable(self, text) {
+            return;
+        }
         self.paint_lines(TextPaintPass::All, window, cx)
             .with_context(|| format!("failed to paint {text}"))
             .unwrap();
