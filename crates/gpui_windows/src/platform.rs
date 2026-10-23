@@ -1596,6 +1596,8 @@ pub(crate) fn check_device_lost(device: &ID3D11Device) -> bool {
     match device_state {
         Ok(_) => false,
         Err(err) => {
+            #[cfg(test)]
+            crate::fast::native_tests::device_removed(err.code().0);
             log::error!("DirectX device lost detected: {:?}", err);
             true
         }
@@ -1653,6 +1655,8 @@ pub(crate) fn handle_gpu_device_lost(
     text_system: &std::sync::Weak<DirectWriteTextSystem>,
 ) -> Result<()> {
     // Here we wait a bit to ensure the system has time to recover from the device lost state.
+    #[cfg(test)]
+    crate::fast::native_tests::recovery_started();
     // If we don't wait, the final drawing result will be blank.
     std::thread::sleep(std::time::Duration::from_millis(350));
 
@@ -1676,6 +1680,8 @@ pub(crate) fn handle_gpu_device_lost(
     }
     if let Some(all_windows) = all_windows.upgrade() {
         for window in all_windows.read().iter() {
+            #[cfg(test)]
+            crate::fast::native_tests::recovery_locked();
             unsafe {
                 SendMessageW(
                     window.as_raw(),
@@ -1697,6 +1703,8 @@ pub(crate) fn handle_gpu_device_lost(
             }
         }
     }
+    #[cfg(test)]
+    crate::fast::native_tests::recovery_finished();
     Ok(())
 }
 

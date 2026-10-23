@@ -110,11 +110,15 @@ pub(crate) fn on_input(
     mut callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>,
 ) {
     let request = window.state.fast_frame_request.clone();
+    #[cfg(test)]
+    let hwnd = gpui::PlatformWindow::get_raw_handle(window).0 as usize;
     window
         .state
         .callbacks
         .input
         .set(Some(Box::new(move |event| {
+            #[cfg(test)]
+            crate::fast::native_tests::input(hwnd);
             let result = callback(event);
             request.request();
             result
@@ -123,7 +127,15 @@ pub(crate) fn on_input(
 
 pub(crate) fn defer_draw(window: &WindowsWindowInner, handle: HWND) {
     // Validate nested paints now and retry at VSync instead of spinning a modal message loop.
+    unsafe {
+        ValidateRect(Some(handle), None).ok().log_err();
+    }
     window.state.fast_frame_request.request();
+}
+
+pub(crate) fn validate_current_paint(handle: HWND) {
+    // Retire only the current paint, before callbacks can request another one.
+    // A trailing ValidateRect would also erase a concurrent worker invalidation.
     unsafe {
         ValidateRect(Some(handle), None).ok().log_err();
     }
@@ -199,6 +211,8 @@ pub(crate) fn begin_vsync_thread(platform: &WindowsPlatform) {
                     break;
                 };
                 for hwnd in all_windows.read().iter() {
+                    #[cfg(test)]
+                    crate::fast::native_tests::before_frame_request(hwnd.as_raw());
                     if !hwnd.fast_frame_request.take() {
                         continue;
                     }
@@ -216,6 +230,8 @@ pub(crate) fn begin_vsync_thread(platform: &WindowsPlatform) {
                         RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE)
                             .ok()
                             .log_err();
+                        #[cfg(test)]
+                        crate::fast::native_tests::paint_invalidated(hwnd.as_raw());
                     }
                 }
             }

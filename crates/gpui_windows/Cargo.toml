@@ -79,3 +79,6 @@ windows-registry.workspace = true
 
 [package.metadata.cargo-shear]
 ignored = ["scap"]
+
+[dev-dependencies]
+serde_json.workspace = true

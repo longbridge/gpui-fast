@@ -1332,6 +1332,8 @@ impl WindowsWindowInner {
         // between) is treated as a forced render so it both clears
         // `skip_draws` and bypasses the view cache.
         self.state.force_render_pending.set(true);
+        #[cfg(test)]
+        crate::fast::native_tests::recovered();
         Some(0)
     }
 
@@ -1351,6 +1353,9 @@ impl WindowsWindowInner {
             return Some(0);
         };
         let mut request_frame = self.state.callbacks.request_frame.take()?;
+        crate::fast::frame_schedule::validate_current_paint(handle);
+        #[cfg(test)]
+        crate::fast::native_tests::paint_started(handle);
 
         self.state.direct_manipulation.update();
 
@@ -1383,7 +1388,10 @@ impl WindowsWindowInner {
 
         self.state.callbacks.request_frame.set(Some(request_frame));
         self.update_ime_enabled(handle);
-        unsafe { ValidateRect(Some(handle), None).ok().log_err() };
+        #[cfg(test)]
+        crate::fast::native_tests::paint_finished(handle);
+        #[cfg(test)]
+        crate::fast::native_tests::paint_returned(handle);
 
         Some(0)
     }

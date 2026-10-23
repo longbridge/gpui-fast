@@ -1,19 +1,15 @@
-# Windows idle frame scheduling
+# Windows frame scheduling validation
 
-## Release idle benchmark
+## Earlier release benchmark
 
-2026-10-23, compared with `91f60ec0bc32`. Both executables were built in the same checkout with the same lock and workspace release settings; only the Windows backend changed. The median process CPU cycle count fell **96.03%**.
+Measured before the paint-order follow-up, against `91f60ec0bc32`, with the same checkout, lock and release settings.
 
-| Backend | Median process CPU cycles | Range |
+| Backend | Median process CPU cycles / 20 s | Range |
 |---|---:|---:|
-| Unmodified | 250,852,000 | 248,406,720–261,243,420 |
-| Requested frames + sleeping worker + device notification | 9,963,020 | 9,594,460–10,032,040 |
+| Baseline | 250,852,000 | 248,406,720–261,243,420 |
+| Demand-driven scheduler | 9,963,020 | 9,594,460–10,032,040 |
 
-A static 1280×800 logical-pixel window, 3 seconds warmup followed by 20 seconds measurement, three fresh processes per variant. Order: baseline/patched, patched/baseline, baseline/patched. All six intervals had zero view renders. This measures idle framework overhead, not whole-application CPU utilization. `QueryProcessCycleTime` is the comparison metric; raw `GetProcessTimes` readings are retained but are too coarse for the small patched workload.
-
-Ryzen 7 5800X3D, RTX 4060, Windows build 26200, 1920×1080 at 120 Hz, high-performance power plan. DirectComposition is disabled in this reproducer. Rust 1.99.1 MSVC, thin LTO, one codegen unit, static CRT. [Raw samples and settings](windows-idle-frames.json).
-
-Run on Windows:
+Reduction: 96.03%. Static 1280x800 window, 3 s warmup, three processes each, alternating order, zero view renders. Idle framework overhead, not whole-application utilization. Ryzen 7 5800X3D, RTX 4060, Windows 26200, 120 Hz, high-performance power plan, DirectComposition disabled. Rust 1.99.1 MSVC, thin LTO, one codegen unit, static CRT. Raw samples are retained locally. These figures have not been remeasured after the paint-order follow-up.
 
 ```powershell
 cargo build -p gpui_perf --example windows_idle_frames --release --locked
@@ -21,16 +17,23 @@ cargo build -p gpui_perf --example windows_idle_frames --release --locked
 .\target\release\examples\windows_idle_frames.exe verify.json --verify
 ```
 
-`--verify` additionally updates two windows 50 times and runs 120 chained frame callbacks. It passed on the measured patched release executable. The idle assertion deliberately rejects runs disturbed by a view redraw.
+The measured release executable passed `--verify`: 50 updates across two windows and 120 callbacks.
 
-## GPU recovery: separate minimal test application
+## Native regression tests
 
-The GPU-reset check used a **dev-build minimal native GPUI test application** linked to the modified `gpui_windows` backend and its extracted `fast::frame_schedule` implementation. This was separate from the release benchmark above. Two idle windows were open on the same RTX 4060 setup, with DirectComposition disabled.
+Minimal native GPUI application, dev build, interactive Windows desktop; **not a full Zed application test**. Run each condition in a fresh process:
 
-An actual `DXCap.exe -forcetdr` caused `GetDeviceRemovedReason` to return `0x887A0007` (`DXGI_ERROR_DEVICE_RESET`). Temporary observation counters confirmed that the device-removal notification woke the scheduler, both windows recreated their renderers, view rendering resumed, 120 chained callbacks completed, and the worker returned to idle. No simulated device-loss result was substituted in this check. The temporary test application and counters were removed afterwards; neither measured release executable contains them.
+```powershell
+$env:GPUI_NATIVE_CASE = 'paint_race' # or input_restore / recovery
+$env:GPUI_NATIVE_DCOMP = '1'        # repeat with 0
+cargo test -p gpui_windows --features test-support --lib fast::native_tests::interactive_frame_lifecycle -- --ignored --exact --nocapture --test-threads=1
+```
 
-The test target was the Windows backend and extracted scheduler within this minimal application. **Zed itself was not built or tested; this is not an end-to-end Zed application recovery test.**
+- `paint_race`: synchronize actual worker invalidation after callbacks re-arm demand, before the current paint returns. Trailing validation restored: update region lost, callbacks stop at 1/12. Fixed order: region retained, 12/12. Both DirectComposition modes.
+- `input_restore`: approximately 240 Hz input invalidates the view. Both modes produced 90 successful DXGI presents in the 100–850 ms tail, then parked. Minimize with a view change, restore without extra notify, 120 two-window callbacks, and survivor drawing passed.
+- `recovery`: requires `GPUI_TEST_ALLOW_GPU_RESET=1` and `DXCap.exe`; this resets the actual GPU. Set `GPUI_NATIVE_CHURN=0` for the passing minimized-window case. Both modes detected `0x887A0007`, recreated both renderers, restored the changed view and completed 120 callbacks.
+- **Known pre-existing failure:** recovery with `GPUI_NATIVE_CHURN=1` overlaps window close/open with GPU recovery and hangs in both this branch and baseline `91f60ec0bc32` with identical hooks. A test-only 350 ms pause after acquiring the window-list read lock forces the overlap with synchronous UI dispatch; the UI waits for a write lock. An 8 s watchdog terminates the test process. This issue remains unfixed.
 
-## Unit tests
+Optional `GPUI_NATIVE_TEST_LOG` writes raw observations to a local JSON file. DXGI Present success is observed, not physical scanout.
 
-The three unit tests cover per-window request coalescing, stopping a sleeping worker, and overlapping old/new workers during GPU replacement. They do not trigger a GPU reset.
+Three scheduler unit tests, clippy, changed-file formatting and `script/check-upstream` pass; an existing unused import warning remains.
