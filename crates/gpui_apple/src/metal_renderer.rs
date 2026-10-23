@@ -406,6 +406,7 @@ impl MetalRenderer {
             reason = "PlatformWindow::sprite_atlas requires Arc, not Send or Sync"
         )]
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), supports_shared_storage));
+        crate::fast::dynamic_textures::init(&device);
         let mut cache = ptr::null_mut();
         // SAFETY: The output pointer is writable and both optional attribute dictionaries are absent.
         let status = unsafe {
@@ -1274,7 +1275,9 @@ impl MetalRenderer {
             return;
         }
 
-        let Some(texture) = self.sprite_atlas.metal_texture(texture_id) else {
+        let texture = crate::fast::dynamic_textures::metal_texture(&self.device, texture_id)
+            .or_else(|| self.sprite_atlas.metal_texture(texture_id));
+        let Some(texture) = texture else {
             return;
         };
         let texture_size = size(
@@ -1346,7 +1349,9 @@ impl MetalRenderer {
             return;
         }
 
-        let Some(texture) = self.sprite_atlas.metal_texture(texture_id) else {
+        let texture = crate::fast::dynamic_textures::metal_texture(&self.device, texture_id)
+            .or_else(|| self.sprite_atlas.metal_texture(texture_id));
+        let Some(texture) = texture else {
             return;
         };
         let texture_size = size(
