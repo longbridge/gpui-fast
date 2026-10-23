@@ -2,6 +2,8 @@
 
 use std::{ffi::c_void, sync::Arc};
 
+use gpui_util::ResultExt;
+
 use windows::{
     Win32::{
         Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
@@ -21,11 +23,16 @@ pub(crate) struct DeviceWake {
     event: HANDLE,
     cookie: u32,
     wait: HANDLE,
-    _wake: Arc<FrameWake>,
+    wake: Arc<FrameWake>,
 }
 
 impl DeviceWake {
-    pub(crate) fn new(device: &ID3D11Device, wake: Arc<FrameWake>) -> windows::core::Result<Self> {
+    /// Without a registration the scheduler falls back to polling for device loss.
+    pub(crate) fn start(device: &ID3D11Device, wake: &Arc<FrameWake>) -> Option<Self> {
+        Self::new(device, wake.clone()).log_err()
+    }
+
+    fn new(device: &ID3D11Device, wake: Arc<FrameWake>) -> windows::core::Result<Self> {
         let device: ID3D11Device4 = device.cast()?;
         unsafe {
             let event = CreateEventW(None, false, false, None)?;
@@ -54,7 +61,7 @@ impl DeviceWake {
                 event,
                 cookie,
                 wait,
-                _wake: wake,
+                wake,
             })
         }
     }
@@ -69,8 +76,15 @@ impl Drop for DeviceWake {
     fn drop(&mut self) {
         unsafe {
             // The callback only signals the scheduler, so joining it never waits on the UI.
-            UnregisterWaitEx(self.wait, Some(INVALID_HANDLE_VALUE))
-                .expect("unregistering device removal wait");
+            // This can run while the worker unwinds from a device loss, so it must not panic.
+            if UnregisterWaitEx(self.wait, Some(INVALID_HANDLE_VALUE))
+                .log_err()
+                .is_none()
+            {
+                // The callback may still run, so keep everything it can touch alive.
+                std::mem::forget(self.wake.clone());
+                return;
+            }
             self.device.UnregisterDeviceRemoved(self.cookie);
             let _ = CloseHandle(self.event);
         }

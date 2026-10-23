@@ -27,7 +27,7 @@ pub(crate) struct DirectManipulationHandler {
     window: HWND,
     scale_factor: Rc<Cell<f32>>,
     pending_events: Rc<RefCell<Vec<PlatformInput>>>,
-    pub(crate) fast_frame_request: Arc<crate::fast::frame_schedule::FrameRequest>,
+    pub(crate) fast_manipulation: crate::fast::frame_schedule::ManipulationFrames,
 }
 
 impl DirectManipulationHandler {
@@ -93,7 +93,9 @@ impl DirectManipulationHandler {
                 window,
                 scale_factor,
                 pending_events,
-                fast_frame_request,
+                fast_manipulation: crate::fast::frame_schedule::ManipulationFrames::new(
+                    fast_frame_request,
+                ),
             })
         }
     }
@@ -109,7 +111,7 @@ impl DirectManipulationHandler {
             if GetPointerType(pointer_id, &mut pointer_type).is_ok() && pointer_type == PT_TOUCHPAD
             {
                 self.viewport.SetContact(pointer_id).log_err();
-                crate::fast::frame_schedule::request(&self.fast_frame_request);
+                crate::fast::frame_schedule::ManipulationFrames::contact(&self.fast_manipulation);
             }
         }
     }
@@ -223,7 +225,7 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
         if current == previous {
             return Ok(());
         }
-        crate::fast::frame_schedule::request(&self.fast_frame_request);
+        crate::fast::frame_schedule::FrameRequest::request(&self.fast_frame_request);
 
         // A new gesture interrupted inertia, so end the old sequence.
         if current == DIRECTMANIPULATION_RUNNING && previous == DIRECTMANIPULATION_INERTIA {

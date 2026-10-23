@@ -20,7 +20,7 @@ use windows::{
     UI::ViewManagement::UISettings,
     Win32::{
         Foundation::*,
-        Graphics::Direct3D11::ID3D11Device,
+        Graphics::{Direct3D11::ID3D11Device, Gdi::*},
         Security::Credentials::*,
         System::{
             Com::*,
@@ -39,25 +39,25 @@ use windows::{
 use crate::*;
 use gpui::*;
 
-pub(crate) struct TrackedWindow {
+struct TrackedWindow {
     handle: SafeHwnd,
-    pub(crate) frame_signal: Arc<PlatformFrameSignal>,
-    pub(crate) fast_frame_request: Arc<crate::fast::frame_schedule::FrameRequest>,
+    frame_signal: Arc<PlatformFrameSignal>,
+    fast_frame_request: Arc<crate::fast::frame_schedule::FrameRequest>,
 }
 
 impl TrackedWindow {
-    pub(crate) fn as_raw(&self) -> HWND {
+    fn as_raw(&self) -> HWND {
         self.handle.as_raw()
     }
 }
 
 pub struct WindowsPlatform {
-    pub(crate) inner: Rc<WindowsPlatformInner>,
-    pub(crate) raw_window_handles: Arc<RwLock<SmallVec<[TrackedWindow; 4]>>>,
+    inner: Rc<WindowsPlatformInner>,
+    raw_window_handles: Arc<RwLock<SmallVec<[TrackedWindow; 4]>>>,
     /// The windowing mode to start in, applied when `run` starts. Windowed when unset.
     initial_windowing: RefCell<Option<WindowingRequest>>,
     /// Set to stop the current `VSyncProvider` thread, which runs while windowed.
-    pub(crate) vsync_stop: RefCell<Option<Arc<AtomicBool>>>,
+    vsync_stop: RefCell<Option<Arc<AtomicBool>>>,
     // The below members will never change throughout the entire lifecycle of the app.
     /// Created with `headless()`: never windowed, and without a real text system.
     headless: bool,
@@ -65,12 +65,12 @@ pub struct WindowsPlatform {
     background_executor: BackgroundExecutor,
     foreground_executor: ForegroundExecutor,
     text_system: Arc<dyn PlatformTextSystem>,
-    pub(crate) direct_write_text_system: Option<Arc<DirectWriteTextSystem>>,
+    direct_write_text_system: Option<Arc<DirectWriteTextSystem>>,
     drop_target_helper: Option<IDropTargetHelper>,
     /// Flag to instruct the `VSyncProvider` thread to invalidate the directx devices
     /// as resizing them has failed, causing us to have lost at least the render target.
-    pub(crate) invalidate_devices: Arc<AtomicBool>,
-    pub(crate) handle: HWND,
+    invalidate_devices: Arc<AtomicBool>,
+    handle: HWND,
     suspend_resume_notification: RefCell<Option<HPOWERNOTIFY>>,
     disable_direct_composition: bool,
     has_package_identity: bool,
@@ -78,11 +78,11 @@ pub struct WindowsPlatform {
     system_notifications: RefCell<SystemNotificationState>,
 }
 
-pub(crate) struct WindowsPlatformInner {
-    pub(crate) state: WindowsPlatformState,
+struct WindowsPlatformInner {
+    state: WindowsPlatformState,
     raw_window_handles: std::sync::Weak<RwLock<SmallVec<[TrackedWindow; 4]>>>,
     // The below members will never change throughout the entire lifecycle of the app.
-    pub(crate) validation_number: usize,
+    validation_number: usize,
     main_receiver: PriorityQueueReceiver<RunnableVariant>,
     dispatcher: Arc<WindowsDispatcher>,
 }
@@ -98,7 +98,7 @@ pub(crate) struct WindowsPlatformState {
     /// Shared with each window to coordinate draws across windows on the UI
     /// thread; see [`DrawCoordinator`].
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
-    pub(crate) directx_devices: RefCell<Option<DirectXDevices>>,
+    directx_devices: RefCell<Option<DirectXDevices>>,
 }
 
 #[derive(Default)]
@@ -430,7 +430,85 @@ impl WindowsPlatform {
     }
 
     fn begin_vsync_thread(&self) {
-        crate::fast::frame_schedule::begin_vsync_thread(self);
+        let Some(directx_devices) = self.inner.state.directx_devices.borrow().clone() else {
+            return;
+        };
+        let Some(direct_write_text_system) = &self.direct_write_text_system else {
+            return;
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        *self.vsync_stop.borrow_mut() = Some(stop.clone());
+        let mut directx_device = directx_devices;
+        let platform_window: SafeHwnd = self.handle.into();
+        let validation_number = self.inner.validation_number;
+        let all_windows = Arc::downgrade(&self.raw_window_handles);
+        let text_system = Arc::downgrade(direct_write_text_system);
+        let invalidate_devices = self.invalidate_devices.clone();
+        let fast_frame_wake =
+            crate::fast::frame_schedule::frame_wake(&self.inner.state.draw_coordinator);
+
+        std::thread::Builder::new()
+            .name("VSyncProvider".to_owned())
+            .spawn(move || {
+                let vsync_provider = VSyncProvider::new();
+                let mut fast_worker = crate::fast::frame_schedule::Worker::new(
+                    fast_frame_wake,
+                    &directx_device.device,
+                );
+                while crate::fast::frame_schedule::Worker::wait(&fast_worker, &stop) {
+                    let signal_source = vsync_provider.wait_for_vsync();
+                    let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
+                    if stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if check_device_lost(&directx_device.device)
+                        || invalidate_devices.fetch_and(false, Ordering::Acquire)
+                    {
+                        if let Err(err) = handle_gpu_device_lost(
+                            &mut directx_device,
+                            platform_window.as_raw(),
+                            validation_number,
+                            &all_windows,
+                            &text_system,
+                        ) {
+                            panic!("Device lost: {err}");
+                        }
+                        crate::fast::frame_schedule::Worker::watch(
+                            &mut fast_worker,
+                            &directx_device.device,
+                        );
+                    }
+                    let Some(all_windows) = all_windows.upgrade() else {
+                        break;
+                    };
+                    for hwnd in all_windows.read().iter() {
+                        if !crate::fast::frame_schedule::take_request(
+                            hwnd.as_raw(),
+                            &hwnd.fast_frame_request,
+                        ) {
+                            continue;
+                        }
+                        unsafe {
+                            if let Some(signal_at) = signal_at {
+                                if IsWindowVisible(hwnd.as_raw()).as_bool()
+                                    && !IsIconic(hwnd.as_raw()).as_bool()
+                                {
+                                    hwnd.frame_signal.record(signal_at, signal_source);
+                                } else {
+                                    // Hidden windows may not consume WM_PAINT until shown again.
+                                    hwnd.frame_signal.take();
+                                }
+                            }
+                            RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE)
+                                .ok()
+                                .log_err();
+                            #[cfg(test)]
+                            crate::fast::native_tests::paint_invalidated(hwnd.as_raw());
+                        }
+                    }
+                }
+            })
+            .unwrap();
     }
 }
 
@@ -1591,7 +1669,7 @@ fn should_auto_hide_scrollbars() -> Result<bool> {
     Ok(ui_settings.AutoHideScrollBars()?)
 }
 
-pub(crate) fn check_device_lost(device: &ID3D11Device) -> bool {
+fn check_device_lost(device: &ID3D11Device) -> bool {
     let device_state = unsafe { device.GetDeviceRemovedReason() };
     match device_state {
         Ok(_) => false,
@@ -1647,16 +1725,16 @@ fn is_window_station_visible() -> bool {
     result.is_ok() && flags.dwFlags & WSF_VISIBLE as u32 != 0
 }
 
-pub(crate) fn handle_gpu_device_lost(
+fn handle_gpu_device_lost(
     directx_devices: &mut DirectXDevices,
     platform_window: HWND,
     validation_number: usize,
     all_windows: &std::sync::Weak<RwLock<SmallVec<[TrackedWindow; 4]>>>,
     text_system: &std::sync::Weak<DirectWriteTextSystem>,
 ) -> Result<()> {
-    // Here we wait a bit to ensure the system has time to recover from the device lost state.
     #[cfg(test)]
     crate::fast::native_tests::recovery_started();
+    // Here we wait a bit to ensure the system has time to recover from the device lost state.
     // If we don't wait, the final drawing result will be blank.
     std::thread::sleep(std::time::Duration::from_millis(350));
 

@@ -39,7 +39,12 @@ static PAINT_TARGET: AtomicUsize = AtomicUsize::new(0);
 static PAINT_PHASE: AtomicUsize = AtomicUsize::new(0);
 static PAINT_RETAINED: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn paint_returned(hwnd: HWND) {
+pub(crate) fn paint_done(hwnd: HWND) {
+    paint_finished(hwnd);
+    paint_returned(hwnd);
+}
+
+fn paint_returned(hwnd: HWND) {
     if PAINT_TARGET.load(Ordering::SeqCst) == hwnd.0 as usize
         && PAINT_PHASE.load(Ordering::SeqCst) == 4
     {
@@ -84,7 +89,7 @@ pub(crate) fn before_frame_request(hwnd: HWND) {
         std::thread::sleep(Duration::from_millis(1));
     }
 }
-pub(crate) fn paint_finished(hwnd: HWND) {
+fn paint_finished(hwnd: HWND) {
     if PAINT_TARGET.load(Ordering::SeqCst) != hwnd.0 as usize
         || PAINT_PHASE.load(Ordering::SeqCst) != 2
     {

@@ -269,7 +269,7 @@ impl WindowsWindowInner {
             self.state
                 .invalidate_devices
                 .store(true, std::sync::atomic::Ordering::Release);
-            crate::fast::frame_schedule::request(&self.state.fast_frame_request);
+            crate::fast::frame_schedule::FrameRequest::request(&self.state.fast_frame_request);
         }
         if let Some(mut callback) = self.state.callbacks.resize.take() {
             callback(new_logical_size, scale_factor);
@@ -1389,9 +1389,7 @@ impl WindowsWindowInner {
         self.state.callbacks.request_frame.set(Some(request_frame));
         self.update_ime_enabled(handle);
         #[cfg(test)]
-        crate::fast::native_tests::paint_finished(handle);
-        #[cfg(test)]
-        crate::fast::native_tests::paint_returned(handle);
+        crate::fast::native_tests::paint_done(handle);
 
         Some(0)
     }
