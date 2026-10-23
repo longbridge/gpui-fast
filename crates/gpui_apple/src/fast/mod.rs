@@ -9,6 +9,7 @@
 //! tests — is written here, one file per topic.
 
 pub(crate) mod composition;
+pub(crate) mod dynamic_textures;
 pub(crate) mod layers;
 pub(crate) mod paths;
 pub(crate) mod rounded_clip;
