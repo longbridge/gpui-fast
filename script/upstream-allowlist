@@ -19,8 +19,10 @@ crates/gpui_apple/src/metal_renderer.rs hunk=10 # draw_primitives_to_texture ret
 crates/gpui/src/gpui.rs hunk=12 # exports fast::composition's public API (window composition, zed-industries/zed#62379) item by item, a list rustfmt spreads over six lines next to the scroll layer exports
 crates/gpui/src/platform.rs hunk=17 # PlatformWindow's four window composition methods (zed-industries/zed#62379), each a default body forwarding to fast::composition, which rustfmt spreads over three or four lines
 crates/gpui_macos/src/window.rs hunk=19 # PlatformWindow's four window composition methods (zed-industries/zed#62379), each a body forwarding to fast::composition, which rustfmt spreads over three to six lines
-crates/gpui_windows/src/window.rs hunk=16 # PlatformWindow's four window composition methods (zed-industries/zed#62379), each a one-line body forwarding to fast::composition; a trait impl's methods cannot move out of it
+crates/gpui_windows/src/window.rs hunk=18 # PlatformWindow's four window composition methods (zed-industries/zed#62379), each a one-line body forwarding to fast::composition; a trait impl's methods cannot move out of it; post-presentation frame requests add two adjacent hooks
 crates/gpui_linux/src/linux/wayland/window.rs hunk=19 # WaylandWindow's four window composition methods (zed-industries/zed#62379), each a body forwarding to fast::composition::wayland, which rustfmt spreads over three or six lines
 crates/gpui_linux/src/linux/x11/window.rs hunk=19 # X11Window's four window composition methods (zed-industries/zed#62379), each a body forwarding to fast::composition::x11, which rustfmt spreads over three or six lines
 
 crates/gpui_linux/src/linux/x11/client.rs added=46 # existing overlay input hook plus native pointer recipient, coordinate and focus-id hooks; all routing logic stays in fast::composition::x11
+
+crates/gpui_windows/src/platform.rs removed=90 # begin_vsync_thread forwards to fast::frame_schedule, which owns demand-driven scheduling and device-removal wakeups

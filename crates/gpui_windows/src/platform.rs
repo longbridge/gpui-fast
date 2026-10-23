@@ -20,7 +20,7 @@ use windows::{
     UI::ViewManagement::UISettings,
     Win32::{
         Foundation::*,
-        Graphics::{Direct3D11::ID3D11Device, Gdi::*},
+        Graphics::Direct3D11::ID3D11Device,
         Security::Credentials::*,
         System::{
             Com::*,
@@ -39,24 +39,25 @@ use windows::{
 use crate::*;
 use gpui::*;
 
-struct TrackedWindow {
+pub(crate) struct TrackedWindow {
     handle: SafeHwnd,
-    frame_signal: Arc<PlatformFrameSignal>,
+    pub(crate) frame_signal: Arc<PlatformFrameSignal>,
+    pub(crate) fast_frame_request: Arc<crate::fast::frame_schedule::FrameRequest>,
 }
 
 impl TrackedWindow {
-    fn as_raw(&self) -> HWND {
+    pub(crate) fn as_raw(&self) -> HWND {
         self.handle.as_raw()
     }
 }
 
 pub struct WindowsPlatform {
-    inner: Rc<WindowsPlatformInner>,
-    raw_window_handles: Arc<RwLock<SmallVec<[TrackedWindow; 4]>>>,
+    pub(crate) inner: Rc<WindowsPlatformInner>,
+    pub(crate) raw_window_handles: Arc<RwLock<SmallVec<[TrackedWindow; 4]>>>,
     /// The windowing mode to start in, applied when `run` starts. Windowed when unset.
     initial_windowing: RefCell<Option<WindowingRequest>>,
     /// Set to stop the current `VSyncProvider` thread, which runs while windowed.
-    vsync_stop: RefCell<Option<Arc<AtomicBool>>>,
+    pub(crate) vsync_stop: RefCell<Option<Arc<AtomicBool>>>,
     // The below members will never change throughout the entire lifecycle of the app.
     /// Created with `headless()`: never windowed, and without a real text system.
     headless: bool,
@@ -64,12 +65,12 @@ pub struct WindowsPlatform {
     background_executor: BackgroundExecutor,
     foreground_executor: ForegroundExecutor,
     text_system: Arc<dyn PlatformTextSystem>,
-    direct_write_text_system: Option<Arc<DirectWriteTextSystem>>,
+    pub(crate) direct_write_text_system: Option<Arc<DirectWriteTextSystem>>,
     drop_target_helper: Option<IDropTargetHelper>,
     /// Flag to instruct the `VSyncProvider` thread to invalidate the directx devices
     /// as resizing them has failed, causing us to have lost at least the render target.
-    invalidate_devices: Arc<AtomicBool>,
-    handle: HWND,
+    pub(crate) invalidate_devices: Arc<AtomicBool>,
+    pub(crate) handle: HWND,
     suspend_resume_notification: RefCell<Option<HPOWERNOTIFY>>,
     disable_direct_composition: bool,
     has_package_identity: bool,
@@ -77,11 +78,11 @@ pub struct WindowsPlatform {
     system_notifications: RefCell<SystemNotificationState>,
 }
 
-struct WindowsPlatformInner {
-    state: WindowsPlatformState,
+pub(crate) struct WindowsPlatformInner {
+    pub(crate) state: WindowsPlatformState,
     raw_window_handles: std::sync::Weak<RwLock<SmallVec<[TrackedWindow; 4]>>>,
     // The below members will never change throughout the entire lifecycle of the app.
-    validation_number: usize,
+    pub(crate) validation_number: usize,
     main_receiver: PriorityQueueReceiver<RunnableVariant>,
     dispatcher: Arc<WindowsDispatcher>,
 }
@@ -97,7 +98,7 @@ pub(crate) struct WindowsPlatformState {
     /// Shared with each window to coordinate draws across windows on the UI
     /// thread; see [`DrawCoordinator`].
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
-    directx_devices: RefCell<Option<DirectXDevices>>,
+    pub(crate) directx_devices: RefCell<Option<DirectXDevices>>,
 }
 
 #[derive(Default)]
@@ -420,9 +421,7 @@ impl WindowsPlatform {
     /// Stops vsync and releases the DirectX devices. No window may be open.
     fn detach_gpu(&self) {
         if let Some(stop) = self.vsync_stop.borrow_mut().take() {
-            // Not joined: the thread can be sending this thread a message. It exits after its
-            // next vsync, and drops its reference to the devices then.
-            stop.store(true, Ordering::Release);
+            crate::fast::frame_schedule::stop_vsync(stop, &self.inner.state.draw_coordinator);
         }
         if let Some(text_system) = &self.direct_write_text_system {
             text_system.release_gpu();
@@ -431,67 +430,7 @@ impl WindowsPlatform {
     }
 
     fn begin_vsync_thread(&self) {
-        let Some(directx_devices) = self.inner.state.directx_devices.borrow().clone() else {
-            return;
-        };
-        let Some(direct_write_text_system) = &self.direct_write_text_system else {
-            return;
-        };
-        let stop = Arc::new(AtomicBool::new(false));
-        *self.vsync_stop.borrow_mut() = Some(stop.clone());
-        let mut directx_device = directx_devices;
-        let platform_window: SafeHwnd = self.handle.into();
-        let validation_number = self.inner.validation_number;
-        let all_windows = Arc::downgrade(&self.raw_window_handles);
-        let text_system = Arc::downgrade(direct_write_text_system);
-        let invalidate_devices = self.invalidate_devices.clone();
-
-        std::thread::Builder::new()
-            .name("VSyncProvider".to_owned())
-            .spawn(move || {
-                let vsync_provider = VSyncProvider::new();
-                loop {
-                    let signal_source = vsync_provider.wait_for_vsync();
-                    let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
-                    if stop.load(Ordering::Acquire) {
-                        break;
-                    }
-                    if check_device_lost(&directx_device.device)
-                        || invalidate_devices.fetch_and(false, Ordering::Acquire)
-                    {
-                        if let Err(err) = handle_gpu_device_lost(
-                            &mut directx_device,
-                            platform_window.as_raw(),
-                            validation_number,
-                            &all_windows,
-                            &text_system,
-                        ) {
-                            panic!("Device lost: {err}");
-                        }
-                    }
-                    let Some(all_windows) = all_windows.upgrade() else {
-                        break;
-                    };
-                    for hwnd in all_windows.read().iter() {
-                        unsafe {
-                            if let Some(signal_at) = signal_at {
-                                if IsWindowVisible(hwnd.as_raw()).as_bool()
-                                    && !IsIconic(hwnd.as_raw()).as_bool()
-                                {
-                                    hwnd.frame_signal.record(signal_at, signal_source);
-                                } else {
-                                    // Hidden windows may not consume WM_PAINT until shown again.
-                                    hwnd.frame_signal.take();
-                                }
-                            }
-                            RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE)
-                                .ok()
-                                .log_err();
-                        }
-                    }
-                }
-            })
-            .unwrap();
+        crate::fast::frame_schedule::begin_vsync_thread(self);
     }
 }
 
@@ -754,7 +693,9 @@ impl Platform for WindowsPlatform {
         self.raw_window_handles.write().push(TrackedWindow {
             handle: handle.into(),
             frame_signal: window.state.frame_signal.clone(),
+            fast_frame_request: Arc::clone(&window.state.fast_frame_request),
         });
+        crate::fast::frame_schedule::schedule_frame(&window);
 
         Ok(Box::new(window))
     }
@@ -1402,7 +1343,7 @@ impl WindowsPlatformInner {
 impl Drop for WindowsPlatform {
     fn drop(&mut self) {
         if let Some(stop) = self.vsync_stop.borrow_mut().take() {
-            stop.store(true, Ordering::Release);
+            crate::fast::frame_schedule::stop_vsync(stop, &self.inner.state.draw_coordinator);
         }
         unsafe {
             if let Some(notification) = self.suspend_resume_notification.borrow_mut().take() {
@@ -1650,7 +1591,7 @@ fn should_auto_hide_scrollbars() -> Result<bool> {
     Ok(ui_settings.AutoHideScrollBars()?)
 }
 
-fn check_device_lost(device: &ID3D11Device) -> bool {
+pub(crate) fn check_device_lost(device: &ID3D11Device) -> bool {
     let device_state = unsafe { device.GetDeviceRemovedReason() };
     match device_state {
         Ok(_) => false,
@@ -1704,7 +1645,7 @@ fn is_window_station_visible() -> bool {
     result.is_ok() && flags.dwFlags & WSF_VISIBLE as u32 != 0
 }
 
-fn handle_gpu_device_lost(
+pub(crate) fn handle_gpu_device_lost(
     directx_devices: &mut DirectXDevices,
     platform_window: HWND,
     validation_number: usize,
