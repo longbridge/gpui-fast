@@ -5,6 +5,7 @@ mod cached_layout;
 mod dependencies;
 mod dispatch;
 mod global_id;
+mod interactive_text;
 mod layers;
 mod layers_lists;
 mod layers_oracle;

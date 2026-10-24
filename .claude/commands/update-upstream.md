@@ -67,6 +67,16 @@ For every `#[path = "fast/<file>.rs"]` redirect (`grep -rn '#\[path = "fast'
 crates`), diff upstream's original between the vendor commits and port the
 change into our rewrite by hand. The merge doesn't conflict on these.
 
+Likewise, `fast/interactive_text.rs` lays an `InteractiveText`'s hitboxes for
+the hand by upstream's steps for finding the index under the pointer
+(`TextLayout::index_for_position` from line to line, with
+`WrappedLineLayout::size` and `WrappedLine::len`;
+`WrappedLineLayout::_index_for_position`; `LineLayout::index_for_x`), while
+its clicks still go through upstream's code. Diff
+`crates/gpui/src/elements/text.rs`, `crates/gpui/src/text_system/line.rs` and
+`crates/gpui/src/text_system/line_layout.rs` between the vendor commits, and
+port any change to those steps into it.
+
 ## 4. Record the sync
 
 Update `zed_commit` and `import_commit` in `UPSTREAM` to `NEW` and the new
