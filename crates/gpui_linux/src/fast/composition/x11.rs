@@ -1169,6 +1169,17 @@ pub(crate) fn set_composition_order(
         .occluders
         .retain(|id, _| surfaces.iter().any(|surface| surface.id == *id));
     composition.apply_order()?;
+    // A window without a native surface presents plainly, which never draws
+    // or hides the overlay window, so it goes with the last native surface.
+    if !surfaces.iter().any(|surface| {
+        matches!(
+            surface.content,
+            PlatformCompositionSurfaceContent::Native(_)
+                | PlatformCompositionSurfaceContent::ExternalGpu(_)
+        )
+    }) {
+        composition.hide_overlay();
+    }
     let inputs = surfaces
         .iter()
         .filter(|surface| match &surface.content {
