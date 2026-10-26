@@ -874,6 +874,7 @@ impl MetalRenderer {
         let command_buffer = command_queue
             .commandBuffer()
             .context("creating command buffer")?;
+        crate::fast::dynamic_textures::encode_uploads(&command_buffer);
         let alpha = if self.opaque { 1. } else { 0. };
 
         let mut command_encoder = new_command_encoder_for_texture(
