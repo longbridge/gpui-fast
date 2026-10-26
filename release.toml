@@ -1,5 +1,5 @@
 # Metadata applied only to target/release-workspace, never upstream manifests.
-snapshot_version = "0.3.9"
+snapshot_version = "0.3.10"
 repository = "https://github.com/longbridge/gpui-fast"
 homepage = "https://github.com/longbridge/gpui-fast"
 # zed-scap's Windows backend requires the five-argument capture settings API.
