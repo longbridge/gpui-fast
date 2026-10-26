@@ -14,6 +14,7 @@
 //! error from `create_dynamic_texture` instead of failing later, and the
 //! sprite atlas keeps its meaning as a cache of immutable content.
 
+use anyhow::{Context as _, Result};
 use std::{
     collections::HashMap,
     sync::{
@@ -21,8 +22,6 @@ use std::{
         atomic::{AtomicU32, Ordering},
     },
 };
-
-use anyhow::{Context as _, Result};
 
 use crate::fast::layers::scene::LAYER_TILE_TEXTURE_BASE;
 use crate::{
@@ -134,26 +133,34 @@ static NEXT_TEXTURE_ID: AtomicU32 = AtomicU32::new(0);
 
 /// The live dynamic textures, so update and paint can validate their
 /// arguments against the size the texture was created with.
-static LIVE_TEXTURES: parking_lot::Mutex<
-    Option<HashMap<DynamicTextureId, crate::Size<DevicePixels>>>,
-> = parking_lot::Mutex::new(None);
+static LIVE_TEXTURES: parking_lot::Mutex<Option<HashMap<DynamicTextureId, TextureState>>> =
+    parking_lot::Mutex::new(None);
 
-fn live_textures()
--> parking_lot::MappedMutexGuard<'static, HashMap<DynamicTextureId, crate::Size<DevicePixels>>> {
+/// A live texture's created size and its content version.
+#[derive(Clone, Copy)]
+struct TextureState {
+    size: crate::Size<DevicePixels>,
+    /// Bumped on every sub-region update. Painted sprites carry it in
+    /// [`PolychromeSprite::pad`], which the scroll-layer tile hashes cover,
+    /// so tiles showing refreshed contents are re-rendered instead of
+    /// kept from the cache.
+    version: u32,
+}
+
+fn live_textures() -> parking_lot::MappedMutexGuard<'static, HashMap<DynamicTextureId, TextureState>>
+{
     parking_lot::MutexGuard::map(LIVE_TEXTURES.lock(), |textures| {
         textures.get_or_insert_with(HashMap::new)
     })
 }
 
-/// The paint epoch, bumped on every sub-region update so a cached frame
-/// holding a sprite of a refreshed texture is told apart from the new one.
-static PAINT_EPOCH: AtomicU32 = AtomicU32::new(0);
-
-fn bump_paint_epoch() -> u32 {
-    PAINT_EPOCH
-        .fetch_add(1, Ordering::Relaxed)
-        .wrapping_add(1)
-        .max(1)
+/// The version a sprite painted now must carry: a changing texture version,
+/// so a cached frame holding a sprite of a refreshed texture is told apart
+/// from the new one.
+fn painted_version(id: DynamicTextureId) -> u32 {
+    live_textures()
+        .get(&id)
+        .map_or(1, |state| state.version.max(1))
 }
 
 /// Allocates a mutable BGRA8 texture.
@@ -194,7 +201,7 @@ pub fn create(
     backend
         .create_texture(id, size, &packed)
         .with_context(|| format!("failed to create dynamic texture {id:?}"))?;
-    live_textures().insert(id, size);
+    live_textures().insert(id, TextureState { size, version: 1 });
 
     Ok(DynamicTexture { id, size })
 }
@@ -203,8 +210,8 @@ pub fn create(
 ///
 /// The region is relative to the texture's own origin and must lie inside it,
 /// so a stale texture size cannot scribble over other content. The rows are
-/// repacked before the upload, and the paint epoch advances so cached frames
-/// learn about the new contents.
+/// repacked before the upload, and the texture's version advances so cached
+/// frames learn about the new contents.
 pub fn update(
     texture: DynamicTexture,
     bounds: Bounds<DevicePixels>,
@@ -217,7 +224,9 @@ pub fn update(
     platform()?
         .update_texture(texture.id, bounds, &packed)
         .with_context(|| format!("failed to update dynamic texture {texture:?}"))?;
-    bump_paint_epoch();
+    if let Some(state) = live_textures().get_mut(&texture.id) {
+        state.version = state.version.wrapping_add(1).max(1);
+    }
 
     Ok(())
 }
@@ -241,7 +250,7 @@ pub fn paint(window: &mut Window, bounds: Bounds<Pixels>, texture: DynamicTextur
     };
     window.next_frame.scene.insert_primitive(PolychromeSprite {
         order: 0,
-        pad: PAINT_EPOCH.load(Ordering::Relaxed).max(1),
+        pad: painted_version(texture.id),
         grayscale: false.into(),
         bounds: window.snap_bounds(bounds),
         content_mask: window.snapped_content_mask(),
@@ -319,6 +328,7 @@ fn live_size(id: DynamicTextureId) -> Result<crate::Size<DevicePixels>> {
     live_textures()
         .get(&id)
         .copied()
+        .map(|state| state.size)
         .context("unknown dynamic texture")
 }
 
@@ -383,10 +393,13 @@ fn pack_rows(bytes: &[u8], stride: usize, row_bytes: usize, height: usize) -> Ve
 mod tests {
     use super::{
         BYTES_PER_PIXEL, DYNAMIC_INDEX_BASE, DynamicTexture, DynamicTextureId,
-        DynamicTexturePlatform, PLATFORM, create, live_size, remove, set_dynamic_texture_platform,
-        update, validate_region,
+        DynamicTexturePlatform, PLATFORM, create, live_size, painted_version, remove,
+        set_dynamic_texture_platform, update, validate_region,
     };
-    use crate::{AtlasTextureId, AtlasTextureKind, Bounds, DevicePixels, point, size};
+    use crate::{
+        AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, ContentMask, DevicePixels,
+        PolychromeSprite, ScaledPixels, Scene, TileId, point, size,
+    };
     use anyhow::Result;
     use std::sync::{
         Arc,
@@ -667,6 +680,85 @@ mod tests {
             DynamicTextureId::from_atlas_texture_id(atlas_id),
             None,
             "a dynamic range index in another kind must not match"
+        );
+    }
+
+    /// A scene holding the texture painted over `region`'s tiles, the way
+    /// [`paint`] would build it: the version the texture carries at paint
+    /// time rides in the sprite's pad.
+    fn scene_with_texture(texture: DynamicTexture, pad: u32) -> Scene {
+        let mut scene = Scene::default();
+        scene.insert_primitive(PolychromeSprite {
+            order: 0,
+            pad,
+            tile: AtlasTile {
+                texture_id: texture.id.atlas_texture_id(),
+                tile_id: TileId(texture.id.0),
+                padding: 0,
+                bounds: Bounds {
+                    origin: point(DevicePixels(0), DevicePixels(0)),
+                    size: texture.size,
+                },
+            },
+            grayscale: false.into(),
+            opacity: 1.,
+            bounds: Bounds {
+                origin: point(ScaledPixels(0.), ScaledPixels(0.)),
+                size: size(ScaledPixels(64.), ScaledPixels(64.)),
+            },
+            content_mask: ContentMask {
+                bounds: Bounds {
+                    origin: point(ScaledPixels(0.), ScaledPixels(0.)),
+                    size: size(ScaledPixels(128.), ScaledPixels(128.)),
+                },
+            },
+            corner_radii: Default::default(),
+        });
+        scene
+    }
+
+    #[test]
+    fn repainting_an_updated_texture_dirties_its_tiles() {
+        let (_lock, _mock) = fresh_mock();
+
+        let texture = create(size_of(4, 4), &packed_bytes(4, 4), 16).expect("created");
+        let region = Bounds {
+            origin: point(ScaledPixels(0.), ScaledPixels(0.)),
+            size: size(ScaledPixels(128.), ScaledPixels(128.)),
+        };
+
+        let before = crate::fast::layers::tiles::tile_hashes(
+            &scene_with_texture(texture, painted_version(texture.id)),
+            64,
+            region,
+        );
+
+        // An in-place update at unchanged sprite bounds changes no hashed
+        // field of the sprite but the version the next paint carries.
+        update(texture, bounds_at((0, 0), 2, 2), &packed_bytes(2, 2), 8).expect("updated");
+
+        let after = crate::fast::layers::tiles::tile_hashes(
+            &scene_with_texture(texture, painted_version(texture.id)),
+            64,
+            region,
+        );
+        assert_ne!(before, after, "tiles showing the texture must be dirtied");
+
+        // A texture that was never updated repaints with the same hash, so
+        // its tiles are still kept.
+        let other = create(size_of(4, 4), &packed_bytes(4, 4), 16).expect("created");
+        let unchanged = crate::fast::layers::tiles::tile_hashes(
+            &scene_with_texture(other, painted_version(other.id)),
+            64,
+            region,
+        );
+        assert_eq!(
+            crate::fast::layers::tiles::tile_hashes(
+                &scene_with_texture(other, painted_version(other.id)),
+                64,
+                region,
+            ),
+            unchanged,
         );
     }
 }
