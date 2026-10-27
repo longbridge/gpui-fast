@@ -623,6 +623,10 @@ pub(crate) struct EntityAccessLog {
 }
 
 impl EntityAccessLog {
+    pub(crate) fn update_generation(&self) -> u64 {
+        self.update_generation
+    }
+
     /// How many accesses the log holds.
     fn len(&self) -> usize {
         self.access_log.borrow().len()
