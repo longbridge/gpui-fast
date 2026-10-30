@@ -471,7 +471,7 @@ impl WindowsPlatform {
                             &all_windows,
                             &text_system,
                         ) {
-                            panic!("Device lost: {err}");
+                            crate::fast::device_recovery::recovery_failed(err);
                         }
                         crate::fast::frame_schedule::Worker::watch(
                             &mut fast_worker,
