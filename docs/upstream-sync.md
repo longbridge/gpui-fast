@@ -217,8 +217,19 @@ commit our copy was taken from is `zed_commit` in `UPSTREAM`, and
 4. Update `zed_commit` and `import_commit` in `UPSTREAM` to the new zed commit
    and the new vendor commit, and add or remove entries under `tracked` if zed
    added or removed crates we use.
-5. Run `script/check-upstream`, the tests and clippy.
-6. Check that `window/a11y.rs` still keeps the tree it last sent in
+5. Look at whether upstream changed how an index under the pointer is found:
+   `TextLayout::index_for_position`'s steps from line to line (with
+   `WrappedLineLayout::size` and `WrappedLine::len`),
+   `WrappedLineLayout::_index_for_position` and `LineLayout::index_for_x`
+   (`git diff <old vendor commit> <new vendor commit> --
+   crates/gpui/src/elements/text.rs crates/gpui/src/text_system/line.rs
+   crates/gpui/src/text_system/line_layout.rs`). `fast/interactive_text.rs`
+   follows those steps to lay hitboxes over where an `InteractiveText` shows
+   the hand, while its clicks still go through upstream's code; port the
+   change into it, or the hand and the clicks part. Nothing conflicts there
+   either.
+6. Run `script/check-upstream`, the tests and clippy.
+7. Check that `window/a11y.rs` still keeps the tree it last sent in
    `A11yDebug::last_tree_update` in every build: `fast/a11y.rs` reads the
    nodes it draws again from there
    (`a11y_frame_keeps_the_tree_it_sent` fails if it stops).
