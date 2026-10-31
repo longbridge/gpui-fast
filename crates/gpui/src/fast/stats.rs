@@ -4,6 +4,9 @@ use crate::{TaffyLayoutEngine, Window};
 use scheduler::Instant;
 use std::time::Duration;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use super::path_cache::{PathCacheStats, path_cache_stats};
+
 /// Counters describing the work the layout engine performed, for benchmarking
 /// and profiling.
 ///

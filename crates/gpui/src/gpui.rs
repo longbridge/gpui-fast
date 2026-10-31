@@ -133,6 +133,11 @@ pub use gpui_macros::{
 };
 pub use spring::*;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use fast::stats::PathCacheStats;
+#[cfg(any(test, feature = "test-support"))]
+pub use fast::stats::path_cache_stats;
+
 /// Defines a Criterion benchmark group for benchmarks annotated with [`gpui::bench`].
 ///
 /// This mirrors `criterion::criterion_group!`, but the group measures with the
