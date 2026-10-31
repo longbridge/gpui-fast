@@ -87,6 +87,7 @@ pub(crate) fn draw(
 ) -> Result<metal::CommandBuffer> {
     let queue = renderer.command_queue.clone();
     let command_buffer = queue.new_command_buffer();
+    crate::fast::dynamic_textures::encode_uploads(&command_buffer);
     let alpha = if renderer.opaque { 1. } else { 0. };
     let encoder = new_command_encoder_for_texture(
         command_buffer,

@@ -396,6 +396,7 @@ impl MetalRenderer {
         let command_queue = device.new_command_queue();
         let supports_shared_storage = cfg!(target_os = "ios") || is_apple_gpu;
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), supports_shared_storage));
+        crate::fast::dynamic_textures::init(&device);
         // metal and objc2-metal expose the same Objective-C device; the borrowed
         // protocol object remains valid while `device` owns it.
         let core_video_texture_cache = unsafe {
@@ -765,6 +766,7 @@ impl MetalRenderer {
         }
         let command_queue = self.command_queue.clone();
         let command_buffer = command_queue.new_command_buffer();
+        crate::fast::dynamic_textures::encode_uploads(&command_buffer);
         let alpha = if self.opaque { 1. } else { 0. };
 
         let mut command_encoder = new_command_encoder_for_texture(
@@ -1126,7 +1128,9 @@ impl MetalRenderer {
             return;
         }
 
-        let Some(texture) = self.sprite_atlas.metal_texture(texture_id) else {
+        let texture = crate::fast::dynamic_textures::metal_texture(&self.device, texture_id)
+            .or_else(|| self.sprite_atlas.metal_texture(texture_id));
+        let Some(texture) = texture else {
             return;
         };
         let texture_size = size(
@@ -1192,7 +1196,9 @@ impl MetalRenderer {
             return;
         }
 
-        let Some(texture) = self.sprite_atlas.metal_texture(texture_id) else {
+        let texture = crate::fast::dynamic_textures::metal_texture(&self.device, texture_id)
+            .or_else(|| self.sprite_atlas.metal_texture(texture_id));
+        let Some(texture) = texture else {
             return;
         };
         let texture_size = size(

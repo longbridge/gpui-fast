@@ -91,6 +91,7 @@ fn encode(
     );
     let command_queue = renderer.command_queue.clone();
     let command_buffer = command_queue.new_command_buffer();
+    crate::fast::dynamic_textures::encode_uploads(&command_buffer);
     command_buffer.set_label("scroll_layer_tiles");
 
     let mut result = Ok(());

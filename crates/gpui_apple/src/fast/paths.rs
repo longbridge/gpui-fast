@@ -80,6 +80,7 @@ pub(crate) fn draw_primitives_to_texture(
 
     let command_queue = renderer.command_queue.clone();
     let command_buffer = command_queue.new_command_buffer();
+    crate::fast::dynamic_textures::encode_uploads(&command_buffer);
     let alpha = if renderer.opaque { 1. } else { 0. };
 
     // The first group is rasterized before the main pass, which saves ending
