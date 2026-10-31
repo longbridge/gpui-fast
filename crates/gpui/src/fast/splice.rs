@@ -208,6 +208,7 @@ enum GapLayout {
 /// A view drawn from last frame around the nested views built again in it.
 pub(crate) struct Splice {
     previous: usize,
+    entity_updates: u64,
     gaps: Vec<Gap>,
     /// This frame's layout claims, with each rebuilt gap replacing its old
     /// keys and element states. Absent if a gap introduced transient nodes.
@@ -394,7 +395,9 @@ impl Window {
                     .as_slice()
             }),
         );
-        let dependencies = record.dependencies.clone();
+        // Capture before rebuilding gaps; changes made while they render must
+        // still invalidate the ancestor's aggregate on the next frame.
+        let entity_updates = cx.entities.access_log.update_generation();
         let previous_layout = layout.clone();
         let engine = self.layout_engine.as_mut().unwrap();
         let transient_before = engine.transient_count();
@@ -432,7 +435,7 @@ impl Window {
         self.next_frame
             .accessed_element_states
             .extend(element_states.iter().cloned());
-        cx.replay_dependencies(&dependencies);
+        cx.replay_dependencies(&self.rendered_frame.retained.records[previous].dependencies);
         let held = if unchanged {
             Vec::new()
         } else {
@@ -463,6 +466,7 @@ impl Window {
             });
         Some(Splice {
             previous,
+            entity_updates,
             gaps: built,
             layout,
             held,
@@ -614,6 +618,7 @@ impl Window {
             previous,
             mut gaps,
             layout,
+            entity_updates,
             ..
         } = splice;
         let writes_now = cx.entities.write_generation();
@@ -650,7 +655,8 @@ impl Window {
         let mut copied = Vec::new();
         let mut cursor = prepaint_range.start.clone();
         let mut next_record = previous + 1;
-        for (segment, gap) in gaps.iter_mut().enumerate() {
+        for segment in 0..gaps.len() {
+            let gap = &gaps[segment];
             let gap_record = &self.rendered_frame.retained.records[gap.record];
             let gap_range = gap_record.prepaint_range.clone();
             let gap_nested = gap_record.nested;
@@ -659,7 +665,11 @@ impl Window {
             let gap_id = gap_record.id.clone();
 
             let segment_start = self.prepaint_index();
-            self.copy_prepaint_segment(cursor.clone()..gap_range.start.clone(), &mut dispatch);
+            self.copy_prepaint_segment(
+                cursor.clone()..gap_range.start.clone(),
+                &gaps,
+                &mut dispatch,
+            );
             self.copy_records(
                 next_record..gap.record,
                 &cursor,
@@ -688,6 +698,7 @@ impl Window {
                 None => self.next_frame.dispatch_tree.push_node(),
             };
             let scope = crate::fast::layout_key::enter_prepaint_scope(self, gap.layout_key);
+            let gap = &mut gaps[segment];
             let prepaint = crate::fast::retained::prepaint_view(
                 &mut gap.view,
                 Some(&gap.global_id),
@@ -709,7 +720,7 @@ impl Window {
         }
         let segment = gaps.len();
         let segment_start = self.prepaint_index();
-        self.copy_prepaint_segment(cursor.clone()..prepaint_range.end, &mut dispatch);
+        self.copy_prepaint_segment(cursor.clone()..prepaint_range.end, &gaps, &mut dispatch);
         self.copy_records(
             next_record..last + 1,
             &cursor,
@@ -733,6 +744,8 @@ impl Window {
         let mut dependencies = self.rendered_frame.retained.records[previous]
             .dependencies
             .written_up_to(writes_now);
+        // Advance only the aggregate; each view keeps its own read checkpoint.
+        dependencies.updates = entity_updates;
         for gap in &gaps {
             let gap_id = &self.rendered_frame.retained.records[gap.record].id;
             if let Some(&gap_index) = target.by_id.get(gap_id) {
@@ -761,6 +774,7 @@ impl Window {
     fn copy_prepaint_segment(
         &mut self,
         range: Range<PrepaintStateIndex>,
+        gaps: &[Gap],
         dispatch: &mut OpenDispatchCopy,
     ) {
         crate::fast::a11y::reuse_prepaint(self, &range);
@@ -779,6 +793,13 @@ impl Window {
             self.rendered_frame.accessed_element_states[range.start.accessed_element_states_index
                 ..range.end.accessed_element_states_index]
                 .iter()
+                // A gap's layout may have run during its ancestor's prepaint.
+                // Its old accesses are replaced by rebuilding it this frame.
+                .filter(|(id, _)| {
+                    !gaps
+                        .iter()
+                        .any(|gap| id.ids.starts_with(&gap.global_id.ids))
+                })
                 .cloned(),
         );
         self.text_system()
