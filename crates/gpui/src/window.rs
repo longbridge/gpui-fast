@@ -1231,7 +1231,7 @@ impl Frame {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
-enum InputModality {
+pub(crate) enum InputModality {
     Mouse,
     Keyboard,
     Touch,
@@ -1309,7 +1309,7 @@ pub struct Window {
     pub(crate) input_rate_tracker: Rc<RefCell<InputRateTracker>>,
     #[cfg(feature = "profiler")]
     pub(crate) window_profiler: profiler::WindowProfiler,
-    last_input_modality: InputModality,
+    pub(crate) last_input_modality: InputModality,
     touch_gestures: TouchGestureRecognizer,
     touch_prediction_enabled: bool,
     long_press_timer: Option<Task<()>>,
@@ -5697,6 +5697,7 @@ impl Window {
             PlatformInput::Touch(_) => InputModality::Touch,
             _ => self.last_input_modality,
         };
+        crate::fast::misc::mouse_up_modality::note_input(self, &event);
         if self.last_input_modality != old_modality {
             self.refresh();
         }
