@@ -1384,6 +1384,41 @@ fn synchronize_geometry(window: &mut Window) {
     }
 }
 
+/// Reorder only scenes that return to the base after painting the overlay.
+/// The common base-then-overlay scene can be presented without copying it.
+fn ordered_plain_scene(
+    state: &WindowCompositionState,
+    starts: &[(CompositionSurfaceId, usize)],
+    scene: &Scene,
+) -> Result<Option<Scene>> {
+    let mut seen_overlay = false;
+    let mut out_of_order = false;
+    for (index, &(surface, start)) in starts.iter().enumerate() {
+        let end = starts.get(index + 1).map_or(scene.len(), |(_, end)| *end);
+        if start >= end {
+            continue;
+        }
+        if surface == state.overlay_surface {
+            seen_overlay = true;
+        } else if surface == state.base_surface && seen_overlay {
+            out_of_order = true;
+            break;
+        }
+    }
+    if !out_of_order {
+        return Ok(None);
+    }
+    let layers = composed_scene_layers(&state.tree, starts, scene.len())?;
+    let mut ordered = Scene::default();
+    for layer in layers {
+        for range in layer.ranges {
+            ordered.replay_balanced(range, scene)?;
+        }
+    }
+    ordered.finish();
+    Ok(Some(ordered))
+}
+
 /// Presents the frame last drawn: on its one surface, or split along the
 /// composition tree while the window composes around another surface.
 pub(crate) fn present(window: &mut Window) {
@@ -1393,7 +1428,21 @@ pub(crate) fn present(window: &mut Window) {
         state.enabled && state.splits()
     };
     if !splits {
-        window.platform_window.draw(&window.rendered_frame.scene);
+        let frame = &window.rendered_frame;
+        let ordered = if state.borrow().enabled {
+            ordered_plain_scene(
+                &state.borrow(),
+                &frame.fast_composition_starts.0,
+                &frame.scene,
+            )
+            .log_err()
+            .flatten()
+        } else {
+            None
+        };
+        window
+            .platform_window
+            .draw(ordered.as_ref().unwrap_or(&frame.scene));
         return;
     }
     synchronize_geometry(window);
@@ -1651,7 +1700,8 @@ mod tests {
     use super::{
         CompositionSurfaceId, CompositionSurfaceKind, CompositionTree, Host,
         ManagedPlatformSurface, PlatformSurfaceAttachment, WindowComposition,
-        composed_scene_layers, restack_native_surfaces,
+        WindowCompositionHandle, composed_scene_layers, ordered_plain_scene,
+        restack_native_surfaces,
     };
     use crate::{
         AppContext as _, Bounds, ContentMask, Context, DevicePixels, Entity, IntoElement,
@@ -1978,6 +2028,44 @@ mod tests {
                 PaintOperation::EndLayer
             ]
         ));
+    }
+
+    #[test]
+    fn plain_present_keeps_overlay_above_later_base_content() -> Result<()> {
+        let handle = WindowCompositionHandle::default();
+        let state = handle.0.borrow();
+        let mut scene = Scene::default();
+        for side in [10., 20., 30.] {
+            let bounds = square(side);
+            scene.insert_primitive(Quad {
+                bounds,
+                content_mask: ContentMask { bounds },
+                ..Default::default()
+            });
+        }
+        scene.finish();
+        let starts = [
+            (state.base_surface, 0),
+            (state.overlay_surface, 1),
+            (state.base_surface, 2),
+        ];
+        let ordered = ordered_plain_scene(&state, &starts, &scene)?.unwrap();
+        let sides: Vec<_> = ordered
+            .quads
+            .iter()
+            .map(|quad| quad.bounds.size.width)
+            .collect();
+        assert_eq!(
+            sides,
+            [
+                ScaledPixels::from(10.),
+                ScaledPixels::from(30.),
+                ScaledPixels::from(20.)
+            ]
+        );
+        let in_order = [(state.base_surface, 0), (state.overlay_surface, 2)];
+        assert!(ordered_plain_scene(&state, &in_order, &scene)?.is_none());
+        Ok(())
     }
 
     #[test]
