@@ -58,7 +58,7 @@ struct KeptPaths {
     heavy: Option<(Rc<[u32]>, Rc<Path<Pixels>>)>,
     limit: usize,
     shapes: usize,
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     stats: PathCacheStats,
 }
 
@@ -72,9 +72,9 @@ struct Slot {
 
 /// What a thread's kept shapes did since it began, and hold now, for
 /// benchmarks and tests. Counts are per thread.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PathCacheStats {
+pub(crate) struct PathCacheStats {
     /// Paths built from kept triangles.
     pub hits: u64,
     /// Paths tessellated, and then kept.
@@ -108,7 +108,7 @@ impl KeptPaths {
             heavy: None,
             limit,
             shapes,
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(test)]
             stats: PathCacheStats::default(),
         }
     }
@@ -135,7 +135,7 @@ impl KeptPaths {
                 _ => None,
             },
         };
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         if found.is_some() {
             self.stats.hits += 1;
         }
@@ -147,13 +147,13 @@ impl KeptPaths {
     fn insert(&mut self, key: Vec<u32>, path: Rc<Path<Pixels>>) {
         let key: Rc<[u32]> = key.into();
         let bytes = weight(&key, &path);
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         {
             self.stats.misses += 1;
             self.stats.built_bytes += bytes as u64;
         }
         if bytes > self.limit {
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(test)]
             if self.heavy.is_some() {
                 self.stats.evictions += 1;
             }
@@ -192,7 +192,7 @@ impl KeptPaths {
         self.index.remove(&slot.key);
         self.bytes -= slot.bytes;
         self.vacant.push(at);
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         {
             self.stats.evictions += 1;
         }
@@ -224,8 +224,8 @@ impl KeptPaths {
 }
 
 /// What this thread's kept shapes did and hold.
-#[cfg(any(test, feature = "test-support"))]
-pub fn path_cache_stats() -> PathCacheStats {
+#[cfg(test)]
+pub(crate) fn path_cache_stats() -> PathCacheStats {
     KEPT_PATHS.with_borrow(|kept| {
         let heavy = kept.heavy.as_ref();
         PathCacheStats {

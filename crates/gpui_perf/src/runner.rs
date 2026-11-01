@@ -201,42 +201,8 @@ pub struct RunReport {
     /// before the scenario was built, in MiB; the window and what the scenario
     /// drew are in it.
     pub live_heap_mib: f64,
-    /// The kept path shapes, over the measured frames (per frame) and at the
-    /// end; see `gpui::PathCacheStats`.
-    pub paths: PathCacheReport,
     /// Measured frames whose step left the window clean, drawn explicitly.
     pub forced_draws: usize,
-}
-
-/// What the kept path shapes did per measured frame, and hold at the end.
-#[derive(Clone, Copy, Debug, Default, Serialize)]
-pub struct PathCacheReport {
-    pub hits: f64,
-    pub misses: f64,
-    pub evictions: f64,
-    /// The weight of one path tessellated, in KiB (zero if none was).
-    pub built_kib_per_miss: f64,
-    /// The weight of the shapes kept at the end, in MiB.
-    pub held_mib: f64,
-    pub held_shapes: f64,
-}
-
-impl PathCacheReport {
-    fn between(before: gpui::PathCacheStats, after: gpui::PathCacheStats, frames: f64) -> Self {
-        let misses = after.misses - before.misses;
-        Self {
-            hits: (after.hits - before.hits) as f64 / frames,
-            misses: misses as f64 / frames,
-            evictions: (after.evictions - before.evictions) as f64 / frames,
-            built_kib_per_miss: if misses == 0 {
-                0.
-            } else {
-                (after.built_bytes - before.built_bytes) as f64 / 1024. / misses as f64
-            },
-            held_mib: after.held_bytes as f64 / (1024. * 1024.),
-            held_shapes: after.held_shapes as f64,
-        }
-    }
 }
 
 /// Result of running two windows in lockstep and comparing what they painted.
@@ -303,7 +269,13 @@ pub fn run(options: &Options) -> Vec<ScenarioReport> {
                 "running {name} (retention {})...",
                 if retention { "on" } else { "off" }
             );
-            runs.push(measure(index, retention, options));
+            // Each run gets a fresh thread-local path cache.
+            runs.push(std::thread::scope(|scope| {
+                scope
+                    .spawn(|| measure(index, retention, options))
+                    .join()
+                    .unwrap()
+            }));
         }
         let verify = options.verify.then(|| {
             eprintln!("verifying {name}...");
@@ -566,7 +538,6 @@ fn measure(index: usize, retention: bool, options: &Options) -> RunReport {
 
     cx.update_window(window, |_, window, _| window.reset_layout_stats())
         .unwrap();
-    let paths_before = gpui::path_cache_stats();
 
     let mut costs = Vec::with_capacity(options.frames);
     let mut costs_wall = Vec::with_capacity(options.frames);
@@ -608,7 +579,6 @@ fn measure(index: usize, retention: bool, options: &Options) -> RunReport {
         allocations: allocation_count as f64 / frames,
         allocated_kib: allocated_bytes as f64 / 1024. / frames,
         live_heap_mib: (live_bytes() as f64 - live_before as f64) / (1024. * 1024.),
-        paths: PathCacheReport::between(paths_before, gpui::path_cache_stats(), frames),
         forced_draws,
     }
 }
@@ -832,7 +802,7 @@ pub fn format_reports(reports: &[ScenarioReport]) -> String {
         let _ = writeln!(out);
 
         type Row = (&'static str, fn(&RunReport) -> f64, usize);
-        let rows: [Row; 33] = [
+        let rows: [Row; 27] = [
             ("frame mean ms", |r| r.frame.mean_ms, 3),
             ("frame p50 ms", |r| r.frame.p50_ms, 3),
             ("frame p95 ms", |r| r.frame.p95_ms, 3),
@@ -871,12 +841,6 @@ pub fn format_reports(reports: &[ScenarioReport]) -> String {
             ("allocations", |r| r.allocations, 1),
             ("allocated KiB", |r| r.allocated_kib, 1),
             ("live heap growth MiB", |r| r.live_heap_mib, 1),
-            ("path hits", |r| r.paths.hits, 1),
-            ("path misses", |r| r.paths.misses, 2),
-            ("path evictions", |r| r.paths.evictions, 3),
-            ("path KiB per miss", |r| r.paths.built_kib_per_miss, 1),
-            ("path cache held MiB", |r| r.paths.held_mib, 1),
-            ("path cache shapes", |r| r.paths.held_shapes, 0),
             ("step ms (not counted)", |r| r.step.mean_ms, 3),
         ];
         for (label, value, precision) in rows {

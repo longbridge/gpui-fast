@@ -1,6 +1,6 @@
 //! Paths drawn from kept triangles. See [`crate::fast::path_cache`].
 
-use crate::{PathBuilder, Pixels, path_cache_stats, point, px};
+use crate::{PathBuilder, Pixels, fast::path_cache::path_cache_stats, point, px};
 
 fn sparkline(at: (f32, f32)) -> PathBuilder {
     let mut builder = PathBuilder::stroke(px(1.5));
