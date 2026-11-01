@@ -20,7 +20,10 @@
 //!
 //! Composition is opt-in: until [`Window::enable_window_composition`] is
 //! called, a window presents its scene with `PlatformWindow::draw`, as
-//! upstream does.
+//! upstream does. A window that composes but holds no surface beyond its
+//! base and overlay surfaces presents the same way, and gives the platform
+//! only its base surface, so the overlay's layer, view and textures are
+//! released until another surface is added.
 //!
 //! Unlike the upstream pull request, a view drawn again from last frame
 //! (every retained view, here) carries the surface switches it made with it:
@@ -182,6 +185,11 @@ impl CompositionTree {
             Some(parent) => Ok(&self.surface(parent)?.children),
             None => Ok(&self.roots),
         }
+    }
+
+    /// How many surfaces the tree holds.
+    pub(crate) fn len(&self) -> usize {
+        self.surfaces.len()
     }
 
     /// Every surface, parents before their children, bottom to top.
@@ -736,6 +744,9 @@ pub(crate) struct WindowCompositionState {
     geometry_dirty: Rc<Cell<bool>>,
     /// What the window is prepainting, while it prepaints a frame.
     prepainting: Rc<Cell<Option<Host>>>,
+    /// Whether [`Window::enable_window_composition`] was called; the window
+    /// presents through its composition only while it also
+    /// [`splits`](Self::splits).
     enabled: bool,
     input_order: Vec<CompositionSurfaceId>,
     visible: FxHashMap<CompositionSurfaceId, Rc<Cell<bool>>>,
@@ -743,6 +754,18 @@ pub(crate) struct WindowCompositionState {
     pointer_capture: Option<CompositionSurfaceId>,
     pressed_buttons: Vec<MouseButton>,
     hovered_native: Option<CompositionSurfaceId>,
+}
+
+/// The surfaces every composition tree holds: the base and the overlay.
+const DEFAULT_SURFACES: usize = 2;
+
+impl WindowCompositionState {
+    /// Whether the tree holds a surface beyond the base and overlay surfaces,
+    /// so the scene must be split for something to draw between or around
+    /// them. Without one, the whole scene on the base surface draws the same.
+    fn splits(&self) -> bool {
+        self.tree.len() > DEFAULT_SURFACES
+    }
 }
 
 type NativeInputHandler = Box<dyn FnMut(&PlatformInput) -> DispatchEventResult>;
@@ -1127,10 +1150,27 @@ impl WindowComposition<'_> {
 
     /// Hands the platform the tree's order and every surface's geometry.
     fn synchronize_platform_order(&self) -> Result<()> {
+        let surfaces = self.platform_order()?;
+        self.platform_window.set_composition_order(&surfaces)?;
+        let state = self.state.borrow();
+        state.geometry_dirty.set(false);
+        drop(state);
+        self.state.borrow_mut().input_order = surfaces.iter().map(|surface| surface.id).collect();
+        Ok(())
+    }
+
+    /// The tree's surfaces in order, with their geometry, as the platform is
+    /// handed them. The overlay surface is left out while the scene is not
+    /// split, so the platform releases what draws it.
+    fn platform_order(&self) -> Result<Vec<PlatformCompositionSurface>> {
         let state = self.state.borrow();
         let mut origins = FxHashMap::default();
         let mut surfaces = Vec::new();
+        let splits = state.splits();
         for id in state.tree.flattened() {
+            if !splits && id == state.overlay_surface {
+                continue;
+            }
             let parent = state.tree.parent(id)?;
             let parent_origin = parent
                 .and_then(|parent| origins.get(&parent).copied())
@@ -1172,11 +1212,7 @@ impl WindowComposition<'_> {
                 content,
             });
         }
-        self.platform_window.set_composition_order(&surfaces)?;
-        state.geometry_dirty.set(false);
-        drop(state);
-        self.state.borrow_mut().input_order = surfaces.iter().map(|surface| surface.id).collect();
-        Ok(())
+        Ok(surfaces)
     }
 }
 
@@ -1348,12 +1384,65 @@ fn synchronize_geometry(window: &mut Window) {
     }
 }
 
+/// Reorder only scenes that return to the base after painting the overlay.
+/// The common base-then-overlay scene can be presented without copying it.
+fn ordered_plain_scene(
+    state: &WindowCompositionState,
+    starts: &[(CompositionSurfaceId, usize)],
+    scene: &Scene,
+) -> Result<Option<Scene>> {
+    let mut seen_overlay = false;
+    let mut out_of_order = false;
+    for (index, &(surface, start)) in starts.iter().enumerate() {
+        let end = starts.get(index + 1).map_or(scene.len(), |(_, end)| *end);
+        if start >= end {
+            continue;
+        }
+        if surface == state.overlay_surface {
+            seen_overlay = true;
+        } else if surface == state.base_surface && seen_overlay {
+            out_of_order = true;
+            break;
+        }
+    }
+    if !out_of_order {
+        return Ok(None);
+    }
+    let layers = composed_scene_layers(&state.tree, starts, scene.len())?;
+    let mut ordered = Scene::default();
+    for layer in layers {
+        for range in layer.ranges {
+            ordered.replay_balanced(range, scene)?;
+        }
+    }
+    ordered.finish();
+    Ok(Some(ordered))
+}
+
 /// Presents the frame last drawn: on its one surface, or split along the
-/// composition tree once the window composes.
+/// composition tree while the window composes around another surface.
 pub(crate) fn present(window: &mut Window) {
     let state = window.fast_composition.0.clone();
-    if !state.borrow().enabled {
-        window.platform_window.draw(&window.rendered_frame.scene);
+    let splits = {
+        let state = state.borrow();
+        state.enabled && state.splits()
+    };
+    if !splits {
+        let frame = &window.rendered_frame;
+        let ordered = if state.borrow().enabled {
+            ordered_plain_scene(
+                &state.borrow(),
+                &frame.fast_composition_starts.0,
+                &frame.scene,
+            )
+            .log_err()
+            .flatten()
+        } else {
+            None
+        };
+        window
+            .platform_window
+            .draw(ordered.as_ref().unwrap_or(&frame.scene));
         return;
     }
     synchronize_geometry(window);
@@ -1610,7 +1699,8 @@ pub(crate) fn dispatch_native(
 mod tests {
     use super::{
         CompositionSurfaceId, CompositionSurfaceKind, CompositionTree, Host,
-        ManagedPlatformSurface, PlatformSurfaceAttachment, composed_scene_layers,
+        ManagedPlatformSurface, PlatformSurfaceAttachment, WindowComposition,
+        WindowCompositionHandle, composed_scene_layers, ordered_plain_scene,
         restack_native_surfaces,
     };
     use crate::{
@@ -1941,6 +2031,44 @@ mod tests {
     }
 
     #[test]
+    fn plain_present_keeps_overlay_above_later_base_content() -> Result<()> {
+        let handle = WindowCompositionHandle::default();
+        let state = handle.0.borrow();
+        let mut scene = Scene::default();
+        for side in [10., 20., 30.] {
+            let bounds = square(side);
+            scene.insert_primitive(Quad {
+                bounds,
+                content_mask: ContentMask { bounds },
+                ..Default::default()
+            });
+        }
+        scene.finish();
+        let starts = [
+            (state.base_surface, 0),
+            (state.overlay_surface, 1),
+            (state.base_surface, 2),
+        ];
+        let ordered = ordered_plain_scene(&state, &starts, &scene)?.unwrap();
+        let sides: Vec<_> = ordered
+            .quads
+            .iter()
+            .map(|quad| quad.bounds.size.width)
+            .collect();
+        assert_eq!(
+            sides,
+            [
+                ScaledPixels::from(10.),
+                ScaledPixels::from(30.),
+                ScaledPixels::from(20.)
+            ]
+        );
+        let in_order = [(state.base_surface, 0), (state.overlay_surface, 2)];
+        assert!(ordered_plain_scene(&state, &in_order, &scene)?.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn balanced_replay_rejects_invalid_ranges() {
         let source = Scene::default();
         let mut replayed = Scene::default();
@@ -2158,5 +2286,93 @@ mod tests {
             })
             .unwrap();
         assert_eq!(draw(cx), ["base", "page", "dialog page", "overlay"]);
+    }
+
+    /// A composing window splits its scene only while it holds a surface
+    /// beyond the base and overlay surfaces, and a retained view keeps
+    /// painting onto the overlay surface across every switch between the
+    /// plain and the split frame.
+    #[crate::test]
+    fn retained_views_keep_their_split_as_surfaces_come_and_go(cx: &mut TestAppContext) {
+        let builds = Rc::new(Cell::new(0));
+        let window = cx.add_window({
+            let builds = builds.clone();
+            move |window, cx| {
+                let mut state = window.fast_composition.0.borrow_mut();
+                state.enabled = true;
+                let overlay = state.overlay_surface;
+                drop(state);
+                Panel {
+                    badge: cx.new(|_| Badge { overlay, builds }),
+                }
+            }
+        });
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+                let splits = window.fast_composition.0.borrow().splits();
+                (surface_of_each_operation(window), splits)
+            })
+            .unwrap()
+        };
+        let redraw = |cx: &mut TestAppContext| {
+            window.update(cx, |_, _, cx| cx.notify()).unwrap();
+            draw(cx)
+        };
+        // What the platform is handed: the base surface alone while the scene
+        // is not split.
+        let handed = |cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, _| {
+                let composition = WindowComposition {
+                    platform_window: window.platform_window.as_ref(),
+                    state: window.fast_composition.0.clone(),
+                };
+                let ids = composition
+                    .platform_order()
+                    .unwrap()
+                    .into_iter()
+                    .map(|surface| surface.id)
+                    .collect::<Vec<_>>();
+                let state = window.fast_composition.0.borrow();
+                (ids, state.base_surface, state.overlay_surface)
+            })
+            .unwrap()
+        };
+
+        let (first, splits) = draw(cx);
+        assert!(!splits);
+        let (ids, base, _) = handed(cx);
+        assert_eq!(ids, [base]);
+        for _ in 0..3 {
+            let added = cx
+                .update_window(window.into(), |_, window, _| {
+                    let mut state = window.fast_composition.0.borrow_mut();
+                    let overlay = state.overlay_surface;
+                    let id = state
+                        .tree
+                        .insert(CompositionSurfaceKind::Native, None)
+                        .unwrap();
+                    state.tree.place_below(id, overlay).unwrap();
+                    let surface =
+                        Rc::new(ManagedPlatformSurface::new(test_platform_surface(), &state));
+                    state.platform_surfaces.insert(id, surface);
+                    id
+                })
+                .unwrap();
+            assert_eq!(redraw(cx), (first.clone(), true));
+            let (ids, base, overlay) = handed(cx);
+            assert_eq!(ids, [base, added, overlay]);
+
+            cx.update_window(window.into(), |_, window, _| {
+                let mut state = window.fast_composition.0.borrow_mut();
+                state.tree.remove(added).unwrap();
+                state.platform_surfaces.remove(&added);
+            })
+            .unwrap();
+            assert_eq!(redraw(cx), (first.clone(), false));
+            let (ids, base, _) = handed(cx);
+            assert_eq!(ids, [base]);
+        }
+        assert_eq!(builds.get(), 1, "the badge is drawn again from last frame");
     }
 }

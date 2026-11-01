@@ -162,7 +162,11 @@ for `gpui_macos`, `WgpuRenderer` gains `new_sharing_atlas` and
   upstream merges its version, the sync replaces ours with it. Two things
   behave differently from the pull request: a retained view drawn again from
   last frame keeps the surface switches it made, and `with_composition_surface`
-  inside a scroll layer paints where the layer does. On X11, when a
+  inside a scroll layer paints where the layer does. A window that composes
+  but holds no surface beyond the base and overlay surfaces presents with
+  `PlatformWindow::draw` and gives the platform only its base surface, so the
+  overlay's view, layer and textures are released until a surface is added.
+  On X11, when a
   compositing manager blends ARGB windows, the GPUI content above native
   surfaces is drawn into a transparent override-redirect window over the
   window instead of being cut out of them, so shadows and translucent
