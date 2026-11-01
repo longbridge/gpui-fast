@@ -36,7 +36,10 @@ use gpui::{
 };
 use serde::Serialize;
 
-use crate::{Scenario, all_scenarios, alloc::allocations};
+use crate::{
+    Scenario, all_scenarios,
+    alloc::{allocations, live_bytes},
+};
 
 /// Which retention modes to run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,6 +197,10 @@ pub struct RunReport {
     pub allocations: f64,
     /// Bytes allocated per frame, in KiB, step excluded.
     pub allocated_kib: f64,
+    /// Bytes the process holds more once the measured frames are drawn than
+    /// before the scenario was built, in MiB; the window and what the scenario
+    /// drew are in it.
+    pub live_heap_mib: f64,
     /// Measured frames whose step left the window clean, drawn explicitly.
     pub forced_draws: usize,
 }
@@ -262,7 +269,13 @@ pub fn run(options: &Options) -> Vec<ScenarioReport> {
                 "running {name} (retention {})...",
                 if retention { "on" } else { "off" }
             );
-            runs.push(measure(index, retention, options));
+            // Each run gets a fresh thread-local path cache.
+            runs.push(std::thread::scope(|scope| {
+                scope
+                    .spawn(|| measure(index, retention, options))
+                    .join()
+                    .unwrap()
+            }));
         }
         let verify = options.verify.then(|| {
             eprintln!("verifying {name}...");
@@ -514,6 +527,7 @@ fn frame(
 
 /// Runs scenario `index` in one retention mode.
 fn measure(index: usize, retention: bool, options: &Options) -> RunReport {
+    let live_before = live_bytes();
     let scenario = fresh_scenario(index);
     let mut cx = new_context();
     let (window, root) = open(&mut cx, &*scenario, retention, options);
@@ -564,6 +578,7 @@ fn measure(index: usize, retention: bool, options: &Options) -> RunReport {
         phases: PhaseAverages::of(&stats, options.frames),
         allocations: allocation_count as f64 / frames,
         allocated_kib: allocated_bytes as f64 / 1024. / frames,
+        live_heap_mib: (live_bytes() as f64 - live_before as f64) / (1024. * 1024.),
         forced_draws,
     }
 }
@@ -787,7 +802,7 @@ pub fn format_reports(reports: &[ScenarioReport]) -> String {
         let _ = writeln!(out);
 
         type Row = (&'static str, fn(&RunReport) -> f64, usize);
-        let rows: [Row; 26] = [
+        let rows: [Row; 27] = [
             ("frame mean ms", |r| r.frame.mean_ms, 3),
             ("frame p50 ms", |r| r.frame.p50_ms, 3),
             ("frame p95 ms", |r| r.frame.p95_ms, 3),
@@ -825,6 +840,7 @@ pub fn format_reports(reports: &[ScenarioReport]) -> String {
             ),
             ("allocations", |r| r.allocations, 1),
             ("allocated KiB", |r| r.allocated_kib, 1),
+            ("live heap growth MiB", |r| r.live_heap_mib, 1),
             ("step ms (not counted)", |r| r.step.mean_ms, 3),
         ];
         for (label, value, precision) in rows {
