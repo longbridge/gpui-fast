@@ -189,7 +189,11 @@ from being retained. Notify or write only when the value changes.
 
 To rule retention in or out when something looks stale, run with
 `GPUI_VIEW_RETENTION=0`: every view is then drawn from scratch each frame, as
-upstream does.
+upstream does. It does not bring back one notification upstream sends: an
+`InteractiveText` notifies its view as the pointer crosses its characters only
+when it has a hover listener, its hand being shown by hitboxes over its
+clickable ranges (`fast/interactive_text.rs`), where upstream notifies the
+view for every one.
 
 ## How it is verified
 
