@@ -625,6 +625,7 @@ impl Window {
         let source = &self.rendered_frame.retained;
         let record = &source.records[previous];
         let prepaint_range = record.prepaint_range.clone();
+        let filter_states = record.layout_during_prepaint;
         let last = previous + record.nested;
         let kept_layout_keys = kept_keys(
             &record.layout_keys,
@@ -665,15 +666,16 @@ impl Window {
             let gap_id = gap_record.id.clone();
 
             let segment_start = self.prepaint_index();
-            self.copy_prepaint_segment(
+            let removed_states = self.copy_prepaint_segment(
                 cursor.clone()..gap_range.start.clone(),
-                &gaps,
+                if filter_states { &gaps } else { &[] },
                 &mut dispatch,
             );
             self.copy_records(
                 next_record..gap.record,
                 &cursor,
                 &segment_start,
+                &removed_states,
                 (segment, index),
                 &mut copied,
             );
@@ -720,11 +722,16 @@ impl Window {
         }
         let segment = gaps.len();
         let segment_start = self.prepaint_index();
-        self.copy_prepaint_segment(cursor.clone()..prepaint_range.end, &gaps, &mut dispatch);
+        let removed_states = self.copy_prepaint_segment(
+            cursor.clone()..prepaint_range.end,
+            if filter_states { &gaps } else { &[] },
+            &mut dispatch,
+        );
         self.copy_records(
             next_record..last + 1,
             &cursor,
             &segment_start,
+            &removed_states,
             (segment, index),
             &mut copied,
         );
@@ -776,7 +783,7 @@ impl Window {
         range: Range<PrepaintStateIndex>,
         gaps: &[Gap],
         dispatch: &mut OpenDispatchCopy,
-    ) {
+    ) -> Vec<usize> {
         crate::fast::a11y::reuse_prepaint(self, &range);
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
@@ -789,19 +796,36 @@ impl Window {
                 .iter_mut()
                 .map(|request| request.take()),
         );
-        self.next_frame.accessed_element_states.extend(
-            self.rendered_frame.accessed_element_states[range.start.accessed_element_states_index
-                ..range.end.accessed_element_states_index]
-                .iter()
-                // A gap's layout may have run during its ancestor's prepaint.
-                // Its old accesses are replaced by rebuilding it this frame.
-                .filter(|(id, _)| {
-                    !gaps
+        let states = &self.rendered_frame.accessed_element_states
+            [range.start.accessed_element_states_index..range.end.accessed_element_states_index];
+        let mut removed_states = Vec::new();
+        if gaps.is_empty() {
+            self.next_frame
+                .accessed_element_states
+                .extend_from_slice(states);
+        } else {
+            // Layout requested during prepaint can leave a gap's accesses
+            // anywhere in this segment, even before a clean sibling's range.
+            self.next_frame
+                .accessed_element_states
+                .extend(
+                    states
                         .iter()
-                        .any(|gap| id.ids.starts_with(&gap.global_id.ids))
-                })
-                .cloned(),
-        );
+                        .enumerate()
+                        .filter_map(|(offset, state @ (id, _))| {
+                            if gaps
+                                .iter()
+                                .any(|gap| id.ids.starts_with(&gap.global_id.ids))
+                            {
+                                removed_states
+                                    .push(range.start.accessed_element_states_index + offset);
+                                None
+                            } else {
+                                Some(state.clone())
+                            }
+                        }),
+                );
+        }
         self.text_system()
             .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
 
@@ -833,6 +857,7 @@ impl Window {
                 enclosing_retained: EnclosingRetained::default(),
             });
         }
+        removed_states
     }
 
     /// Copies last frame's records `records`, whose prepaint was copied from
@@ -844,6 +869,7 @@ impl Window {
         records: Range<usize>,
         from: &PrepaintStateIndex,
         to: &PrepaintStateIndex,
+        removed_states: &[usize],
         (segment, anchor): (usize, usize),
         copied: &mut Vec<(usize, usize)>,
     ) {
@@ -852,8 +878,15 @@ impl Window {
         copied.reserve(records.len());
         for index in records {
             let record = &source.records[index];
-            let prepaint_range = record.prepaint_range.start.shifted(from, to)
-                ..record.prepaint_range.end.shifted(from, to);
+            let shift = |boundary: &PrepaintStateIndex| {
+                let mut shifted = boundary.shifted(from, to);
+                // Each boundary loses only accesses removed before it.
+                shifted.accessed_element_states_index -= removed_states
+                    .partition_point(|&removed| removed < boundary.accessed_element_states_index);
+                shifted
+            };
+            let prepaint_range =
+                shift(&record.prepaint_range.start)..shift(&record.prepaint_range.end);
             let painted = matches!(record.paint, PaintStatus::Painted { .. });
             let mut copy = copy_record(record, prepaint_range, anchor);
             if !painted {
@@ -984,6 +1017,7 @@ fn copy_record(
     RetainedSubtree {
         id: record.id.clone(),
         prepaint_range,
+        layout_during_prepaint: record.layout_during_prepaint,
         paint_range: record.paint_range.clone(),
         paint: PaintStatus::Pending { anchor },
         nested: record.nested,

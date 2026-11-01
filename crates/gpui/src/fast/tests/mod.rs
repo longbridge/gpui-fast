@@ -18,6 +18,7 @@ mod retained_bench;
 mod scene_order;
 mod scroll_to_bottom;
 mod splice;
+mod splice_late_layout;
 mod support;
 mod text;
 mod text_shaping;

@@ -1606,7 +1606,8 @@ mod tests {
             .with_topology(RandomizedElementTreeTopology::Wide)
             .with_entity_density(1.0)
             .with_handler_density(1.0);
-        let window = cx.open_window(WINDOW_SIZE, move |_, cx| {
+        let window = cx.open_window(WINDOW_SIZE, move |window, cx| {
+            crate::fast::retained::upstream_work_counter_test(window);
             RandomizedElementTree::new_with_config(config, cx)
         });
         let root = window
@@ -1631,6 +1632,7 @@ mod tests {
         draw_window(window, cx);
 
         let incremental_counters = root.read_with(cx, |tree, _| tree.work_counters());
+        assert!(incremental_counters.root_render_count() >= 1);
         assert!(incremental_counters.entity_render_count() >= 1);
         assert!(incremental_counters.element_render_count() >= 1);
         assert!(incremental_counters.handler_registration_count() >= 2);
