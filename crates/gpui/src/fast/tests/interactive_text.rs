@@ -7,8 +7,8 @@ use crate::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, CursorStyle, FontId, GlyphId,
     InteractiveElement as _, InteractiveText, IntoElement, Keystroke, LineLayout, Modifiers,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels,
-    PlatformInput, Point, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, ShapedGlyph,
-    ShapedRun, SharedString, StatefulInteractiveElement as _, Styled as _, StyledText,
+    PlatformInput, Point, Render, ScrollDelta, ScrollEvent, ScrollHandle, ScrollSource,
+    ShapedGlyph, ShapedRun, SharedString, StatefulInteractiveElement as _, Styled as _, StyledText,
     TestAppContext, TextLayout, TouchPhase, UniformListScrollHandle, Window, WindowHandle,
     WrapBoundary, WrappedLineLayout, div, point, px, rgb, uniform_list,
 };
@@ -683,11 +683,12 @@ fn wheel(cx: &mut TestAppContext, window: AnyWindowHandle, dy: f32) {
     let frame = with_window(cx, window, |window, _| window.fast_layers.frame);
     with_window(cx, window, |window, cx| {
         window.dispatch_event(
-            PlatformInput::ScrollWheel(ScrollWheelEvent {
+            PlatformInput::Scroll(ScrollEvent {
                 position: point(px(POINTER.0), px(POINTER.1)),
                 delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
                 modifiers: Modifiers::default(),
                 touch_phase: TouchPhase::Moved,
+                source: ScrollSource::Pointer,
             }),
             cx,
         );
