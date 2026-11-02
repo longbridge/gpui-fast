@@ -19,7 +19,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
 };
 
@@ -94,6 +94,10 @@ pub trait DynamicTexturePlatform: Send + Sync {
 
     /// Uploads `bytes` for `bounds` — relative to the texture's own origin —
     /// into the texture allocated for `id`.
+    ///
+    /// May fail while the platform still holds earlier staged uploads, for
+    /// example when the window has not drawn to drain them. A refused
+    /// upload leaves the texture's previous contents in place.
     fn update_texture(
         &self,
         id: DynamicTextureId,
@@ -136,6 +140,12 @@ fn require_platform(
 }
 
 static NEXT_TEXTURE_ID: AtomicU32 = AtomicU32::new(0);
+
+/// Set the first time the id counter passes the reserved atlas range. The
+/// counter is not allowed to wrap: past `u32::MAX` it would count back into
+/// ids a live texture may still hold, so once the range runs out no further
+/// id is granted for the life of the process.
+static IDS_EXHAUSTED: AtomicBool = AtomicBool::new(false);
 
 /// The live dynamic textures, so update and paint can validate their
 /// arguments against the size the texture was created with.
@@ -206,10 +216,14 @@ pub(crate) fn create(
     let packed = pack_rows(bytes, stride, row_bytes, height);
     let backend = platform()?;
     let id = DynamicTextureId(NEXT_TEXTURE_ID.fetch_add(1, Ordering::Relaxed));
-    // Ids count up for the life of the process and map into the reserved
-    // atlas range by wrapping, so an id past the range would name a layer
-    // tile's texture. Refuse instead of letting the two id spaces meet.
-    anyhow::ensure!(id.0 < DYNAMIC_ID_LIMIT, "dynamic texture ids are exhausted");
+    // Ids count up for the life of the process into the reserved atlas
+    // range, so an id past the range would name a layer tile's texture.
+    // Refuse — and keep refusing for good: the counter would eventually
+    // wrap around and hand out an id a live texture already holds.
+    if IDS_EXHAUSTED.load(Ordering::Relaxed) || id.0 >= DYNAMIC_ID_LIMIT {
+        IDS_EXHAUSTED.store(true, Ordering::Relaxed);
+        anyhow::bail!("dynamic texture ids are exhausted");
+    }
     backend
         .create_texture(id, size, &packed)
         .with_context(|| format!("failed to create dynamic texture {id:?}"))?;
@@ -255,6 +269,11 @@ pub(crate) fn paint(
 
     let texture_size = live_size(texture.id)?;
 
+    // Every consumer resolves a sprite of this texture through its atlas
+    // texture id — the dynamic range the renderer checks first — and never
+    // looks the tile up by id in the atlas, so the tile id here only needs
+    // to be stable within the scene; it must never be used to reach the
+    // sprite atlas.
     let tile = AtlasTile {
         texture_id: texture.id.atlas_texture_id(),
         tile_id: TileId(texture.id.0),
@@ -310,7 +329,11 @@ impl Window {
     ///
     /// The region is relative to the texture's own origin and must lie inside
     /// it; both requirements are checked, so a stale texture size cannot
-    /// scribble over other content.
+    /// scribble over other content. The platform may also refuse the update
+    /// while it still holds earlier staged uploads — a window that has not
+    /// drawn to drain them — in which case the error is returned, the
+    /// texture keeps its previous contents, and the version the next paint
+    /// carries does not advance.
     ///
     /// Called outside a frame, this marks the window for a full redraw, so
     /// cached content showing the texture — a retained view that would draw
@@ -380,20 +403,25 @@ fn validate_region(
         "dynamic texture update is outside the texture"
     );
 
-    let row_bytes = width as usize * BYTES_PER_PIXEL;
+    // Positive and bounded by the texture's i32 size, so the usize casts
+    // cannot truncate or go negative.
+    let (width, height) = (width as usize, height as usize);
+    let row_bytes = width
+        .checked_mul(BYTES_PER_PIXEL)
+        .context("dynamic texture region row size overflow")?;
     let stride = usize::try_from(bytes_per_row).context("negative bytes per row")?;
     anyhow::ensure!(
         stride >= row_bytes,
         "dynamic texture stride is smaller than one row"
     );
 
-    let required = checked_payload_len(height as usize, stride, row_bytes)?;
+    let required = checked_payload_len(height, stride, row_bytes)?;
     anyhow::ensure!(
         bytes.len() >= required,
         "dynamic texture update is shorter than the region"
     );
 
-    Ok(pack_rows(bytes, stride, row_bytes, height as usize))
+    Ok(pack_rows(bytes, stride, row_bytes, height))
 }
 
 /// The exact byte length a `height`-row payload needs with `stride` bytes per
@@ -680,11 +708,17 @@ mod tests {
         mock.fail_updates.store(true, Ordering::SeqCst);
 
         let texture = create(size_of(4, 4), &packed_bytes(4, 4), 16).expect("created");
+        let version = painted_version(texture.id);
         let result = update(texture, bounds_at((0, 0), 2, 2), &packed_bytes(2, 2), 8);
         assert!(result.is_err(), "the backend's error must propagate");
         assert!(
             live_size(texture.id).is_ok(),
             "the texture stays live for the next attempt"
+        );
+        assert_eq!(
+            painted_version(texture.id),
+            version,
+            "a refused update must not advance the version the next paint carries"
         );
     }
 

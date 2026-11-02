@@ -139,7 +139,8 @@ struct MetalDynamicTextures {
     supports_shared_storage: bool,
     textures: Mutex<HashMap<DynamicTextureId, (metal::Texture, Size<DevicePixels>)>>,
     /// Updates staged by [`update_texture`], copied into their textures by
-    /// the frame that samples them (see [`encode_uploads`]).
+    /// the frame that samples them (see [`encode_uploads`]). Bounded per
+    /// texture by bytes; see the budget in [`update_texture`].
     pending_uploads: Mutex<Vec<PendingUpload>>,
 }
 
@@ -262,21 +263,28 @@ impl DynamicTexturePlatform for MetalDynamicTextures {
                 length: bytes.len() as u64,
             });
         }
-        // Bound the staging queue per texture: a window that stopped
-        // drawing — hidden or minimized — while its producer keeps updating
-        // would otherwise pile buffers up without limit. The oldest staged
-        // updates go first; for a live stream the newest contents are the
-        // ones worth drawing when the window comes back, and the regions an
-        // older staged update covered arrive again with the producer's next
-        // frames.
-        const MAX_PENDING_PER_TEXTURE: usize = 4;
+        // Bound the staging queue per texture by bytes, not by update
+        // count: a producer that splits a frame into many small dirty
+        // regions pushes a legitimate same-tick burst, which a fixed
+        // count would truncate. What needs bounding is a stream into a
+        // window that stopped drawing, where nothing drains the queue.
+        // At the budget's edge the update reports failure instead of
+        // dropping an older staged region: the caller learns the pixels
+        // have not reached the GPU, and the core does not advance the
+        // texture's version, so no cached tile re-renders against
+        // contents it will not get.
+        const MAX_STAGED_FULL_FRAMES: u64 = 4;
+        let frame_bytes = texture_size.width.0 as u64 * texture_size.height.0 as u64 * 4;
         let mut pending = self.pending_uploads.lock();
-        let mut staged = pending.iter().filter(|upload| upload.id == id).count();
-        while staged >= MAX_PENDING_PER_TEXTURE {
-            let oldest = pending.iter().position(|upload| upload.id == id);
-            pending.remove(oldest.expect("counted a staged update above"));
-            staged -= 1;
-        }
+        let staged_bytes = pending
+            .iter()
+            .filter(|upload| upload.id == id)
+            .map(|upload| upload.buffer.length())
+            .sum::<u64>();
+        anyhow::ensure!(
+            staged_bytes + bytes.len() as u64 <= frame_bytes.saturating_mul(MAX_STAGED_FULL_FRAMES),
+            "dynamic texture {id:?}'s staging queue is full; draw the window to drain it"
+        );
         pending.push(PendingUpload {
             id,
             buffer,
@@ -296,5 +304,142 @@ impl DynamicTexturePlatform for MetalDynamicTextures {
         // Drop the staged updates of a texture that is gone; their buffers
         // would otherwise wait for a frame that will never sample them.
         self.pending_uploads.lock().retain(|upload| upload.id != id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MetalDynamicTextures, PendingUpload};
+    use gpui::{
+        AtlasTextureId, AtlasTextureKind, Bounds, DevicePixels, DynamicTextureId,
+        DynamicTexturePlatform, Size, point,
+    };
+    use parking_lot::Mutex;
+    use std::collections::HashMap;
+
+    /// A texture id for tests, named through the public mapping: an atlas
+    /// texture id inside the reserved range maps back to the texture of the
+    /// same offset. `BASE` mirrors the core's reserved range base, which is
+    /// private to the `fast` module.
+    fn test_id(offset: u32) -> DynamicTextureId {
+        const BASE: u32 = 0xE000_0000;
+        DynamicTextureId::from_atlas_texture_id(AtlasTextureId {
+            index: BASE + offset,
+            kind: AtlasTextureKind::Polychrome,
+        })
+        .expect("the reserved dynamic range maps to texture ids")
+    }
+
+    /// A backend over the host's Metal device, in managed storage so the
+    /// textures allocate on every Mac the tests can run on. Staging is
+    /// pure CPU work, so these tests exercise it without a GPU frame.
+    fn managed_backend() -> Option<MetalDynamicTextures> {
+        let device = metal::Device::system_default()?;
+        Some(MetalDynamicTextures {
+            device,
+            supports_shared_storage: false,
+            textures: Mutex::new(HashMap::new()),
+            pending_uploads: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn size_of(width: i32, height: i32) -> Size<DevicePixels> {
+        Size {
+            width: DevicePixels(width),
+            height: DevicePixels(height),
+        }
+    }
+
+    fn bounds_at(origin: (i32, i32), width: i32, height: i32) -> Bounds<DevicePixels> {
+        Bounds {
+            origin: point(DevicePixels(origin.0), DevicePixels(origin.1)),
+            size: size_of(width, height),
+        }
+    }
+
+    /// Distinct bytes per pixel, so a staged region is recognisable.
+    fn packed_bytes(width: i32, height: i32, seed: u8) -> Vec<u8> {
+        (0..width * height * 4)
+            .map(|i| seed.wrapping_add(i as u8))
+            .collect()
+    }
+
+    fn staged_bytes(upload: &PendingUpload) -> Vec<u8> {
+        let length = upload.buffer.length() as usize;
+        unsafe { std::slice::from_raw_parts(upload.buffer.contents() as *const u8, length) }
+            .to_vec()
+    }
+
+    #[test]
+    fn stages_more_than_four_disjoint_updates_without_loss() {
+        let Some(backend) = managed_backend() else {
+            return;
+        };
+        let id = test_id(1);
+        backend
+            .create_texture(id, size_of(32, 32), &packed_bytes(32, 32, 0))
+            .expect("created");
+
+        // Six disjoint 2x2 updates — one past the per-texture count a
+        // count cap would have kept, all distinct in place and content.
+        let mut expected = Vec::new();
+        for i in 0..6u32 {
+            let bounds = bounds_at(((i % 3) as i32 * 4, (i / 3) as i32 * 4), 2, 2);
+            let bytes = packed_bytes(2, 2, (i + 1) as u8);
+            backend
+                .update_texture(id, bounds, &bytes)
+                .expect("every disjoint update is staged");
+            expected.push((bounds, bytes));
+        }
+
+        let pending = backend.pending_uploads.lock();
+        assert_eq!(
+            pending.len(),
+            expected.len(),
+            "every disjoint update stays staged"
+        );
+        for (upload, (bounds, bytes)) in pending.iter().zip(&expected) {
+            assert_eq!(upload.id, id);
+            assert_eq!(upload.region.origin.x, bounds.origin.x.0 as u64);
+            assert_eq!(upload.region.origin.y, bounds.origin.y.0 as u64);
+            assert_eq!(upload.region.size.width, bounds.size.width.0 as u64);
+            assert_eq!(upload.region.size.height, bounds.size.height.0 as u64);
+            assert_eq!(&staged_bytes(upload)[..bytes.len()], bytes);
+        }
+    }
+
+    #[test]
+    fn refuses_updates_past_the_staging_budget() {
+        let Some(backend) = managed_backend() else {
+            return;
+        };
+        let id = test_id(2);
+        // A 16x16 texture stages 1024 bytes per full frame; four fit.
+        backend
+            .create_texture(id, size_of(16, 16), &packed_bytes(16, 16, 0))
+            .expect("created");
+
+        let frame = packed_bytes(16, 16, 1);
+        for _ in 0..4 {
+            backend
+                .update_texture(id, bounds_at((0, 0), 16, 16), &frame)
+                .expect("four full frames fit the budget");
+        }
+        assert!(
+            backend
+                .update_texture(id, bounds_at((0, 0), 16, 16), &frame)
+                .is_err()
+        );
+        assert_eq!(
+            backend.pending_uploads.lock().len(),
+            4,
+            "the refusal leaves the staged updates untouched"
+        );
+
+        backend.remove_texture(id);
+        assert!(
+            backend.pending_uploads.lock().is_empty(),
+            "removing the texture drops its staged updates"
+        );
     }
 }
