@@ -13,17 +13,28 @@
 //! order committed, so a frame never samples a region an in-flight
 //! predecessor is still overwriting.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, ffi::c_void, ptr::NonNull, sync::Arc};
 
+use anyhow::{Context as _, Result};
 use gpui::{
     Bounds, DevicePixels, DynamicTextureId, DynamicTexturePlatform, Size,
     set_dynamic_texture_platform,
 };
-use metal::{
-    MTLBlitOption, MTLOrigin, MTLPixelFormat, MTLRegion, MTLResourceOptions, MTLSize,
-    MTLTextureUsage, NSRange,
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_foundation::NSRange;
+use objc2_metal::{
+    MTLBlitCommandEncoder, MTLBlitOption, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder,
+    MTLCommandQueue, MTLDevice, MTLOrigin, MTLPixelFormat, MTLRegion, MTLResourceOptions, MTLSize,
+    MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
 use parking_lot::{Mutex, RwLock};
+
+/// The Metal objects kept alive for the life of the process.
+type Device = Retained<ProtocolObject<dyn MTLDevice>>;
+type CommandQueue = Retained<ProtocolObject<dyn MTLCommandQueue>>;
+type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
+type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 
 /// The textures one renderer's device owns, looked up by the draw path.
 static METAL_TEXTURES: RwLock<Option<Arc<MetalDynamicTextures>>> = RwLock::new(None);
@@ -37,11 +48,11 @@ static METAL_TEXTURES: RwLock<Option<Arc<MetalDynamicTextures>>> = RwLock::new(N
 /// `supports_shared_storage` is the renderer's own answer, not a guess from
 /// the device: only Apple GPUs can create shared textures on macOS, and an
 /// Intel Mac reports unified memory it cannot back a shared texture with.
-pub(crate) fn init(device: &metal::DeviceRef, supports_shared_storage: bool) {
+pub(crate) fn init(device: Device, supports_shared_storage: bool) {
     let mut textures = METAL_TEXTURES.write();
     if textures.is_none() {
         *textures = Some(Arc::new(MetalDynamicTextures {
-            device: device.to_owned(),
+            device,
             supports_shared_storage,
             textures: Mutex::new(HashMap::new()),
             pending_uploads: Mutex::new(Vec::new()),
@@ -58,29 +69,29 @@ pub(crate) fn init(device: &metal::DeviceRef, supports_shared_storage: bool) {
 /// queue restores the order — buffers run in the order committed, and a
 /// frame's blits precede its passes in the same buffer — so no frame samples
 /// a region an in-flight upload is overwriting, whatever window encodes it.
-pub(crate) fn command_queue(device: &metal::DeviceRef) -> metal::CommandQueue {
-    static SHARED_QUEUE: RwLock<Option<(u64, metal::CommandQueue)>> = RwLock::new(None);
-    let registry_id = device.registry_id();
+pub(crate) fn command_queue(device: &ProtocolObject<dyn MTLDevice>) -> Result<CommandQueue> {
+    static SHARED_QUEUE: RwLock<Option<(u64, CommandQueue)>> = RwLock::new(None);
+    let registry_id = device.registryID();
     let mut shared = SHARED_QUEUE.write();
     if let Some((installed_for, queue)) = shared.as_ref() {
         if *installed_for == registry_id {
-            return queue.clone();
+            return Ok(queue.clone());
         }
     }
-    let queue = device.new_command_queue();
+    let queue = device.newCommandQueue().context("creating command queue")?;
     *shared = Some((registry_id, queue.clone()));
-    queue
+    Ok(queue)
 }
 
 /// The Metal texture behind an atlas texture id the scene carries, if it is
 /// one of this process's dynamic textures and it belongs to `device`.
 pub(crate) fn metal_texture(
-    device: &metal::DeviceRef,
+    device: &ProtocolObject<dyn MTLDevice>,
     id: gpui::AtlasTextureId,
-) -> Option<metal::Texture> {
+) -> Option<Texture> {
     let dynamic_id = DynamicTextureId::from_atlas_texture_id(id)?;
     let textures = METAL_TEXTURES.read().clone()?;
-    if textures.device.registry_id() != device.registry_id() {
+    if textures.device.registryID() != device.registryID() {
         return None;
     }
     textures
@@ -96,8 +107,14 @@ pub(crate) fn metal_texture(
 /// pass that samples the textures. A staged update whose texture is gone is
 /// dropped with its buffer; the command buffer retains the rest until it
 /// completes, so the buffers may be released here.
-pub(crate) fn encode_uploads(command_buffer: &metal::CommandBufferRef) {
+pub(crate) fn encode_uploads(command_buffer: &ProtocolObject<dyn MTLCommandBuffer>) {
     let Some(textures) = METAL_TEXTURES.read().clone() else {
+        return;
+    };
+    // The staged updates stay queued when the buffer cannot hand out an
+    // encoder, so nothing a caller was told had reached the GPU is lost;
+    // the next frame tries again.
+    let Some(encoder) = command_buffer.blitCommandEncoder() else {
         return;
     };
     let pending = textures
@@ -105,70 +122,101 @@ pub(crate) fn encode_uploads(command_buffer: &metal::CommandBufferRef) {
         .lock()
         .drain(..)
         .collect::<Vec<_>>();
-    if pending.is_empty() {
-        return;
-    }
-
-    let encoder = command_buffer.new_blit_command_encoder();
     for upload in pending {
         let Some((texture, _)) = textures.textures.lock().get(&upload.id).cloned() else {
             continue;
         };
-        encoder.copy_from_buffer_to_texture(
-            &upload.buffer,
-            0,
-            upload.bytes_per_row,
-            0,
-            MTLSize::new(upload.region.size.width, upload.region.size.height, 1),
-            &texture,
-            0,
-            0,
-            MTLOrigin {
-                x: upload.region.origin.x,
-                y: upload.region.origin.y,
-                z: 0,
-            },
-            MTLBlitOption::empty(),
-        );
+        // SAFETY: the region lies inside the texture (checked when the upload
+        // was staged), the source buffer holds exactly the region's rows
+        // tightly packed, and both outlive the command buffer.
+        unsafe {
+            encoder.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin_options(
+                &upload.buffer,
+                0,
+                upload.bytes_per_row,
+                0,
+                MTLSize {
+                    width: upload.region.size.width,
+                    height: upload.region.size.height,
+                    depth: 1,
+                },
+                &texture,
+                0,
+                0,
+                MTLOrigin {
+                    x: upload.region.origin.x,
+                    y: upload.region.origin.y,
+                    z: 0,
+                },
+                MTLBlitOption::None,
+            );
+        }
     }
-    encoder.end_encoding();
+    encoder.endEncoding();
 }
 
 struct MetalDynamicTextures {
-    device: metal::Device,
+    device: Device,
     supports_shared_storage: bool,
-    textures: Mutex<HashMap<DynamicTextureId, (metal::Texture, Size<DevicePixels>)>>,
+    textures: Mutex<HashMap<DynamicTextureId, (Texture, Size<DevicePixels>)>>,
     /// Updates staged by [`update_texture`], copied into their textures by
     /// the frame that samples them (see [`encode_uploads`]). Bounded per
     /// texture by bytes; see the budget in [`update_texture`].
     pending_uploads: Mutex<Vec<PendingUpload>>,
 }
 
+// SAFETY: every field that mutates is behind a parking_lot mutex, and the
+// Metal handles on the other side (device, queue, textures, buffers) are
+// documented as thread-safe to use from any thread; sharing them through the
+// core's platform slot therefore adds no race the mutexes do not cover.
+unsafe impl Send for MetalDynamicTextures {}
+unsafe impl Sync for MetalDynamicTextures {}
+
 /// One staged update: tightly packed rows for a region of a texture, in a
 /// buffer the CPU wrote and a frame's blit copies from.
 struct PendingUpload {
     id: DynamicTextureId,
-    buffer: metal::Buffer,
-    bytes_per_row: u64,
+    buffer: Buffer,
+    bytes_per_row: usize,
     region: MTLRegion,
+}
+
+/// A region in device pixels, for the blit paths.
+fn region(origin: (i32, i32), width: i32, height: i32) -> MTLRegion {
+    MTLRegion {
+        origin: MTLOrigin {
+            x: origin.0 as usize,
+            y: origin.1 as usize,
+            z: 0,
+        },
+        size: MTLSize {
+            width: width as usize,
+            height: height as usize,
+            depth: 1,
+        },
+    }
 }
 
 impl MetalDynamicTextures {
     /// A standalone BGRA8 texture, shared storage when the device allows it.
-    fn new_texture(&self, size: Size<DevicePixels>) -> metal::Texture {
-        let descriptor = metal::TextureDescriptor::new();
-        descriptor.set_width(size.width.0 as u64);
-        descriptor.set_height(size.height.0 as u64);
-        descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+    fn new_texture(&self, size: Size<DevicePixels>) -> Option<Texture> {
+        let descriptor = MTLTextureDescriptor::new();
+        // SAFETY: every caller refuses non-positive dimensions first, so both
+        // properties name a real texture size.
+        unsafe {
+            descriptor.setWidth(size.width.0 as usize);
+            descriptor.setHeight(size.height.0 as usize);
+        }
+        descriptor.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
         // A blit copy into the texture writes it on the GPU, which needs the
         // write usage alongside the shader reads the draw path performs.
-        descriptor.set_usage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
-        descriptor.set_storage_mode(if self.supports_shared_storage {
-            metal::MTLStorageMode::Shared
+        descriptor.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
+        descriptor.setStorageMode(if self.supports_shared_storage {
+            MTLStorageMode::Shared
         } else {
-            metal::MTLStorageMode::Managed
+            MTLStorageMode::Managed
         });
-        self.device.new_texture(&descriptor)
+        self.device.newTextureWithDescriptor(&descriptor)
     }
 }
 
@@ -178,35 +226,36 @@ impl DynamicTexturePlatform for MetalDynamicTextures {
         id: DynamicTextureId,
         size: Size<DevicePixels>,
         bytes: &[u8],
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         let expected = size.width.0 as usize * size.height.0 as usize * 4;
         anyhow::ensure!(
             bytes.len() == expected,
             "dynamic texture payload does not match its dimensions"
         );
 
-        let texture = self.new_texture(size);
         // `newTextureWithDescriptor:` answers nil when the device cannot back
         // the descriptor — a texture past its size limit, or a storage mode it
-        // does not support. Every property of that object reads as zero, so a
-        // sprite sampling it would draw nothing and the caller would have no
-        // idea why; refuse here instead.
-        anyhow::ensure!(
-            texture.width() == size.width.0.max(0) as u64
-                && texture.height() == size.height.0.max(0) as u64,
-            "the device could not allocate a {}x{} dynamic texture",
-            size.width.0,
-            size.height.0
-        );
+        // does not support. Refuse here instead of storing nothing under this
+        // id, which would draw empty sprites with no error anywhere.
+        let texture = self.new_texture(size).with_context(|| {
+            format!(
+                "the device could not allocate a {}x{} dynamic texture",
+                size.width.0, size.height.0
+            )
+        })?;
 
         // The initial upload happens before any frame can reference the
         // texture's never-reused id, so no in-flight frame samples it.
-        texture.replace_region(
-            MTLRegion::new_2d(0, 0, size.width.0 as u64, size.height.0 as u64),
-            0,
-            bytes.as_ptr() as *const _,
-            size.width.0 as u64 * 4,
-        );
+        // SAFETY: `bytes` holds exactly one tightly packed frame for this
+        // texture, and the region covers all of it.
+        unsafe {
+            texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                region((0, 0), size.width.0, size.height.0),
+                0,
+                NonNull::new_unchecked(bytes.as_ptr() as *mut c_void),
+                size.width.0 as usize * 4,
+            );
+        }
         self.textures.lock().insert(id, (texture, size));
         Ok(())
     }
@@ -216,7 +265,7 @@ impl DynamicTexturePlatform for MetalDynamicTextures {
         id: DynamicTextureId,
         bounds: Bounds<DevicePixels>,
         bytes: &[u8],
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         let entry = self
             .textures
             .lock()
@@ -233,34 +282,39 @@ impl DynamicTexturePlatform for MetalDynamicTextures {
             "dynamic texture update is outside the texture"
         );
 
-        // Stage the rows in a buffer instead of `replace_region`, which
-        // would overwrite a texture a committed frame may still be sampling.
+        // Stage the rows in a buffer instead of `replaceRegion`, which would
+        // overwrite a texture a committed frame may still be sampling.
         let options = if self.supports_shared_storage {
             MTLResourceOptions::StorageModeShared
         } else {
             MTLResourceOptions::StorageModeManaged
         };
-        let buffer = self.device.new_buffer(bytes.len() as u64, options);
-        // A buffer the device refuses comes back empty, and writing the rows
-        // through its null `contents()` would crash instead of reporting it.
-        anyhow::ensure!(
-            buffer.length() >= bytes.len() as u64,
-            "the device could not stage a {} byte dynamic texture update",
-            bytes.len()
-        );
+        // A buffer the device refuses comes back empty, so there is no null
+        // `contents()` to write the rows through.
+        let buffer = self
+            .device
+            .newBufferWithLength_options(bytes.len(), options)
+            .with_context(|| {
+                format!(
+                    "the device could not stage a {} byte dynamic texture update",
+                    bytes.len()
+                )
+            })?;
+        // SAFETY: the buffer is `bytes.len()` long and `bytes` is live and
+        // distinct from it for the copy.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 bytes.as_ptr(),
-                buffer.contents() as *mut u8,
+                buffer.contents().as_ptr() as *mut u8,
                 bytes.len(),
             );
         }
         if !self.supports_shared_storage {
             // Managed storage: tell Metal the CPU touched the whole buffer
             // before it is read.
-            buffer.did_modify_range(NSRange {
+            buffer.didModifyRange(NSRange {
                 location: 0,
-                length: bytes.len() as u64,
+                length: bytes.len(),
             });
         }
         // Bound the staging queue per texture by bytes, not by update
@@ -273,27 +327,26 @@ impl DynamicTexturePlatform for MetalDynamicTextures {
         // have not reached the GPU, and the core does not advance the
         // texture's version, so no cached tile re-renders against
         // contents it will not get.
-        const MAX_STAGED_FULL_FRAMES: u64 = 4;
-        let frame_bytes = texture_size.width.0 as u64 * texture_size.height.0 as u64 * 4;
+        const MAX_STAGED_FULL_FRAMES: usize = 4;
+        let frame_bytes = texture_size.width.0 as usize * texture_size.height.0 as usize * 4;
         let mut pending = self.pending_uploads.lock();
         let staged_bytes = pending
             .iter()
             .filter(|upload| upload.id == id)
             .map(|upload| upload.buffer.length())
-            .sum::<u64>();
+            .sum::<usize>();
         anyhow::ensure!(
-            staged_bytes + bytes.len() as u64 <= frame_bytes.saturating_mul(MAX_STAGED_FULL_FRAMES),
+            staged_bytes + bytes.len() <= frame_bytes.saturating_mul(MAX_STAGED_FULL_FRAMES),
             "dynamic texture {id:?}'s staging queue is full; draw the window to drain it"
         );
         pending.push(PendingUpload {
             id,
             buffer,
-            bytes_per_row: bounds.size.width.0 as u64 * 4,
-            region: MTLRegion::new_2d(
-                bounds.origin.x.0 as u64,
-                bounds.origin.y.0 as u64,
-                bounds.size.width.0 as u64,
-                bounds.size.height.0 as u64,
+            bytes_per_row: bounds.size.width.0 as usize * 4,
+            region: region(
+                (bounds.origin.x.0, bounds.origin.y.0),
+                bounds.size.width.0,
+                bounds.size.height.0,
             ),
         });
         Ok(())
@@ -314,6 +367,7 @@ mod tests {
         AtlasTextureId, AtlasTextureKind, Bounds, DevicePixels, DynamicTextureId,
         DynamicTexturePlatform, Size, point,
     };
+    use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice};
     use parking_lot::Mutex;
     use std::collections::HashMap;
 
@@ -334,7 +388,7 @@ mod tests {
     /// textures allocate on every Mac the tests can run on. Staging is
     /// pure CPU work, so these tests exercise it without a GPU frame.
     fn managed_backend() -> Option<MetalDynamicTextures> {
-        let device = metal::Device::system_default()?;
+        let device = MTLCreateSystemDefaultDevice()?;
         Some(MetalDynamicTextures {
             device,
             supports_shared_storage: false,
@@ -365,9 +419,12 @@ mod tests {
     }
 
     fn staged_bytes(upload: &PendingUpload) -> Vec<u8> {
-        let length = upload.buffer.length() as usize;
-        unsafe { std::slice::from_raw_parts(upload.buffer.contents() as *const u8, length) }
-            .to_vec()
+        let length = upload.buffer.length();
+        // SAFETY: the buffer holds the packed rows the upload staged.
+        unsafe {
+            std::slice::from_raw_parts(upload.buffer.contents().as_ptr() as *const u8, length)
+        }
+        .to_vec()
     }
 
     #[test]
@@ -380,8 +437,8 @@ mod tests {
             .create_texture(id, size_of(32, 32), &packed_bytes(32, 32, 0))
             .expect("created");
 
-        // Six disjoint 2x2 updates — one past the per-texture count a
-        // count cap would have kept, all distinct in place and content.
+        // Six disjoint 2x2 updates — one past the per-texture count a count
+        // cap would have kept, all distinct in place and content.
         let mut expected = Vec::new();
         for i in 0..6u32 {
             let bounds = bounds_at(((i % 3) as i32 * 4, (i / 3) as i32 * 4), 2, 2);
@@ -400,10 +457,10 @@ mod tests {
         );
         for (upload, (bounds, bytes)) in pending.iter().zip(&expected) {
             assert_eq!(upload.id, id);
-            assert_eq!(upload.region.origin.x, bounds.origin.x.0 as u64);
-            assert_eq!(upload.region.origin.y, bounds.origin.y.0 as u64);
-            assert_eq!(upload.region.size.width, bounds.size.width.0 as u64);
-            assert_eq!(upload.region.size.height, bounds.size.height.0 as u64);
+            assert_eq!(upload.region.origin.x, bounds.origin.x.0 as usize);
+            assert_eq!(upload.region.origin.y, bounds.origin.y.0 as usize);
+            assert_eq!(upload.region.size.width, bounds.size.width.0 as usize);
+            assert_eq!(upload.region.size.height, bounds.size.height.0 as usize);
             assert_eq!(&staged_bytes(upload)[..bytes.len()], bytes);
         }
     }
