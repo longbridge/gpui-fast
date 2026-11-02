@@ -33,14 +33,16 @@ static METAL_TEXTURES: RwLock<Option<Arc<MetalDynamicTextures>>> = RwLock::new(N
 /// Called from the renderer's constructor. The first call wins: every
 /// renderer in the process selects the same Metal device, and textures must
 /// stay on the device that draws them.
-pub(crate) fn init(device: &metal::DeviceRef) {
+///
+/// `supports_shared_storage` is the renderer's own answer, not a guess from
+/// the device: only Apple GPUs can create shared textures on macOS, and an
+/// Intel Mac reports unified memory it cannot back a shared texture with.
+pub(crate) fn init(device: &metal::DeviceRef, supports_shared_storage: bool) {
     let mut textures = METAL_TEXTURES.write();
     if textures.is_none() {
         *textures = Some(Arc::new(MetalDynamicTextures {
             device: device.to_owned(),
-            // iOS does not support managed resources; see the renderer's own
-            // reasoning around `has_unified_memory`.
-            supports_shared_storage: cfg!(target_os = "ios") || device.has_unified_memory(),
+            supports_shared_storage,
             textures: Mutex::new(HashMap::new()),
             pending_uploads: Mutex::new(Vec::new()),
         }));

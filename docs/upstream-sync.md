@@ -200,7 +200,8 @@ release, and leave is sent when the pointer changes recipients. Prepaint scopes
 and retained context keep input ownership with the same surface as its paint.
 No application-specific timeline policy belongs here.
 
-- Dynamic textures, ours outright (no upstream pull request to track):
+- Dynamic textures (longbridge/gpui-fast#86), ours to change until upstream
+  takes them:
   `gpui` exports `DynamicTexture`, `DynamicTextureId`,
   `DynamicTexturePlatform`, `set_dynamic_texture_platform` and `Window`
   gains `create_dynamic_texture`, `update_dynamic_texture`,
