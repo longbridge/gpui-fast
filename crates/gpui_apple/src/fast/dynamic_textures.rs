@@ -185,6 +185,19 @@ impl DynamicTexturePlatform for MetalDynamicTextures {
         );
 
         let texture = self.new_texture(size);
+        // `newTextureWithDescriptor:` answers nil when the device cannot back
+        // the descriptor — a texture past its size limit, or a storage mode it
+        // does not support. Every property of that object reads as zero, so a
+        // sprite sampling it would draw nothing and the caller would have no
+        // idea why; refuse here instead.
+        anyhow::ensure!(
+            texture.width() == size.width.0.max(0) as u64
+                && texture.height() == size.height.0.max(0) as u64,
+            "the device could not allocate a {}x{} dynamic texture",
+            size.width.0,
+            size.height.0
+        );
+
         // The initial upload happens before any frame can reference the
         // texture's never-reused id, so no in-flight frame samples it.
         texture.replace_region(
@@ -227,6 +240,13 @@ impl DynamicTexturePlatform for MetalDynamicTextures {
             MTLResourceOptions::StorageModeManaged
         };
         let buffer = self.device.new_buffer(bytes.len() as u64, options);
+        // A buffer the device refuses comes back empty, and writing the rows
+        // through its null `contents()` would crash instead of reporting it.
+        anyhow::ensure!(
+            buffer.length() >= bytes.len() as u64,
+            "the device could not stage a {} byte dynamic texture update",
+            bytes.len()
+        );
         unsafe {
             std::ptr::copy_nonoverlapping(
                 bytes.as_ptr(),

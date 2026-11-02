@@ -208,11 +208,12 @@ No application-specific timeline policy belongs here.
   `paint_dynamic_texture` and `remove_dynamic_texture`. Streaming content —
   video, remote desktop — changes every frame, and upstream's only path for
   pixels is the atlas, where each frame's upload reallocates tiles and
-  invalidates the glyphs sharing them. The handle and the id are opaque, the
-  trait and its installer exist so the platform crates can register their
-  backends, and everything else in `fast::dynamic_textures` is
-  `pub(crate)`; without calling the new methods, an app observes no
-  difference in what GPUI draws.
+  invalidates the glyphs sharing them. The handle keeps its fields private and
+  the id only exposes the atlas-index mapping the renderer crates need to
+  resolve a sprite; the trait and its installer exist so the platform crates
+  can register their backends, and everything else in
+  `fast::dynamic_textures` is `pub(crate)`; without calling the new methods,
+  an app observes no difference in what GPUI draws.
 
 When the check fails, move the change into a `fast/` module and leave a hook
 behind that names it; use `git diff <import_commit> -- <file>` to see what

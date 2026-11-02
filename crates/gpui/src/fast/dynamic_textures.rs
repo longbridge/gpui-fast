@@ -121,10 +121,18 @@ pub fn set_dynamic_texture_platform(backend: Arc<dyn DynamicTexturePlatform>) {
 }
 
 fn platform() -> Result<Arc<dyn DynamicTexturePlatform>> {
-    PLATFORM
-        .read()
-        .clone()
-        .context("dynamic textures are not supported on this platform")
+    require_platform(PLATFORM.read().clone())
+}
+
+/// The backend to use, or the error that says why there is none.
+///
+/// Split out of [`platform`] so the missing-backend branch can be tested:
+/// the global is installed once per process, and a test binary that has
+/// already installed a mock can never see it empty again.
+fn require_platform(
+    platform: Option<Arc<dyn DynamicTexturePlatform>>,
+) -> Result<Arc<dyn DynamicTexturePlatform>> {
+    platform.context("dynamic textures are not supported on this platform")
 }
 
 static NEXT_TEXTURE_ID: AtomicU32 = AtomicU32::new(0);
@@ -411,7 +419,7 @@ fn pack_rows(bytes: &[u8], stride: usize, row_bytes: usize, height: usize) -> Ve
 mod tests {
     use super::{
         BYTES_PER_PIXEL, DYNAMIC_INDEX_BASE, DynamicTexture, DynamicTextureId,
-        DynamicTexturePlatform, PLATFORM, create, live_size, painted_version, remove,
+        DynamicTexturePlatform, create, live_size, painted_version, remove,
         set_dynamic_texture_platform, update, validate_region,
     };
     use crate::{
@@ -511,15 +519,16 @@ mod tests {
 
     #[test]
     fn create_reports_missing_platform() {
-        // Another test may have installed a mock already; the expectation
-        // only holds while no backend is installed.
-        if PLATFORM.read().is_none() {
-            let result = create(size_of(4, 4), &packed_bytes(4, 4), 16);
-            assert_eq!(
-                result.unwrap_err().to_string(),
-                "dynamic textures are not supported on this platform"
-            );
-        }
+        // The backend global is installed once per process, so it cannot be
+        // observed empty from a test binary that already installed a mock.
+        // Assert the branch directly instead of skipping when a mock is up.
+        let error = super::require_platform(None)
+            .err()
+            .expect("a missing backend is an error");
+        assert_eq!(
+            error.to_string(),
+            "dynamic textures are not supported on this platform"
+        );
     }
 
     #[test]
