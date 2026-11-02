@@ -5,9 +5,13 @@ use crate::{
     InspectorElementId, InteractiveElement as _, IntoElement, LayoutId, Pixels, Render,
     Styled as _, TestAppContext, Window, div, px,
 };
-use std::{cell::Cell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 type Slot = Rc<Cell<Option<LayoutId>>>;
+type StateId = Rc<RefCell<Option<GlobalElementId>>>;
 struct Marker(Rc<Cell<usize>>);
 impl Drop for Marker {
     fn drop(&mut self) {
@@ -25,7 +29,7 @@ fn touch(window: &mut Window, id: &GlobalElementId, live: &Rc<Cell<usize>>) {
 }
 
 enum Body {
-    Row([Slot; 2], [AnyElement; 2]),
+    Row([Slot; 2], [AnyElement; 2], bool),
     Forward(AnyElement),
     State(Leaf),
 }
@@ -53,7 +57,7 @@ impl Element for TestElement {
         cx: &mut App,
     ) -> (LayoutId, ()) {
         let node = match &mut self.1 {
-            Body::Row(slots, _) => {
+            Body::Row(slots, children, late_layout) => {
                 // Connect slots to the parent so the independent-root guard
                 // does not reject the splice before state copying is reached.
                 let nodes = slots
@@ -69,10 +73,16 @@ impl Element for TestElement {
                         node
                     })
                     .collect::<Vec<_>>();
+                if !*late_layout {
+                    for child in children {
+                        child.request_layout(window, cx);
+                    }
+                }
                 window.request_layout(Default::default(), nodes, cx)
             }
             Body::Forward(child) => child.request_layout(window, cx),
             Body::State(leaf) => {
+                *leaf.state_id.borrow_mut() = id.filter(|_| leaf.keep).cloned();
                 if leaf.keep {
                     touch(window, id.unwrap(), &leaf.live);
                 }
@@ -91,11 +101,13 @@ impl Element for TestElement {
         cx: &mut App,
     ) {
         match &mut self.1 {
-            Body::Row(_, children) => {
-                // Access order: A layout, B layout, A prepaint. Removing B's
-                // access must also remap A's recorded prepaint boundaries.
-                for child in &mut *children {
-                    child.request_layout(window, cx);
+            Body::Row(_, children, late_layout) => {
+                // Batch late layout before prepaint so a sibling's accesses
+                // can precede the other's recorded prepaint boundaries.
+                if *late_layout {
+                    for child in children.iter_mut() {
+                        child.request_layout(window, cx);
+                    }
                 }
                 for child in children {
                     child.prepaint(window, cx);
@@ -106,6 +118,12 @@ impl Element for TestElement {
             }
             Body::State(leaf) if leaf.keep && leaf.prepaint_touch => {
                 touch(window, id.unwrap(), &leaf.live);
+                if let Some((sibling_id, sibling_live)) = &leaf.prepaint_sibling
+                    && let Some(sibling_id) = sibling_id.borrow().as_ref()
+                {
+                    // An access owned by B also falls inside A's recorded range.
+                    touch(window, sibling_id, sibling_live);
+                }
             }
             _ => {}
         }
@@ -121,7 +139,7 @@ impl Element for TestElement {
         cx: &mut App,
     ) {
         match &mut self.1 {
-            Body::Row(_, children) => children
+            Body::Row(_, children, _) => children
                 .iter_mut()
                 .for_each(|child| child.paint(window, cx)),
             Body::Forward(child) => child.paint(window, cx),
@@ -136,6 +154,8 @@ struct Leaf {
     live: Rc<Cell<usize>>,
     keep: bool,
     prepaint_touch: bool,
+    state_id: StateId,
+    prepaint_sibling: Option<(StateId, Rc<Cell<usize>>)>,
 }
 impl Render for Leaf {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -146,6 +166,7 @@ struct Root {
     slots: [Slot; 2],
     views: [Entity<Leaf>; 2],
     renders: Rc<Cell<usize>>,
+    late_layout: bool,
 }
 impl Render for Root {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -161,6 +182,7 @@ impl Render for Root {
                     )
                     .into_any_element()
                 }),
+                self.late_layout,
             ),
         )
     }
@@ -168,10 +190,18 @@ impl Render for Root {
 
 #[test]
 fn late_layout_keeps_state_ranges_valid_without_rendering_the_parent() {
-    for retention in [false, true] {
+    for (retention, late_layout, foreign) in [
+        (false, true, false),
+        (true, true, false),
+        (false, false, true),
+        (true, false, true),
+        (false, false, false),
+        (true, false, false),
+    ] {
         let mut cx = TestAppContext::single();
         let slots: [Slot; 2] = std::array::from_fn(|_| Rc::new(Cell::new(None)));
         let live: [Rc<Cell<usize>>; 2] = std::array::from_fn(|_| Rc::new(Cell::new(0)));
+        let state_ids: [StateId; 2] = std::array::from_fn(|_| Rc::new(RefCell::new(None)));
         let renders = Rc::new(Cell::new(0));
         let views = std::array::from_fn(|index| {
             cx.new(|_| Leaf {
@@ -179,6 +209,9 @@ fn late_layout_keeps_state_ranges_valid_without_rendering_the_parent() {
                 live: live[index].clone(),
                 keep: true,
                 prepaint_touch: index == 0,
+                state_id: state_ids[index].clone(),
+                prepaint_sibling: (foreign && index == 0)
+                    .then(|| (state_ids[1].clone(), live[1].clone())),
             })
         });
         let window = cx.add_window(|window, _| {
@@ -187,6 +220,7 @@ fn late_layout_keeps_state_ranges_valid_without_rendering_the_parent() {
                 slots,
                 views: views.clone(),
                 renders: renders.clone(),
+                late_layout,
             }
         });
         let update = |index: usize, keep, cx: &mut TestAppContext| {
@@ -200,9 +234,13 @@ fn late_layout_keeps_state_ranges_valid_without_rendering_the_parent() {
                 .unwrap();
         };
         let before = renders.get();
+        for _ in 0..3 {
+            draw(&mut cx);
+        }
         assert_eq!(live[1].get(), 1);
         update(1, false, &mut cx);
         assert_eq!(live[1].get(), 0, "removed state must be dropped");
+        assert_eq!(live[0].get(), 1, "the sibling state must survive");
         draw(&mut cx);
         update(0, true, &mut cx); // Reuse the copied sibling's remapped range.
         assert_eq!(live[1].get(), 0);

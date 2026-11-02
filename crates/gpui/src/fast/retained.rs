@@ -29,15 +29,6 @@ use refineable::Refineable;
 use smallvec::SmallVec;
 use std::{any::TypeId, cell::RefCell, mem, ops::Range, rc::Rc};
 
-/// A layout request inside an open prepaint can put state accesses before
-/// clean sibling records. Its copied segments must filter rebuilt views.
-#[inline(always)]
-pub(crate) fn note_layout_request(window: &mut Window) {
-    if let Some(&index) = window.next_frame.retained.open.last() {
-        window.next_frame.retained.records[index].layout_during_prepaint = true;
-    }
-}
-
 /// Starts drawing a window's roots: its phase timing, and the views marked
 /// dirty for what they read. See [`Window::mark_changed_retained_views_dirty`].
 #[inline(always)]
@@ -95,8 +86,6 @@ pub(crate) struct RetainedSubtrees {
 pub(crate) struct RetainedSubtree {
     pub(crate) id: GlobalElementId,
     pub(crate) prepaint_range: Range<PrepaintStateIndex>,
-    /// Layout accesses may precede a child's recorded prepaint range.
-    pub(crate) layout_during_prepaint: bool,
     pub(crate) paint_range: Range<PaintIndex>,
     pub(crate) paint: PaintStatus,
     /// How many of the records following this one are nested inside it.
@@ -662,7 +651,6 @@ impl Window {
         previous: usize,
         cx: &mut App,
     ) -> Option<LayoutId> {
-        note_layout_request(self);
         let record = &self.rendered_frame.retained.records[previous];
         let layout = record.layout.as_ref()?;
         if layout.rem_size != self.rem_size() || layout.text_style != self.text_style() {
@@ -817,7 +805,6 @@ impl Window {
             target.push(RetainedSubtree {
                 id: record.id.clone(),
                 prepaint_range,
-                layout_during_prepaint: record.layout_during_prepaint,
                 paint_range: record.paint_range.clone(),
                 paint,
                 nested: if index == previous {
@@ -922,7 +909,6 @@ impl Window {
             let index = retained.push(RetainedSubtree {
                 id: id.clone(),
                 prepaint_range: start.clone()..start,
-                layout_during_prepaint: false,
                 paint_range: PaintIndex::default()..PaintIndex::default(),
                 paint: PaintStatus::Unpainted,
                 nested: 0,

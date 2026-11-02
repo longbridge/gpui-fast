@@ -363,7 +363,6 @@ impl<E: Element> Drawable<E> {
     fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
         match mem::take(&mut self.phase) {
             ElementDrawPhase::Start => {
-                crate::fast::retained::note_layout_request(window);
                 let element_id = self.element.id();
                 let fast_layout_key =
                     crate::fast::layout_key::push_layout_key(window, element_id.as_ref());

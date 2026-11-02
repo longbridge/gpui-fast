@@ -5511,7 +5511,6 @@ impl Window {
         children: impl IntoIterator<Item = LayoutId>,
         cx: &mut App,
     ) -> LayoutId {
-        crate::fast::retained::note_layout_request(self);
         self.invalidator.debug_assert_prepaint();
 
         cx.layout_id_buffer.clear();
@@ -5542,7 +5541,6 @@ impl Window {
         F: Fn(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
             + 'static,
     {
-        crate::fast::retained::note_layout_request(self);
         self.invalidator.debug_assert_prepaint();
 
         let rem_size = self.rem_size();
