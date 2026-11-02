@@ -55,6 +55,17 @@ only hold the hooks that call into it.
    switch retained mode is compiled only under `test-support`, and exported
    from `gpui.rs` one item at a time:
    `#[cfg(any(test, feature = "test-support"))] pub use fast::stats::LayoutStats;`.
+
+   The one deliberate exception is `fast::dynamic_textures` (longbridge/gpui-fast#86):
+   content that changes every frame — video, remote desktop — needs an app-visible
+   mutable texture, and upstream offers nothing of the kind; without one, each
+   frame reallocates atlas tiles and invalidates the glyphs sharing them. The
+   surface stays at the minimum that makes the feature usable: the opaque
+   `DynamicTexture` handle and `DynamicTextureId`, the `DynamicTexturePlatform`
+   trait and its installer (the seam the platform crates implement), and four
+   `Window` methods. Everything else in the module is `pub(crate)`, and the
+   module adds no rendering behavior an app could observe without calling the
+   new methods.
 6. **New files only inside `fast/`, or in our own crates** such as
    `crates/gpui_perf` (benchmarks, examples and the frame-measuring app) and
    `compat/` (the `gpui-pre-*` stand-ins GPUI Kit applications patch in).
@@ -188,6 +199,19 @@ their platform event loop. Capture runs first, press ownership survives through
 release, and leave is sent when the pointer changes recipients. Prepaint scopes
 and retained context keep input ownership with the same surface as its paint.
 No application-specific timeline policy belongs here.
+
+- Dynamic textures, ours outright (no upstream pull request to track):
+  `gpui` exports `DynamicTexture`, `DynamicTextureId`,
+  `DynamicTexturePlatform`, `set_dynamic_texture_platform` and `Window`
+  gains `create_dynamic_texture`, `update_dynamic_texture`,
+  `paint_dynamic_texture` and `remove_dynamic_texture`. Streaming content —
+  video, remote desktop — changes every frame, and upstream's only path for
+  pixels is the atlas, where each frame's upload reallocates tiles and
+  invalidates the glyphs sharing them. The handle and the id are opaque, the
+  trait and its installer exist so the platform crates can register their
+  backends, and everything else in `fast::dynamic_textures` is
+  `pub(crate)`; without calling the new methods, an app observes no
+  difference in what GPUI draws.
 
 When the check fails, move the change into a `fast/` module and leave a hook
 behind that names it; use `git diff <import_commit> -- <file>` to see what

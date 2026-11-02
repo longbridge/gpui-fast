@@ -399,7 +399,7 @@ impl MetalRenderer {
             MTLPixelFormat::BGRA8Unorm,
         )?;
 
-        let command_queue = device.newCommandQueue().context("creating command queue")?;
+        let command_queue = crate::fast::dynamic_textures::command_queue(&device)?;
         let supports_shared_storage = cfg!(target_os = "ios") || is_apple_gpu;
         #[expect(
             clippy::arc_with_non_send_sync,

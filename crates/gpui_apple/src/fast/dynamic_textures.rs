@@ -48,6 +48,28 @@ pub(crate) fn init(device: &metal::DeviceRef) {
     }
 }
 
+/// The command queue every renderer in the process shares.
+///
+/// Each renderer used to own a queue, which left an upload staged for one
+/// window unordered against another window's committed frames sampling the
+/// same texture: queues only order their own command buffers. One process
+/// queue restores the order — buffers run in the order committed, and a
+/// frame's blits precede its passes in the same buffer — so no frame samples
+/// a region an in-flight upload is overwriting, whatever window encodes it.
+pub(crate) fn command_queue(device: &metal::DeviceRef) -> metal::CommandQueue {
+    static SHARED_QUEUE: RwLock<Option<(u64, metal::CommandQueue)>> = RwLock::new(None);
+    let registry_id = device.registry_id();
+    let mut shared = SHARED_QUEUE.write();
+    if let Some((installed_for, queue)) = shared.as_ref() {
+        if *installed_for == registry_id {
+            return queue.clone();
+        }
+    }
+    let queue = device.new_command_queue();
+    *shared = Some((registry_id, queue.clone()));
+    queue
+}
+
 /// The Metal texture behind an atlas texture id the scene carries, if it is
 /// one of this process's dynamic textures and it belongs to `device`.
 pub(crate) fn metal_texture(
@@ -218,7 +240,22 @@ impl DynamicTexturePlatform for MetalDynamicTextures {
                 length: bytes.len() as u64,
             });
         }
-        self.pending_uploads.lock().push(PendingUpload {
+        // Bound the staging queue per texture: a window that stopped
+        // drawing — hidden or minimized — while its producer keeps updating
+        // would otherwise pile buffers up without limit. The oldest staged
+        // updates go first; for a live stream the newest contents are the
+        // ones worth drawing when the window comes back, and the regions an
+        // older staged update covered arrive again with the producer's next
+        // frames.
+        const MAX_PENDING_PER_TEXTURE: usize = 4;
+        let mut pending = self.pending_uploads.lock();
+        let mut staged = pending.iter().filter(|upload| upload.id == id).count();
+        while staged >= MAX_PENDING_PER_TEXTURE {
+            let oldest = pending.iter().position(|upload| upload.id == id);
+            pending.remove(oldest.expect("counted a staged update above"));
+            staged -= 1;
+        }
+        pending.push(PendingUpload {
             id,
             buffer,
             bytes_per_row: bounds.size.width.0 as u64 * 4,
@@ -234,5 +271,8 @@ impl DynamicTexturePlatform for MetalDynamicTextures {
 
     fn remove_texture(&self, id: DynamicTextureId) {
         self.textures.lock().remove(&id);
+        // Drop the staged updates of a texture that is gone; their buffers
+        // would otherwise wait for a frame that will never sample them.
+        self.pending_uploads.lock().retain(|upload| upload.id != id);
     }
 }

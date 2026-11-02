@@ -74,10 +74,8 @@ impl DynamicTextureId {
 /// [`crate::Window::create_dynamic_texture`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DynamicTexture {
-    /// The identifier to pass back to the update, paint and remove methods.
-    pub id: DynamicTextureId,
-    /// The size the texture was created with, in device pixels.
-    pub size: crate::Size<DevicePixels>,
+    id: DynamicTextureId,
+    size: crate::Size<DevicePixels>,
 }
 
 /// The GPU side of dynamic textures, implemented by the platform crates that
@@ -166,9 +164,11 @@ fn painted_version(id: DynamicTextureId) -> u32 {
 /// Allocates a mutable BGRA8 texture.
 ///
 /// `bytes` holds the initial contents in `bytes_per_row`-strided rows; it is
-/// repacked into tight rows before the upload. The payload must match the
-/// dimensions exactly.
-pub fn create(
+/// repacked into tight rows before the upload. The payload must hold every
+/// row's visible bytes; padding on the final row — what a native framebuffer
+/// allocation naturally has — is fine, and anything past the rows the
+/// texture needs is ignored.
+pub(crate) fn create(
     size: crate::Size<DevicePixels>,
     bytes: &[u8],
     bytes_per_row: u32,
@@ -191,8 +191,8 @@ pub fn create(
 
     let required = checked_payload_len(height, stride, row_bytes)?;
     anyhow::ensure!(
-        bytes.len() == required,
-        "dynamic texture payload length does not match its dimensions"
+        bytes.len() >= required,
+        "dynamic texture payload is shorter than its dimensions"
     );
 
     let packed = pack_rows(bytes, stride, row_bytes, height);
@@ -212,7 +212,7 @@ pub fn create(
 /// so a stale texture size cannot scribble over other content. The rows are
 /// repacked before the upload, and the texture's version advances so cached
 /// frames learn about the new contents.
-pub fn update(
+pub(crate) fn update(
     texture: DynamicTexture,
     bounds: Bounds<DevicePixels>,
     bytes: &[u8],
@@ -234,7 +234,11 @@ pub fn update(
 /// Paints the current contents of a mutable texture into the scene.
 ///
 /// This should only be called as part of the paint phase of element drawing.
-pub fn paint(window: &mut Window, bounds: Bounds<Pixels>, texture: DynamicTexture) -> Result<()> {
+pub(crate) fn paint(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    texture: DynamicTexture,
+) -> Result<()> {
     window.invalidator.debug_assert_paint();
 
     let texture_size = live_size(texture.id)?;
@@ -263,7 +267,7 @@ pub fn paint(window: &mut Window, bounds: Bounds<Pixels>, texture: DynamicTextur
 }
 
 /// Releases a mutable texture and its GPU memory.
-pub fn remove(texture: DynamicTexture) {
+pub(crate) fn remove(texture: DynamicTexture) {
     if live_textures().remove(&texture.id).is_some() {
         if let Some(backend) = PLATFORM.read().clone() {
             backend.remove_texture(texture.id);
@@ -295,6 +299,14 @@ impl Window {
     /// The region is relative to the texture's own origin and must lie inside
     /// it; both requirements are checked, so a stale texture size cannot
     /// scribble over other content.
+    ///
+    /// The window is marked for a full redraw, so cached content showing the
+    /// texture — a retained view that would draw nothing again, or a
+    /// scroll-layer tile — re-renders with the new contents even though no
+    /// element state changed. Updates made while a frame is drawing reach the
+    /// sprites that frame's later paints insert, since painting reads the
+    /// texture's current version; the redraw covers the elements that drew
+    /// earlier in the frame.
     pub fn update_dynamic_texture(
         &mut self,
         texture: DynamicTexture,
@@ -302,7 +314,9 @@ impl Window {
         bytes: &[u8],
         bytes_per_row: u32,
     ) -> Result<()> {
-        update(texture, bounds, bytes, bytes_per_row)
+        update(texture, bounds, bytes, bytes_per_row)?;
+        self.refresh();
+        Ok(())
     }
 
     /// Paints the current contents of a mutable texture into the scene.
@@ -505,14 +519,19 @@ mod tests {
     }
 
     #[test]
-    fn create_rejects_a_payload_that_does_not_match() {
-        let (_lock, _mock) = fresh_mock();
+    fn create_requires_every_row_and_ignores_trailing_bytes() {
+        let (_lock, mock) = fresh_mock();
 
         let short = create(size_of(4, 4), &packed_bytes(4, 4)[..63], 16);
         assert!(short.is_err(), "one byte short must be refused");
 
-        let long = create(size_of(4, 4), &packed_bytes(4, 5), 16);
-        assert!(long.is_err(), "extra bytes must be refused");
+        // A native framebuffer allocation pads the final row too: a 4x4
+        // BGRA surface with a 16-byte stride is 64 bytes, not 60.
+        let _padded = create(size_of(4, 4), &vec![0u8; 4 * 16], 16).expect("created");
+        {
+            let created = mock.created.lock();
+            assert_eq!(created.last().expect("created").2, 4 * 4 * BYTES_PER_PIXEL);
+        }
 
         let empty = create(size_of(4, 4), &[], 16);
         assert!(empty.is_err());
