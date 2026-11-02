@@ -162,7 +162,11 @@ for `gpui_macos`, `WgpuRenderer` gains `new_sharing_atlas` and
   upstream merges its version, the sync replaces ours with it. Two things
   behave differently from the pull request: a retained view drawn again from
   last frame keeps the surface switches it made, and `with_composition_surface`
-  inside a scroll layer paints where the layer does. On X11, when a
+  inside a scroll layer paints where the layer does. A window that composes
+  but holds no surface beyond the base and overlay surfaces presents with
+  `PlatformWindow::draw` and gives the platform only its base surface, so the
+  overlay's view, layer and textures are released until a surface is added.
+  On X11, when a
   compositing manager blends ARGB windows, the GPUI content above native
   surfaces is drawn into a transparent override-redirect window over the
   window instead of being cut out of them, so shadows and translucent
@@ -217,8 +221,19 @@ commit our copy was taken from is `zed_commit` in `UPSTREAM`, and
 4. Update `zed_commit` and `import_commit` in `UPSTREAM` to the new zed commit
    and the new vendor commit, and add or remove entries under `tracked` if zed
    added or removed crates we use.
-5. Run `script/check-upstream`, the tests and clippy.
-6. Check that `window/a11y.rs` still keeps the tree it last sent in
+5. Look at whether upstream changed how an index under the pointer is found:
+   `TextLayout::index_for_position`'s steps from line to line (with
+   `WrappedLineLayout::size` and `WrappedLine::len`),
+   `WrappedLineLayout::_index_for_position` and `LineLayout::index_for_x`
+   (`git diff <old vendor commit> <new vendor commit> --
+   crates/gpui/src/elements/text.rs crates/gpui/src/text_system/line.rs
+   crates/gpui/src/text_system/line_layout.rs`). `fast/interactive_text.rs`
+   follows those steps to lay hitboxes over where an `InteractiveText` shows
+   the hand, while its clicks still go through upstream's code; port the
+   change into it, or the hand and the clicks part. Nothing conflicts there
+   either.
+6. Run `script/check-upstream`, the tests and clippy.
+7. Check that `window/a11y.rs` still keeps the tree it last sent in
    `A11yDebug::last_tree_update` in every build: `fast/a11y.rs` reads the
    nodes it draws again from there
    (`a11y_frame_keeps_the_tree_it_sent` fails if it stops).

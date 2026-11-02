@@ -6,6 +6,7 @@ pub mod chat_patterns;
 pub mod form;
 pub mod layout;
 pub mod list;
+pub mod paths;
 pub mod scroll;
 pub mod scrollbar;
 pub mod settings;

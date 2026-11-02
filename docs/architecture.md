@@ -451,7 +451,11 @@ primitive into a copy.
   node by node (`fast/dispatch.rs`).
 - **Paths** (sparklines, chart lines, a donut) are tessellated relative to
   their first point and the triangles kept, so a path of the same shape is
-  not tessellated again, wherever it is drawn (`fast/path_cache.rs`).
+  not tessellated again, wherever it is drawn (`fast/path_cache.rs`). A
+  thread keeps at most 2048 shapes and 16 MiB of them by weight (the memory
+  their keys and triangles own), the least recently drawn let go first; a
+  shape heavier than that is kept alone beside them, until the next one
+  takes its place, so one drawn again is kept however heavy it is.
 - **Glyph runs** work out their rendering once per run rather than once per
   glyph (`fast/glyphs.rs`).
 - **Element ids and absolute bounds** are cached per frame without rehashing

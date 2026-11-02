@@ -17,6 +17,7 @@ use gpui::{
     TileCoord, TransformationMatrix, Underline, decode_layer_tile, layer_tile_id,
     layer_tile_texture_id, linear_color_stop, linear_gradient, point, px, rgba, size,
 };
+use objc2_metal::{MTLCommandBuffer as _, MTLDevice as _};
 use parking_lot::Mutex;
 
 use crate::fast::layers::TileCache;
@@ -79,14 +80,24 @@ fn rounded_overflow_mask_cost(cx: &mut gpui::TestAppContext) {
             let mut harness = Harness::new().expect("timing requires Metal");
             rounded_clip_tests::render_with(cx, build, |scene, _| {
                 let extent = device_size(side, side);
-                let descriptor = metal::TextureDescriptor::new();
-                descriptor.set_width(side as u64);
-                descriptor.set_height(side as u64);
-                descriptor.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
-                descriptor.set_storage_mode(metal::MTLStorageMode::Private);
-                descriptor.set_usage(metal::MTLTextureUsage::RenderTarget);
-                let target = harness.renderer.device.new_texture(&descriptor);
-                harness.renderer.update_path_intermediate_textures(extent);
+                let descriptor = objc2_metal::MTLTextureDescriptor::new();
+                // SAFETY: The side is positive and this descriptor creates a 2D texture.
+                unsafe {
+                    descriptor.setWidth(side as usize);
+                    descriptor.setHeight(side as usize);
+                }
+                descriptor.setPixelFormat(objc2_metal::MTLPixelFormat::BGRA8Unorm);
+                descriptor.setStorageMode(objc2_metal::MTLStorageMode::Private);
+                descriptor.setUsage(objc2_metal::MTLTextureUsage::RenderTarget);
+                let target = harness
+                    .renderer
+                    .device
+                    .newTextureWithDescriptor(&descriptor)
+                    .expect("timing target texture");
+                harness
+                    .renderer
+                    .update_path_intermediate_textures(extent)
+                    .expect("path textures");
                 let mut samples = Vec::new();
                 for frame in 0..18 {
                     objc2::rc::autoreleasepool(|_| {
@@ -97,7 +108,7 @@ fn rounded_overflow_mask_cost(cx: &mut gpui::TestAppContext) {
                             .unwrap();
                         let encoded = start.elapsed();
                         commands.commit();
-                        commands.wait_until_completed();
+                        commands.waitUntilCompleted();
                         if frame >= 3 {
                             samples.push((start.elapsed(), encoded));
                         }
@@ -930,14 +941,14 @@ impl Harness {
     /// A harness on the system's Metal device, or `None` when there is none
     /// (the tests then skip).
     fn new() -> Option<Harness> {
-        if metal::Device::system_default().is_none() && metal::Device::all().is_empty() {
-            eprintln!("skipped: no Metal device");
-            return None;
-        }
         let pool = Arc::new(Mutex::new(InstanceBufferPool::default()));
-        Some(Harness {
-            renderer: MetalRenderer::new_headless(pool),
-        })
+        match MetalRenderer::new_headless(pool) {
+            Ok(renderer) => Some(Harness { renderer }),
+            Err(error) => {
+                eprintln!("skipped: no Metal device ({error:#})");
+                None
+            }
+        }
     }
 
     fn cache(&self) -> &TileCache {

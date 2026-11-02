@@ -27,6 +27,7 @@ use crate::wgpu_renderer::{
 };
 
 /// Reuse a target and wait for GPU completion, excluding pixel readback.
+#[cfg(feature = "test-support")]
 #[gpui::test]
 #[ignore = "manual GPU performance measurement"]
 fn rounded_overflow_frame_cost(cx: &mut gpui::TestAppContext) {
@@ -134,6 +135,7 @@ fn rounded_overflow_retained_child_follows_ancestor_clip(cx: &mut gpui::TestAppC
     });
 }
 
+#[cfg(feature = "test-support")]
 fn render_div_fixture(cx: &mut gpui::TestAppContext, build: fn() -> gpui::Div) -> (Vec<u8>, usize) {
     let mut harness = Harness::new().expect("rounded clipping regression requires a wgpu adapter");
     rounded_clip_tests::render_with(cx, build, |scene, size| {

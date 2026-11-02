@@ -1037,7 +1037,7 @@ fn keep_reads(window: &mut Window, cx: &mut App, id: &GlobalElementId) {
     // What the rows read, and the views drawn in them, told apart from what
     // the list does: the rows keep it themselves.
     let start = reads_len();
-    cx.entities.extend_accessed(record.views.iter());
+    cx.entities.extend_accessed_recorded(record.views.iter());
     for row in window.fast_layers.layers[id].rows.rows.values() {
         cx.replay_dependencies(&row.dependencies);
     }

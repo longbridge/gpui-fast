@@ -1,16 +1,13 @@
-//! Where a line of Chinese or Japanese text may not be wrapped.
+//! Where a line of Chinese or Japanese text may not be wrapped: the rules
+//! gpui-fast used to apply on top of upstream's wrapping, kept as tests.
 //!
-//! [`crate::LineWrapper`] may break before any character that is not a word
-//! character (CJK is not space separated), so a full-width comma or a closing
-//! bracket can open a line of its own: `非常好` / `，我们一起`. CJK
-//! typesetting forbids that (W3C clreq / jlreq, UAX #14 classes CL, CP, EX,
-//! IS and NS), and equally forbids an opening bracket or quote ending a line.
-//! The wrappers ([`crate::LineWrapper`] for fragments and truncation,
-//! `LineLayout::compute_wrap_boundaries` for shaped text) ask
-//! [`allows_break_between`] before they take a break in front of such a
-//! character, so the line breaks one character earlier and the punctuation
-//! moves down together with the character it belongs to. Where no allowed
-//! break fits, they still break where the line overflows.
+//! A full-width comma or a closing bracket must not open a line of its own
+//! (`非常好` / `，我们一起`), and an opening bracket or quote must not end
+//! one (W3C clreq / jlreq, UAX #14 classes CL, CP, EX, IS, NS and OP).
+//! Upstream now wraps by UAX #14 line breaking, in [`crate::LineWrapper`] for
+//! fragments and truncation and `LineLayout::compute_wrap_boundaries` for
+//! shaped text, which keeps these rules; the tests below check that it still
+//! does, with [`allows_break_between`] as the expectation.
 
 /// Whether a line may wrap between `prev` and `c`, two characters with no
 /// space between them, in text that otherwise breaks between any two
@@ -116,7 +113,12 @@ mod tests {
         let text_system = cx.text_system().clone();
         let id = text_system.resolve_font(&font(".ZedMono"));
         (
-            LineWrapper::new(id, px(16.), text_system.clone()),
+            LineWrapper::new(
+                id,
+                px(16.),
+                text_system.clone(),
+                crate::text_system::CharWidthCache::default(),
+            ),
             text_system,
         )
     }
@@ -305,7 +307,12 @@ mod tests {
         let layout = layout_of(text, 10.);
         let mut start = 0;
         let mut lines = Vec::new();
-        for boundary in layout.compute_wrap_boundaries(text, px(wrap_width), None) {
+        for boundary in layout.compute_wrap_boundaries(
+            text,
+            px(wrap_width),
+            None,
+            &mut crate::text_system::WrapScratch::default(),
+        ) {
             let end = layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index;
             lines.push(&text[start..end]);
             start = end;
