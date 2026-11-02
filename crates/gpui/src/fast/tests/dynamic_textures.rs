@@ -48,7 +48,7 @@ impl Render for Stream {
         self.paints.set(self.paints.get() + 1);
         if self.texture.is_none() {
             let texture = window
-                .create_dynamic_texture(size(DevicePixels(4), DevicePixels(4)), &vec![0u8; 64], 16)
+                .create_dynamic_texture(size(DevicePixels(4), DevicePixels(4)), &[0u8; 64], 16)
                 .expect("the backend is installed");
             self.created.set(Some(texture));
             self.texture = Some(texture);
@@ -189,7 +189,7 @@ fn an_update_renders_a_cached_view_showing_the_texture_again() {
                     origin: crate::point(DevicePixels(0), DevicePixels(0)),
                     size: size(DevicePixels(2), DevicePixels(2)),
                 },
-                &vec![0u8; 16],
+                &[0u8; 16],
                 8,
             )
             .expect("the update succeeds");

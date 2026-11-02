@@ -198,6 +198,10 @@ pub(crate) fn create(
     let packed = pack_rows(bytes, stride, row_bytes, height);
     let backend = platform()?;
     let id = DynamicTextureId(NEXT_TEXTURE_ID.fetch_add(1, Ordering::Relaxed));
+    // Ids count up for the life of the process and map into the reserved
+    // atlas range by wrapping, so an id past the range would name a layer
+    // tile's texture. Refuse instead of letting the two id spaces meet.
+    anyhow::ensure!(id.0 < DYNAMIC_ID_LIMIT, "dynamic texture ids are exhausted");
     backend
         .create_texture(id, size, &packed)
         .with_context(|| format!("failed to create dynamic texture {id:?}"))?;
@@ -300,13 +304,13 @@ impl Window {
     /// it; both requirements are checked, so a stale texture size cannot
     /// scribble over other content.
     ///
-    /// The window is marked for a full redraw, so cached content showing the
-    /// texture — a retained view that would draw nothing again, or a
-    /// scroll-layer tile — re-renders with the new contents even though no
-    /// element state changed. Updates made while a frame is drawing reach the
-    /// sprites that frame's later paints insert, since painting reads the
-    /// texture's current version; the redraw covers the elements that drew
-    /// earlier in the frame.
+    /// Called outside a frame, this marks the window for a full redraw, so
+    /// cached content showing the texture — a retained view that would draw
+    /// nothing again, or a scroll-layer tile — re-renders with the new
+    /// contents even though no element state changed. Called while a frame is
+    /// drawing, the upload lands on the next frame and the window is not
+    /// marked: painting cannot schedule a redraw, so an element that streams
+    /// from its own paint should ask the window to draw again itself.
     pub fn update_dynamic_texture(
         &mut self,
         texture: DynamicTexture,
@@ -527,7 +531,7 @@ mod tests {
 
         // A native framebuffer allocation pads the final row too: a 4x4
         // BGRA surface with a 16-byte stride is 64 bytes, not 60.
-        let _padded = create(size_of(4, 4), &vec![0u8; 4 * 16], 16).expect("created");
+        let _padded = create(size_of(4, 4), &[0u8; 4 * 16], 16).expect("created");
         {
             let created = mock.created.lock();
             assert_eq!(created.last().expect("created").2, 4 * 4 * BYTES_PER_PIXEL);
@@ -557,10 +561,10 @@ mod tests {
         let (_lock, mock) = fresh_mock();
 
         // Two bytes of padding per row that the backend must not receive.
-        // The payload is (height - 1) strided rows plus the final row's
-        // visible bytes only.
+        // The payload is one strided row plus the final row's visible bytes
+        // only — a 4x2 texture.
         let stride = (4 * BYTES_PER_PIXEL + 2) as u32;
-        let mut strided = vec![0u8; (2 - 1) * stride as usize + 4 * BYTES_PER_PIXEL];
+        let mut strided = vec![0u8; stride as usize + 4 * BYTES_PER_PIXEL];
         for byte in strided.iter_mut().step_by(stride as usize) {
             *byte = 0xFF;
         }
