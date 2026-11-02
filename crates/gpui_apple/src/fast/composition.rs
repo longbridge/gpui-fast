@@ -7,16 +7,17 @@
 //! one surface are there for the others, and the tiles a frame's scene refers
 //! to are valid whichever surface draws them.
 
-use std::{ffi::c_void, sync::Arc};
+use std::sync::Arc;
 
-use foreign_types::ForeignTypeRef;
+use anyhow::Result;
+use objc2_quartz_core::CAMetalLayer;
 use parking_lot::Mutex;
 
 use crate::metal_renderer::{Context, InstanceBufferPool, MetalRenderer, Renderer};
 
 /// A renderer for an overlay surface above `base`: transparent, on its own
 /// layer, sharing `base`'s device and sprite atlas.
-pub(crate) fn new_overlay_renderer(context: Context, base: &Renderer) -> Renderer {
+pub(crate) fn new_overlay_renderer(context: Context, base: &Renderer) -> Result<Renderer> {
     new_sharing_atlas(base, context, true)
 }
 
@@ -26,35 +27,22 @@ fn new_sharing_atlas(
     base: &MetalRenderer,
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
     transparent: bool,
-) -> MetalRenderer {
+) -> Result<MetalRenderer> {
     let device = base.device.clone();
-    let layer = new_layer(&device, transparent);
+    let layer = CAMetalLayer::new();
+    MetalRenderer::configure_layer(&layer, &device, transparent, false);
     copy_colorspace(base, &layer);
     let mut renderer =
-        MetalRenderer::new_internal(device, Some(layer), !transparent, instance_buffer_pool);
+        MetalRenderer::new_internal(device, Some(layer), !transparent, instance_buffer_pool)?;
     renderer.sprite_atlas = base.sprite_atlas().clone();
-    renderer
+    Ok(renderer)
 }
 
 /// Gives `layer` the colorspace of `base`'s layer, so that overlays above a
 /// window drawn in Display P3 are drawn in it too.
-fn copy_colorspace(base: &MetalRenderer, layer: &metal::MetalLayerRef) {
+fn copy_colorspace(base: &MetalRenderer, layer: &CAMetalLayer) {
     let Some(base_layer) = base.layer.as_ref() else {
         return;
     };
-    // SAFETY: both are `CAMetalLayer`s; `setColorspace:` retains the color
-    // space, which the base layer keeps alive for the call.
-    unsafe {
-        let base_layer: &objc2_quartz_core::CAMetalLayer = &*base_layer.as_ptr().cast();
-        let layer: &objc2_quartz_core::CAMetalLayer = &*layer.as_ptr().cast();
-        let colorspace: *const c_void = objc2::msg_send![base_layer, colorspace];
-        let _: () = objc2::msg_send![layer, setColorspace: colorspace];
-    }
-}
-
-/// A window's `CAMetalLayer`, set up as `MetalRenderer::new` sets up its own.
-fn new_layer(device: &metal::Device, transparent: bool) -> metal::MetalLayer {
-    let layer = metal::MetalLayer::new();
-    MetalRenderer::configure_layer(&layer, device, transparent, false);
-    layer
+    layer.setColorspace(base_layer.colorspace().as_deref());
 }

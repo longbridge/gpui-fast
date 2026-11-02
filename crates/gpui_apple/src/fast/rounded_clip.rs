@@ -3,8 +3,17 @@
 //! Only actual path batches restart the colour pass; rounded containers do
 //! not allocate textures or encode mask render passes.
 
+use std::{mem, ptr::NonNull};
+
 use anyhow::{Context as _, Result};
 use gpui::{AtlasTextureId, DevicePixels, LayerFrame, PrimitiveBatch, Scene, Size};
+use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_core_foundation::CFRetained;
+use objc2_core_video::CVMetalTexture;
+use objc2_metal::{
+    MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLDevice,
+    MTLRenderCommandEncoder, MTLResourceOptions, MTLTexture,
+};
 
 use crate::metal_renderer::{
     InstanceBindings, InstanceBufferWriter, MetalRenderer, new_command_encoder_for_texture,
@@ -42,27 +51,52 @@ pub(crate) fn has_groups(scene: &Scene) -> bool {
         .any(|sprite| group(scene, sprite.tile.texture_id).is_some())
 }
 
-pub(crate) fn default_mask(encoder: &metal::RenderCommandEncoderRef) {
+pub(crate) fn default_mask(encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>) {
     let count = 0u32;
-    encoder.set_fragment_bytes(29, 4, &count as *const u32 as *const _);
     let empty = [0f32; 12];
-    encoder.set_fragment_bytes(28, 48, empty.as_ptr().cast());
+    // SAFETY: Both values are live for the call, which copies their bytes into
+    // the fragment slots the injected clip parameters read.
+    unsafe {
+        encoder.setFragmentBytes_length_atIndex(NonNull::from(&count).cast(), 4, 29);
+        encoder.setFragmentBytes_length_atIndex(NonNull::from(&empty).cast(), 48, 28);
+    }
 }
 
-fn bind(encoder: &metal::RenderCommandEncoderRef, clips: &[Clip], device: &metal::DeviceRef) {
+fn bind(
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    clips: &[Clip],
+    device: &ProtocolObject<dyn MTLDevice>,
+) {
     let count = clips.len() as u32;
-    encoder.set_fragment_bytes(29, 4, &count as *const u32 as *const _);
+    // SAFETY: `count` is live for the call, which copies its bytes.
+    unsafe {
+        encoder.setFragmentBytes_length_atIndex(NonNull::from(&count).cast(), 4, 29);
+    }
     if !clips.is_empty() {
-        let length = std::mem::size_of_val(clips) as u64;
+        let length = mem::size_of_val(clips);
         if length <= 4096 {
-            encoder.set_fragment_bytes(28, length, clips.as_ptr().cast());
+            // SAFETY: `clips` is live for the call, which copies its `length` bytes.
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(NonNull::from(clips).cast(), length, 28);
+            }
         } else {
-            let buffer = device.new_buffer_with_data(
-                clips.as_ptr().cast(),
-                length,
-                metal::MTLResourceOptions::StorageModeShared,
-            );
-            encoder.set_fragment_buffer(28, Some(&buffer), 0);
+            // SAFETY: Metal copies `length` bytes of the live `clips` slice.
+            let buffer = unsafe {
+                device.newBufferWithBytes_length_options(
+                    NonNull::from(clips).cast(),
+                    length,
+                    MTLResourceOptions::StorageModeShared,
+                )
+            };
+            let Some(buffer) = buffer else {
+                log::error!("failed to allocate a {length}-byte rounded clip buffer");
+                return;
+            };
+            // SAFETY: The buffer holds `clips.len()` clips from offset zero, and
+            // the encoder retains it until the command buffer completes.
+            unsafe {
+                encoder.setFragmentBuffer_offset_atIndex(Some(&buffer), 0, 28);
+            }
         }
     }
 }
@@ -82,18 +116,24 @@ pub(crate) fn draw(
     scene: &Scene,
     bindings: &InstanceBindings,
     writer: &mut InstanceBufferWriter,
-    texture: &metal::TextureRef,
+    texture: &ProtocolObject<dyn MTLTexture>,
     viewport: Size<DevicePixels>,
-) -> Result<metal::CommandBuffer> {
+    surface_textures: &mut Vec<CFRetained<CVMetalTexture>>,
+) -> Result<Retained<ProtocolObject<dyn MTLCommandBuffer>>> {
     let queue = renderer.command_queue.clone();
-    let command_buffer = queue.new_command_buffer();
+    let command_buffer = queue.commandBuffer().context("creating command buffer")?;
     let alpha = if renderer.opaque { 1. } else { 0. };
     let encoder = new_command_encoder_for_texture(
-        command_buffer,
+        &command_buffer,
         texture,
         viewport,
-        Some(metal::MTLClearColor::new(0., 0., 0., alpha)),
-    );
+        Some(MTLClearColor {
+            red: 0.,
+            green: 0.,
+            blue: 0.,
+            alpha,
+        }),
+    )?;
     encode(
         renderer,
         scene,
@@ -101,30 +141,33 @@ pub(crate) fn draw(
         writer,
         texture,
         viewport,
-        command_buffer,
+        &command_buffer,
         &mut Vec::new(),
+        surface_textures,
         encoder,
     )?
-    .end_encoding();
-    Ok(command_buffer.to_owned())
+    .endEncoding();
+    Ok(command_buffer)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_tile(
     renderer: &mut MetalRenderer,
     scene: &Scene,
     writer: &mut InstanceBufferWriter,
-    texture: &metal::TextureRef,
+    texture: &ProtocolObject<dyn MTLTexture>,
     viewport: Size<DevicePixels>,
-    commands: &metal::CommandBufferRef,
-    background: metal::MTLClearColor,
+    commands: &ProtocolObject<dyn MTLCommandBuffer>,
+    background: MTLClearColor,
+    surface_textures: &mut Vec<CFRetained<CVMetalTexture>>,
 ) -> Result<()> {
     let old_texture = renderer.path_intermediate_texture.take();
     let old_msaa = renderer.path_intermediate_msaa_texture.take();
-    renderer.update_path_intermediate_textures(viewport);
     let result = (|| {
+        renderer.update_path_intermediate_textures(viewport)?;
         let bindings = write_instances(scene, writer)?;
         let encoder =
-            new_command_encoder_for_texture(commands, texture, viewport, Some(background));
+            new_command_encoder_for_texture(commands, texture, viewport, Some(background))?;
         encode(
             renderer,
             scene,
@@ -134,9 +177,10 @@ pub(crate) fn draw_tile(
             viewport,
             commands,
             &mut Vec::new(),
+            surface_textures,
             encoder,
         )?
-        .end_encoding();
+        .endEncoding();
         Ok(())
     })();
     renderer.path_intermediate_texture = old_texture;
@@ -145,30 +189,33 @@ pub(crate) fn draw_tile(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn encode<'a>(
+fn encode(
     renderer: &mut MetalRenderer,
     scene: &Scene,
     bindings: &InstanceBindings,
     writer: &mut InstanceBufferWriter,
-    texture: &'a metal::TextureRef,
+    texture: &ProtocolObject<dyn MTLTexture>,
     viewport: Size<DevicePixels>,
-    commands: &'a metal::CommandBufferRef,
+    commands: &ProtocolObject<dyn MTLCommandBuffer>,
     clips: &mut Vec<Clip>,
-    mut encoder: &'a metal::RenderCommandEncoderRef,
-) -> Result<&'a metal::RenderCommandEncoderRef> {
+    surface_textures: &mut Vec<CFRetained<CVMetalTexture>>,
+    mut encoder: Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>,
+) -> Result<Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>> {
     renderer.fast_layers.note_composited(scene);
     for batch in scene.batches() {
-        bind(encoder, clips, &renderer.device);
+        bind(&encoder, clips, &renderer.device);
         match batch {
             PrimitiveBatch::Shadows(range) => {
-                renderer.draw_shadows(range, bindings, viewport, encoder)
+                renderer.draw_shadows(range, bindings, viewport, &encoder)
             }
-            PrimitiveBatch::Quads(range) => renderer.draw_quads(range, bindings, viewport, encoder),
+            PrimitiveBatch::Quads(range) => {
+                renderer.draw_quads(range, bindings, viewport, &encoder)
+            }
             PrimitiveBatch::Underlines(range) => {
-                renderer.draw_underlines(range, bindings, viewport, encoder)
+                renderer.draw_underlines(range, bindings, viewport, &encoder)
             }
             PrimitiveBatch::MonochromeSprites { texture_id, range } => {
-                renderer.draw_monochrome_sprites(texture_id, range, bindings, viewport, encoder)
+                renderer.draw_monochrome_sprites(texture_id, range, bindings, viewport, &encoder)
             }
             PrimitiveBatch::PolychromeSprites { texture_id, range } => {
                 if let Some(frame) = group(scene, texture_id) {
@@ -204,6 +251,7 @@ fn encode<'a>(
                             viewport,
                             commands,
                             clips,
+                            surface_textures,
                             encoder,
                         )?;
                         clips.pop();
@@ -211,18 +259,18 @@ fn encode<'a>(
                     }
                 } else {
                     renderer
-                        .draw_polychrome_sprites(texture_id, range, bindings, viewport, encoder);
+                        .draw_polychrome_sprites(texture_id, range, bindings, viewport, &encoder);
                 }
             }
             PrimitiveBatch::Paths(range) => {
-                encoder.end_encoding();
+                encoder.endEncoding();
                 let paths = &scene.paths[range];
                 let drawn =
                     renderer.draw_paths_to_intermediate(paths, writer, viewport, commands)?;
-                encoder = new_command_encoder_for_texture(commands, texture, viewport, None);
-                bind(encoder, clips, &renderer.device);
+                encoder = new_command_encoder_for_texture(commands, texture, viewport, None)?;
+                bind(&encoder, clips, &renderer.device);
                 if drawn {
-                    renderer.draw_paths_from_intermediate(paths, writer, viewport, encoder)?;
+                    renderer.draw_paths_from_intermediate(paths, writer, viewport, &encoder)?;
                 }
             }
             PrimitiveBatch::Surfaces(range) => renderer.draw_surfaces(
@@ -230,8 +278,9 @@ fn encode<'a>(
                 range.start,
                 bindings,
                 viewport,
-                encoder,
-            ),
+                &encoder,
+                surface_textures,
+            )?,
             PrimitiveBatch::SubpixelSprites { .. } => unreachable!("Metal uses grayscale glyphs"),
         }
     }

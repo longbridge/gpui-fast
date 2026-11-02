@@ -809,6 +809,7 @@ impl Window {
                 absolute_offset: deferred_draw.absolute_offset,
                 prepaint_range: deferred_draw.prepaint_range.clone(),
                 paint_range: deferred_draw.paint_range.clone(),
+                accessed_entities: deferred_draw.accessed_entities.clone(),
                 enclosing_retained: EnclosingRetained::default(),
             });
         }

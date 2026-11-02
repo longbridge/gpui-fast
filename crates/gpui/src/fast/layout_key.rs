@@ -148,7 +148,7 @@ impl Window {
     /// State the application can observe, such as element state, is kept.
     #[cfg(test)]
     pub(crate) fn forget_retained_state(&mut self) {
-        self.layout_engine = Some(crate::TaffyLayoutEngine::new());
+        self.layout_engine = Some(crate::taffy::TaffyLayoutEngine::new());
         self.rendered_frame.scene.forget_orderings();
         self.next_frame.scene.forget_orderings();
         self.refresh();

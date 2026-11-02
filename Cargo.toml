@@ -54,7 +54,7 @@ web-sys = "0.3"
 tendril = "0.5"
 spin = { version = "0.10", default-features = false, features = ["mutex", "spin_mutex", "lock_api"] }
 objc2-security = { version = "0.3.2", default-features = false, features = ["std", "SecBase", "SecItem"] }
-objc2-quartz-core = { version = "=0.3.2", default-features = false, features = ["std", "CALayer", "CAMetalLayer"] }
+objc2-quartz-core = { version = "=0.3.2", default-features = false, features = ["std", "CALayer", "CAMetalDisplayLink", "CAMetalLayer", "objc2-metal"] }
 dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
 bytemuck = "1"
 bench_metrics = { path = "crates/bench_metrics" }
@@ -80,7 +80,6 @@ refineable = { path = "crates/refineable" }
 reqwest_client = { path = "crates/reqwest_client" }
 scheduler = { path = "crates/scheduler" }
 sum_tree = { path = "crates/sum_tree" }
-util = { path = "crates/util" }
 util_macros = { path = "crates/util_macros" }
 zlog = { path = "crates/zlog" }
 ztracing = { path = "crates/ztracing" }
@@ -99,15 +98,12 @@ ashpd = { version = "0.13", default-features = false, features = [
     "settings"
 ] }
 async-channel = { version = "2.5", default-features = false }
-async-compression = { version = "0.4", features = ["bzip2", "gzip", "futures-io"] }
 async-fs = "2.1"
-async-tar = { git = "https://github.com/zed-industries/async-tar", rev = "bd3ad6f89df9a9da7a8535958756d6bf465936a0" }
 async-task = "4.7"
 async-tungstenite = "0.33"
 async_zip = { version = "0.0.18", features = ["deflate", "deflate64"] }
 backtrace = "0.3"
 bitflags = "2.6.0"
-block = "0.1"
 block2 = "0.6"
 bytes = "1.0"
 cbindgen = { version = "0.28.0", default-features = false }
@@ -136,6 +132,7 @@ heapless = "0.9.2"
 heck = "0.5"
 http = "1.1"
 http-body = "1.0"
+icu_segmenter = { version = "2.3.0", default-features = false, features = ["compiled_data"] }
 image = { version = "0.25.1", default-features = false, features = [
     "bmp",
     "dds",
@@ -160,7 +157,6 @@ js-sys = "0.3"
 libc = "0.2"
 log = { version = "0.4", default-features = false, features = ["std"] }
 mach2 = "0.6"
-metal = "0.33"
 nix = "0.30"
 notify-rust = "4"
 objc = "0.2"
@@ -270,6 +266,7 @@ objc2-screen-capture-kit = { version = "=0.3.2", default-features = false, featu
     "SCStream",
     "std"
 ] }
+objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTCoreTypes", "UTType"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
     "std",
     "block2",
@@ -325,7 +322,6 @@ serde_json_lenient = { version = "0.2", features = [
     "raw_value",
 ] }
 serde_urlencoded = "0.7"
-sha2 = "0.10"
 shlex = "2.0"
 slotmap = "1.0.6"
 smallvec = { version = "1.6", features = ["union", "const_new"] }
@@ -353,8 +349,8 @@ wasm-bindgen = "0.2.120"
 wasm-bindgen-futures = "0.4"
 web-time = "1.1.0"
 webpki-roots = "1.0.8"
-# 30.0.1 lacks the Vulkan surface-drop panic fix: https://github.com/gfx-rs/wgpu/pull/10230.
-wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "3b3506ea31154edc04de64debda0e780cba2639c", default-features = false }
+# 30.0.1 lacks the Vulkan surface-drop fix (wgpu#10230) and WebGL resize fix (wgpu#10348).
+wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007", default-features = false }
 which = "8"
 windows-core = "0.62"
 windows-registry = "0.6.0"

@@ -4078,7 +4078,7 @@ mod integration {
         if !crate::fast::layers::COMPILED {
             return u64::MAX;
         }
-        let mut open = |cx: &mut TestAppContext, layers: bool| {
+        let open = |cx: &mut TestAppContext, layers: bool| {
             let window = cx.add_window(|_, cx| page(cx));
             cx.simulate_window_scale_factor_change(window.into(), scale_factor);
             cx.update_window(window.into(), |_, window, cx| {
