@@ -465,7 +465,8 @@ impl App {
             offset_reads: 0..0,
         };
         self.entities.mark_access_boundary();
-        self.entities.extend_accessed(dependencies.entities.iter());
+        self.entities
+            .extend_accessed_recorded(dependencies.entities.iter());
         self.entities.mark_access_boundary();
         if self.entities.is_recording() {
             self.dependencies
@@ -678,15 +679,21 @@ impl EntityMap {
         self.access_log.write_generation.get()
     }
 
-    pub fn extend_accessed<'a>(&mut self, entities: impl IntoIterator<Item = &'a EntityId>) {
-        let accessed_entities = self.accessed_entities.get_mut();
-        let recording = self.access_log.recordings.get() > 0;
-        for entity_id in entities {
-            accessed_entities.insert(*entity_id);
-            if recording {
-                self.access_log.access_log.borrow_mut().push(*entity_id);
-            }
+    /// Records entities accessed by a reused draw, as upstream's
+    /// [`EntityMap::extend_accessed`] does, and adds them to the access log
+    /// when a recording is open.
+    pub(crate) fn extend_accessed_recorded<'a>(
+        &mut self,
+        entities: impl IntoIterator<Item = &'a EntityId>,
+    ) {
+        let entities = entities.into_iter().copied();
+        if !self.is_recording() {
+            self.extend_accessed(entities);
+            return;
         }
+        let entities: SmallVec<[EntityId; 16]> = entities.collect();
+        self.extend_accessed(entities.iter().copied());
+        self.access_log.access_log.borrow_mut().extend(entities);
     }
 
     /// Whether any recording is open.

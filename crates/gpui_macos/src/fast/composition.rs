@@ -17,11 +17,8 @@ use std::{
     cell::{Cell, RefCell},
     ffi::{CStr, c_void},
     ptr::{self, NonNull},
-    rc::Rc,
-    sync::{
-        Arc, Weak,
-        atomic::{AtomicPtr, Ordering},
-    },
+    rc::{Rc, Weak},
+    sync::atomic::{AtomicPtr, Ordering},
 };
 
 use anyhow::{Context as _, Result, anyhow};
@@ -375,7 +372,7 @@ pub(crate) fn native_event_observed(state: &MacWindowState, event: Id) -> bool {
 }
 
 pub(crate) fn complete_event(
-    state: &Arc<Mutex<MacWindowState>>,
+    state: &Rc<Mutex<MacWindowState>>,
     event: Id,
     callback: Box<dyn FnMut(gpui::PlatformInput) -> gpui::DispatchEventResult>,
     result: gpui::DispatchEventResult,
@@ -395,7 +392,7 @@ pub(crate) fn complete_event(
 
 /// When a GPUI overlay permits scrolling underneath it, use the managed native
 /// views and AppKit's own hit testing. This never changes visibility or geometry.
-fn forward_unhandled_scroll(state: &Arc<Mutex<MacWindowState>>, event: Id) {
+fn forward_unhandled_scroll(state: &Rc<Mutex<MacWindowState>>, event: Id) {
     let kind: NSEventType = unsafe { msg_send![event, type] };
     if kind != NSEventType::ScrollWheel {
         return;
@@ -494,7 +491,7 @@ extern "C" fn dealloc_overlay_view(this: &AnyObject, _: Sel) {
 /// `PlatformWindow::draw_composed`: draws each GPUI surface's part of the
 /// scene with that surface's renderer, or the whole scene on the window's
 /// view until the window composes.
-pub(crate) fn draw_composed(window_state: &Arc<Mutex<MacWindowState>>, scene: ComposedScene<'_>) {
+pub(crate) fn draw_composed(window_state: &Rc<Mutex<MacWindowState>>, scene: ComposedScene<'_>) {
     let mut lock = window_state.lock();
     let state = &mut *lock;
     let Some(base_surface) = state.fast_composition.base_surface else {
@@ -529,14 +526,14 @@ pub(crate) fn draw_composed(window_state: &Arc<Mutex<MacWindowState>>, scene: Co
 
 /// `PlatformWindow::enable_window_composition`: an AppKit window can always
 /// compose, and sets itself up when it's first given an order.
-pub(crate) fn enable_window_composition(_window_state: &Arc<Mutex<MacWindowState>>) -> Result<()> {
+pub(crate) fn enable_window_composition(_window_state: &Rc<Mutex<MacWindowState>>) -> Result<()> {
     Ok(())
 }
 
 /// `PlatformWindow::create_native_surface`: a layer-backed `NSView` that
 /// clips the native view put in it.
 pub(crate) fn create_native_surface(
-    window_state: &Arc<Mutex<MacWindowState>>,
+    window_state: &Rc<Mutex<MacWindowState>>,
 ) -> Result<Rc<dyn PlatformSurfaceAttachment>> {
     enable_window_composition(window_state)?;
     let state = window_state.lock();
@@ -555,7 +552,7 @@ pub(crate) fn create_native_surface(
         let _: () = msg_send![parent.as_ptr(), addSubview: view];
 
         Ok(Rc::new(MacNativeSurface {
-            window_state: Arc::downgrade(window_state),
+            window_state: Rc::downgrade(window_state),
             view: NonNull::new(view).context("native surface container is null")?,
             bounds: Cell::new(Bounds::default()),
         }))
@@ -566,7 +563,7 @@ pub(crate) fn create_native_surface(
 /// GPUI surfaces, then puts every surface's view under its parent's, in
 /// order, at its bounds.
 pub(crate) fn set_composition_order(
-    window_state: &Arc<Mutex<MacWindowState>>,
+    window_state: &Rc<Mutex<MacWindowState>>,
     surfaces: &[PlatformCompositionSurface],
 ) -> Result<()> {
     let mut lock = window_state.lock();
@@ -740,9 +737,15 @@ pub(crate) fn set_composition_order(
 /// Creates the overlay view and renderer of a GPUI surface, the size of the
 /// window's view.
 unsafe fn create_gpui_surface(
-    window_state: &Arc<Mutex<MacWindowState>>,
+    window_state: &Rc<Mutex<MacWindowState>>,
     state: &mut MacWindowState,
 ) -> Result<MacGpuiSurface> {
+    // Made before the view, so that a renderer that fails to build leaves no
+    // view holding the window state behind.
+    let mut renderer = renderer::new_overlay_renderer(
+        state.fast_composition.renderer_context.clone(),
+        &state.renderer,
+    )?;
     let input_regions = Rc::new(RefCell::new(Vec::<gpui::Hitbox>::new()));
     let native_view = state.native_view.as_ptr();
     let class = OVERLAY_VIEW_CLASS.load(Ordering::Acquire).cast_const();
@@ -756,16 +759,12 @@ unsafe fn create_gpui_surface(
     unsafe {
         ivar(object, WINDOW_STATE_IVAR)
             .load_ptr::<*mut c_void>(object)
-            .write(Arc::into_raw(window_state.clone()).cast_mut().cast());
+            .write(Rc::into_raw(window_state.clone()).cast_mut().cast());
         ivar(object, OVERLAY_INPUT_IVAR)
             .load_ptr::<*mut c_void>(object)
             .write(Rc::into_raw(input_regions.clone()).cast_mut().cast());
     }
 
-    let mut renderer = renderer::new_overlay_renderer(
-        state.fast_composition.renderer_context.clone(),
-        &state.renderer,
-    );
     let scale_factor = state.scale_factor();
     renderer.update_drawable_size(state.content_size().to_device_pixels(scale_factor));
     set_contents_scale(&renderer, scale_factor);

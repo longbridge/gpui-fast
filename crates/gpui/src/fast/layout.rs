@@ -2,9 +2,9 @@
 
 use crate::{
     AbsoluteLength, App, AvailableSpace, DefiniteLength, Edges, GridTemplate, LayoutId, Length,
-    Pixels, Size, Style, TaffyLayoutEngine, Window,
+    Pixels, Size, Style, Window,
     fast::stats::LayoutStats,
-    taffy::{MeasureFn, NodeContext, ToTaffy as _},
+    taffy::{MeasureFn, NodeContext, TaffyLayoutEngine, ToTaffy as _},
     util::round_to_device_pixel,
 };
 use collections::{FxHashMap, FxHashSet, FxHasher};

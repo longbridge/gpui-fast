@@ -306,7 +306,7 @@ fn shape_key(
     dash_array: Option<&[Pixels]>,
 ) -> Vec<u32> {
     let mut key = Vec::with_capacity(64);
-    let mut point = |key: &mut Vec<u32>, point: lyon::math::Point| {
+    let point = |key: &mut Vec<u32>, point: lyon::math::Point| {
         key.push(point.x.to_bits());
         key.push(point.y.to_bits());
     };

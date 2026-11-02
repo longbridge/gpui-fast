@@ -10,7 +10,7 @@
 //! clearing. What `layout_bounds` computes, pixel snapping included, is left
 //! exactly as upstream wrote it.
 //!
-//! [`TaffyLayoutEngine::layout_bounds`]: crate::TaffyLayoutEngine::layout_bounds
+//! [`TaffyLayoutEngine::layout_bounds`]: crate::taffy::TaffyLayoutEngine::layout_bounds
 
 use crate::LayoutId;
 

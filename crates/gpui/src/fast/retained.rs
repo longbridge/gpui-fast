@@ -146,7 +146,7 @@ pub(crate) enum PaintStatus {
 
 /// What a subtree's prepaint and paint depended on besides what it read: the
 /// place it was drawn in and what it inherited there.
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct RetainedContext {
     pub(crate) composition_surface: Option<crate::fast::composition::CompositionSurfaceId>,
     pub(crate) bounds: Bounds<Pixels>,
@@ -833,6 +833,7 @@ impl Window {
         let source = record.paint_range.clone();
         let hovers = record.hover_dependencies.clone();
         let id = record.id.clone();
+        let opacity_changed = record.context.opacity.to_bits() != self.element_opacity.to_bits();
 
         let start = self.paint_index();
         self.reuse_paint(source.clone());
@@ -851,8 +852,10 @@ impl Window {
         // The hovers were checked against last frame's hitboxes; this
         // frame's could put something over the subtree. That is found out
         // only now, too late to build it again, so it is built on the next
-        // frame, which is asked for.
-        if !self.hovers_unchanged(&hovers) {
+        // frame, which is asked for. The same goes for paint drawn again
+        // under another opacity than it was painted with, as an ancestor's
+        // hover style can change it after prepaint.
+        if opacity_changed || !self.hovers_unchanged(&hovers) {
             self.retained_state
                 .subtrees_dirty_next_frame
                 .extend(self.retained_state.subtree_stack.iter().cloned());
@@ -1061,6 +1064,14 @@ impl Window {
         let record = &mut self.next_frame.retained.records[index];
         record.paint_range = recording.start..end;
         record.paint = PaintStatus::Painted { source: None };
+        // Prepaint can only predict the opacity paint applies (an ancestor's
+        // hover style depends on this frame's hit test): keep what was painted,
+        // so a reuse under another opacity is noticed by `reuse_retained_paint`.
+        let opacity = self.element_opacity;
+        let record = &mut self.next_frame.retained.records[index];
+        if record.context.opacity.to_bits() != opacity.to_bits() {
+            Rc::make_mut(&mut record.context).opacity = opacity;
+        }
         record.hover_dependencies = hovers;
         record.own_hovers = own.into();
         record.dependencies = record.dependencies.union(&dependencies.all);
@@ -1077,12 +1088,12 @@ impl Window {
         }
     }
 
-    /// See [`crate::TaffyLayoutEngine::record_claimed_keys`].
+    /// See [`crate::taffy::TaffyLayoutEngine::record_claimed_keys`].
     pub(crate) fn record_claimed_layout_keys(&mut self) -> usize {
         self.layout_engine.as_mut().unwrap().record_claimed_keys()
     }
 
-    /// See [`crate::TaffyLayoutEngine::finish_recording_claimed_keys`].
+    /// See [`crate::taffy::TaffyLayoutEngine::finish_recording_claimed_keys`].
     pub(crate) fn finish_recording_claimed_layout_keys(&mut self, start: usize) -> Vec<u64> {
         self.layout_engine
             .as_mut()
@@ -1090,7 +1101,7 @@ impl Window {
             .finish_recording_claimed_keys(start)
     }
 
-    /// See [`crate::TaffyLayoutEngine::keep_retained`].
+    /// See [`crate::taffy::TaffyLayoutEngine::keep_retained`].
     pub(crate) fn keep_retained_layout(&mut self, keys: &[u64]) {
         self.layout_engine.as_mut().unwrap().keep_retained(keys);
     }
@@ -1258,29 +1269,6 @@ pub(crate) fn invalidate_retained_subtrees(window: &mut Window, subtrees: &[Glob
         .extend(subtrees.last().cloned());
 }
 
-/// Multiplies the opacity of what is painted from here on by `opacity`,
-/// returning the opacity to go back to with
-/// [`pop_element_opacity`]. See [`Window::with_element_opacity`].
-///
-/// Opacity only affects what is painted, but a retained subtree inside is
-/// drawn again from what it painted only if it would be painted at the
-/// opacity it was, which prepaint decides.
-#[inline(always)]
-pub(crate) fn push_element_opacity(window: &mut Window, opacity: Option<f32>) -> f32 {
-    window.invalidator.debug_assert_paint_or_prepaint();
-    let previous_opacity = window.element_opacity;
-    if let Some(opacity) = opacity {
-        window.element_opacity = previous_opacity * opacity;
-    }
-    previous_opacity
-}
-
-/// Goes back to the opacity [`push_element_opacity`] returned.
-#[inline(always)]
-pub(crate) fn pop_element_opacity(window: &mut Window, previous_opacity: f32) {
-    window.element_opacity = previous_opacity;
-}
-
 /// Starts prepainting the deferred draw at `deferred_draw_ix` as a part of
 /// the retained subtrees it was deferred from, though it is drawn after
 /// them: what it listens for marks them, and what it reads is theirs.
@@ -1387,18 +1375,18 @@ pub(crate) fn finish_retained_frame(window: &mut Window) {
 // layout they kept.
 impl Window {
     /// How many writes that change a layout the engine has made. See
-    /// [`crate::TaffyLayoutEngine::layout_changes`].
+    /// [`crate::taffy::TaffyLayoutEngine::layout_changes`].
     pub(crate) fn layout_changes(&self) -> u64 {
         self.layout_engine.as_ref().unwrap().layout_changes()
     }
 
     /// How many measurements the engine has been given to take again. See
-    /// [`crate::TaffyLayoutEngine::remeasures`].
+    /// [`crate::taffy::TaffyLayoutEngine::remeasures`].
     pub(crate) fn layout_remeasures(&self) -> u64 {
         self.layout_engine.as_ref().unwrap().remeasures()
     }
 
-    /// See [`crate::TaffyLayoutEngine::relayout_in_place`].
+    /// See [`crate::taffy::TaffyLayoutEngine::relayout_in_place`].
     pub(crate) fn relayout_in_place(
         &mut self,
         layout_id: LayoutId,

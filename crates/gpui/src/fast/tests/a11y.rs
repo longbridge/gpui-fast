@@ -11,8 +11,7 @@ use std::fmt::Write as _;
 use accesskit::{NodeId, Role};
 
 use crate::{
-    Context, Entity, FocusHandle, IntoElement, ParentElement as _, Render, Styled as _,
-    TestAppContext, Window, div, prelude::*, px,
+    Context, Entity, FocusHandle, IntoElement, Render, TestAppContext, Window, div, prelude::*, px,
 };
 
 /// One node of a window's accessibility tree, named by where it is rather
