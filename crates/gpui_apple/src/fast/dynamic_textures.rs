@@ -111,6 +111,14 @@ pub(crate) fn encode_uploads(command_buffer: &ProtocolObject<dyn MTLCommandBuffe
     let Some(textures) = METAL_TEXTURES.read().clone() else {
         return;
     };
+    // Most frames stage nothing, and most apps never create a dynamic
+    // texture, so the empty check comes before the encoder: a blit encoder
+    // with no work is still a real object Metal allocates and validates,
+    // and the frame's passes would wait behind it for nothing. A staged
+    // upload that slips in after the check stays queued for the next frame.
+    if textures.pending_uploads.lock().is_empty() {
+        return;
+    }
     // The staged updates stay queued when the buffer cannot hand out an
     // encoder, so nothing a caller was told had reached the GPU is lost;
     // the next frame tries again.
