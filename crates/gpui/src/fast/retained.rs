@@ -551,6 +551,13 @@ impl RetainedSubtrees {
     }
 }
 
+/// Upstream's work-counter test expects ancestors to render on child updates.
+/// Keep that test's upstream drawing semantics; retained behavior is tested in fast/.
+#[cfg(test)]
+pub(crate) fn upstream_work_counter_test(window: &mut Window) {
+    window.set_view_retention(false);
+}
+
 impl Window {
     /// Sets whether a view is drawn again from what it drew on the last frame
     /// while nothing it depends on has changed, which is the default. A view
