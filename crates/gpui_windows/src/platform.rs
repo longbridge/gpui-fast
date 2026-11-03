@@ -793,7 +793,7 @@ impl Platform for WindowsPlatform {
             frame_signal: window.state.frame_signal.clone(),
             fast_frame_request: Arc::clone(&window.state.fast_frame_request),
         });
-        crate::fast::frame_schedule::schedule_frame(&window);
+        crate::fast::frame_schedule::FrameRequest::start(&window.state.fast_frame_request);
 
         Ok(Box::new(window))
     }
