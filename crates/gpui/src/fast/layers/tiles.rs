@@ -289,6 +289,10 @@ fn hash_primitive(primitive: &Primitive, tile: &Bounds<ScaledPixels>, hasher: &m
             hash_mask(&sprite.content_mask, tile, hasher);
             hash_corners(&sprite.corner_radii, hasher);
             hash_tile(&sprite.tile, hasher);
+            // Atlas sprites keep this struct padding at zero; a dynamic
+            // texture's sprite carries its content version, so a refreshed
+            // texture dirties the tiles showing it.
+            hasher.write_u32(sprite.pad);
         }
         Primitive::Surface(surface) => {
             // A surface's pixels come from outside the scene; layers never

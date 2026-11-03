@@ -16,7 +16,9 @@ before changing anything. In short:
   line. The only `use` of `fast` outside `fast/` is `gpui.rs` exporting a
   `test-support` item (`pub use fast::stats::LayoutStats;`). Inside `fast/`,
   `use` lines are fine; never glob imports.
-- **No new public API**, and `script/check-upstream` must pass.
+- **No new public API** — with the one documented exception of
+  `fast::dynamic_textures` (see `docs/upstream-sync.md`, rule 5) — and
+  `script/check-upstream` must pass.
 - **Changes reach `main` through pull requests** from a topic branch; never
   commit to `main` directly.
 - **Upstream sync commit titles use `chore: Sync GPUI upstream <zed-commit>`**,
