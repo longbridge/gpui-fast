@@ -399,13 +399,14 @@ impl MetalRenderer {
             MTLPixelFormat::BGRA8Unorm,
         )?;
 
-        let command_queue = device.newCommandQueue().context("creating command queue")?;
+        let command_queue = crate::fast::dynamic_textures::command_queue(&device)?;
         let supports_shared_storage = cfg!(target_os = "ios") || is_apple_gpu;
         #[expect(
             clippy::arc_with_non_send_sync,
             reason = "PlatformWindow::sprite_atlas requires Arc, not Send or Sync"
         )]
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), supports_shared_storage));
+        crate::fast::dynamic_textures::init(device.clone(), supports_shared_storage);
         let mut cache = ptr::null_mut();
         // SAFETY: The output pointer is writable and both optional attribute dictionaries are absent.
         let status = unsafe {
@@ -873,6 +874,7 @@ impl MetalRenderer {
         let command_buffer = command_queue
             .commandBuffer()
             .context("creating command buffer")?;
+        crate::fast::dynamic_textures::encode_uploads(&command_buffer);
         let alpha = if self.opaque { 1. } else { 0. };
 
         let mut command_encoder = new_command_encoder_for_texture(
@@ -1274,7 +1276,9 @@ impl MetalRenderer {
             return;
         }
 
-        let Some(texture) = self.sprite_atlas.metal_texture(texture_id) else {
+        let texture = crate::fast::dynamic_textures::metal_texture(&self.device, texture_id)
+            .or_else(|| self.sprite_atlas.metal_texture(texture_id));
+        let Some(texture) = texture else {
             return;
         };
         let texture_size = size(
@@ -1346,7 +1350,9 @@ impl MetalRenderer {
             return;
         }
 
-        let Some(texture) = self.sprite_atlas.metal_texture(texture_id) else {
+        let texture = crate::fast::dynamic_textures::metal_texture(&self.device, texture_id)
+            .or_else(|| self.sprite_atlas.metal_texture(texture_id));
+        let Some(texture) = texture else {
             return;
         };
         let texture_size = size(

@@ -25,7 +25,8 @@ keep merging upstream changes into. To keep those merges easy:
   `gpui_perf` need (`LayoutStats`, `Window::layout_stats`,
   `set_view_retention`) is `#[cfg(any(test, feature = "test-support"))]`.
   The few forced differences are listed in `docs/upstream-sync.md`
-  ("Where our API differs from upstream's").
+  ("Where our API differs from upstream's"), `fast::dynamic_textures`
+  included.
 - **New files only inside `fast/` or in our own crates** (`crates/gpui_perf`).
 - **Run `script/check-upstream` before committing.** It fails when a change to an
   upstream file is more than a hook.

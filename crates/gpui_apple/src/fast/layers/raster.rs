@@ -98,6 +98,7 @@ fn encode(
     let command_buffer = command_queue
         .commandBuffer()
         .context("creating command buffer")?;
+    crate::fast::dynamic_textures::encode_uploads(&command_buffer);
     command_buffer.setLabel(Some(&NSString::from_str("scroll_layer_tiles")));
 
     let mut surface_textures: Vec<CFRetained<CVMetalTexture>> = Vec::new();
