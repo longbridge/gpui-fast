@@ -943,7 +943,7 @@ pub(crate) fn draw_scene(
                 }
             }
             PrimitiveBatch::PolychromeSprites { texture_id, range } => {
-                let Some(texture) = atlas_bind_group(target.atlas, &texture_bind_group, texture_id)
+                let Some(texture) = polychrome_bind_group(target, &texture_bind_group, texture_id)
                 else {
                     continue;
                 };
@@ -978,6 +978,22 @@ fn atlas_bind_group(
         "atlas_texture_bind_group",
         &texture_info.view,
     ))
+}
+
+/// The bind group of a polychrome batch's texture: a dynamic texture's own,
+/// or the atlas texture's. A dynamic texture the frame's device does not hold
+/// is skipped like a released atlas texture, never looked up in the atlas.
+fn polychrome_bind_group(
+    target: &FrameTarget,
+    texture_bind_group: &impl Fn(&str, &wgpu::TextureView) -> wgpu::BindGroup,
+    texture_id: AtlasTextureId,
+) -> Option<wgpu::BindGroup> {
+    #[cfg(not(target_family = "wasm"))]
+    if let Some(id) = gpui::DynamicTextureId::from_atlas_texture_id(texture_id) {
+        let view = crate::fast::dynamic_textures::view(target.device, id)?;
+        return Some(texture_bind_group("dynamic_texture_bind_group", &view));
+    }
+    atlas_bind_group(target.atlas, texture_bind_group, texture_id)
 }
 
 /// Begins a pass that draws into `view`, cleared to `clear` if one is given.

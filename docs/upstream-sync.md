@@ -62,8 +62,10 @@ only hold the hooks that call into it.
    frame reallocates atlas tiles and invalidates the glyphs sharing them. The
    surface stays at the minimum that makes the feature usable: the opaque
    `DynamicTexture` handle and `DynamicTextureId`, the `DynamicTexturePlatform`
-   trait and its installer (the seam the platform crates implement), and four
-   `Window` methods. Everything else in the module is `pub(crate)`, and the
+   trait and its installer (the seam the platform crates implement), five
+   `Window` methods, an explicit-backend GPU constructor, and on wgpu the
+   producer's creation and scoped rendering into the GPU texture behind a handle.
+   Everything else in the module is `pub(crate)`, and the
    module adds no rendering behavior an app could observe without calling the
    new methods.
 6. **New files only inside `fast/`, or in our own crates** such as
@@ -214,6 +216,20 @@ No application-specific timeline policy belongs here.
   can register their backends, and everything else in
   `fast::dynamic_textures` is `pub(crate)`; without calling the new methods,
   an app observes no difference in what GPUI draws.
+
+  Content a GPU renders on the renderer's own device — a 3D viewport —
+  would otherwise be copied into an atlas tile, which nothing can render
+  into, or read back to the CPU. `DynamicTexture::new_gpu` allocates through
+  an explicit backend without CPU pixels. Each texture retains its owning
+  backend for updates and removal, so another renderer can retain the
+  process's default upload backend. `Window::refresh_dynamic_texture` records
+  a producer's write so cached frames draw again; `DynamicTexture::id` names
+  the texture to its backend; `DynamicTexture::remove` releases it when the
+  producer is dropped without requiring a live window. `DynamicTexturePlatform::create_gpu_texture`
+  defaults to refusing. The WGPU backend adds `WgpuContext::create_dynamic_texture`
+  and `render_dynamic_texture` to create the handle and render into its `wgpu::TextureView`
+  on the shared device and queue. Native Metal's producer interface and
+  browser producers are not implemented.
 
 When the check fails, move the change into a `fast/` module and leave a hook
 behind that names it; use `git diff <import_commit> -- <file>` to see what

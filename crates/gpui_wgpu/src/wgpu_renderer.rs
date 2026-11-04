@@ -501,6 +501,8 @@ impl WgpuRenderer {
         let alpha_mode = surface_config.alpha_mode;
         let max_texture_size = context.device.limits().max_texture_dimension_2d;
         let core = WgpuRendererCore::new(context, atlas.clone(), surface_format, alpha_mode);
+        #[cfg(not(target_family = "wasm"))]
+        crate::fast::dynamic_textures::init(context);
 
         Ok(Self {
             context: gpu_context,
