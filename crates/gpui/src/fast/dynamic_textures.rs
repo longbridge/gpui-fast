@@ -75,8 +75,12 @@ impl DynamicTextureId {
     }
 }
 
-/// A handle to a mutable texture created with
-/// [`crate::Window::create_dynamic_texture`].
+/// A copyable handle to a mutable texture, not an owner of its GPU memory.
+///
+/// Applications obtain uploaded textures from
+/// [`crate::Window::create_dynamic_texture`]. Renderer crates can register
+/// GPU-written textures with [`Self::new_gpu`] and own their GPU memory.
+/// Removing a texture retires every copy of its handle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DynamicTexture {
     id: DynamicTextureId,
@@ -84,8 +88,8 @@ pub struct DynamicTexture {
 }
 
 impl DynamicTexture {
-    /// The id the platform backend knows this texture by, so a renderer crate
-    /// can hand a GPU producer the texture behind the handle.
+    /// Identifies the texture in its renderer's lookup table.
+    /// This is not a GPU resource or an ownership token.
     pub fn id(&self) -> DynamicTextureId {
         self.id
     }
@@ -106,6 +110,8 @@ impl DynamicTexture {
     /// Releases the texture without requiring a live window, for example
     /// when the producer is dropped. Other copies of the handle become stale.
     /// Releasing an already removed texture has no effect.
+    /// Renderer owners must also release GPU memory held outside the upload
+    /// platform; this method retires only the metadata of GPU-written textures.
     pub fn remove(self) {
         remove(self);
     }

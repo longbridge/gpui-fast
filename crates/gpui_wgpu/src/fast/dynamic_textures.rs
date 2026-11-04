@@ -27,6 +27,13 @@ impl TextureStore {
 /// entry and retires its sprite id, so later sprite lookups skip it.
 /// Notify the view when removing content, as for other view state changes.
 /// A different context cannot resolve its id, even on the same adapter.
+///
+/// Check the creating context's `device_lost()` when handling device loss,
+/// even if contents change rarely. Drop its targets promptly, before replacing
+/// the context: each owner retains a context clone and its device. Recreate
+/// targets from the replacement context and render their contents again.
+/// `render` refuses a lost device; `paint` can still succeed for a stale owner,
+/// but the replacement context skips its sprite and displays no texture.
 pub struct WgpuDynamicTexture {
     context: WgpuContext,
     texture: DynamicTexture,
@@ -83,6 +90,8 @@ impl WgpuDynamicTexture {
     /// partial writes and then return an error. Call only when contents change.
     /// Outside paint, success requests a redraw. During paint it updates the
     /// current frame without scheduling another frame.
+    /// Only this window is refreshed; notify other windows displaying the
+    /// target so they redraw its new contents too.
     pub fn render<T>(
         &self,
         window: &mut Window,
