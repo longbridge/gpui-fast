@@ -82,3 +82,6 @@ ignored = ["scap"]
 
 [dev-dependencies]
 serde_json.workspace = true
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
