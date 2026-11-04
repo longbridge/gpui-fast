@@ -63,9 +63,10 @@ only hold the hooks that call into it.
    surface stays at the minimum that makes the feature usable: the opaque
    `DynamicTexture` handle and `DynamicTextureId`, the `DynamicTexturePlatform`
    trait and its installer (the seam the platform crates implement), five
-   `Window` methods, an explicit-backend GPU constructor, and on wgpu the
-   producer's creation and scoped rendering into the GPU texture behind a handle.
-   Everything else in the module is `pub(crate)`, and the
+   `Window` methods, and `DynamicTexture::new_gpu`, `id` and `remove` for
+   renderer crates. The wgpu crate adds an
+   owning GPU texture type and its context constructor under the same
+   `fast::dynamic_textures` exception. Everything else is `pub(crate)`, and the
    module adds no rendering behavior an app could observe without calling the
    new methods.
 6. **New files only inside `fast/`, or in our own crates** such as
@@ -217,19 +218,21 @@ No application-specific timeline policy belongs here.
   `fast::dynamic_textures` is `pub(crate)`; without calling the new methods,
   an app observes no difference in what GPUI draws.
 
-  Content a GPU renders on the renderer's own device — a 3D viewport —
-  would otherwise be copied into an atlas tile, which nothing can render
-  into, or read back to the CPU. `DynamicTexture::new_gpu` allocates through
-  an explicit backend without CPU pixels. Each texture retains its owning
-  backend for updates and removal, so another renderer can retain the
-  process's default upload backend. `Window::refresh_dynamic_texture` records
-  a producer's write so cached frames draw again; `DynamicTexture::id` names
-  the texture to its backend; `DynamicTexture::remove` releases it when the
-  producer is dropped without requiring a live window. `DynamicTexturePlatform::create_gpu_texture`
-  defaults to refusing. The WGPU backend adds `WgpuContext::create_dynamic_texture`
-  and `render_dynamic_texture` to create the handle and render into its `wgpu::TextureView`
-  on the shared device and queue. Native Metal's producer interface and
-  browser producers are not implemented.
+  Content rendered on the window renderer's device can use
+  `WgpuContext::create_dynamic_texture` instead of an intermediate image.
+  Its `WgpuDynamicTexture` owner provides `render` and `paint`: the producer
+  submits on the shared queue, then the ordinary sprite pipeline samples
+  that same texture, with no upload or transfer copy. A successful write
+  refreshes the window and advances the content version for retained views
+  and scroll-layer tiles.
+
+  Each context owns its texture lookup table; clones share it, while a new
+  device starts with an empty table. The owning handle removes its entry
+  and retires its core metadata on drop. GPU objects never enter the global
+  upload platform, so this ownership works on browser WebGPU and WebGL as
+  well as native wgpu. The existing Metal upload backend and its installer
+  are unchanged; CPU updates refuse GPU-written metadata. A native Metal
+  producer interface is outside this extension.
 
 When the check fails, move the change into a `fast/` module and leave a hook
 behind that names it; use `git diff <import_commit> -- <file>` to see what

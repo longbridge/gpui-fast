@@ -8,18 +8,16 @@
 //! [`crate::Window::update_dynamic_texture`]; the upload goes straight into
 //! the existing GPU texture instead of rebuilding an image.
 //!
-//! A texture can also be written on the GPU instead of uploaded:
-//! [`DynamicTexture::new_gpu`] allocates one without
-//! initial pixels, the renderer crate hands a producer on its own device the
-//! GPU texture behind it, and [`crate::Window::refresh_dynamic_texture`]
-//! records each write. The texture is still painted as a sprite, so clipping,
-//! opacity and painter order are the atlas images'.
+//! Renderer crates can also register a GPU-written texture through
+//! [`DynamicTexture::new_gpu`], retaining its GPU memory on their own context.
+//! GPUI tracks only the size and content version; no GPU object enters the
+//! upload platform or the process-wide metadata table.
 //!
-//! The GPU work itself is platform-specific: a backend implements
-//! [`DynamicTexturePlatform`] and installs itself with
-//! [`set_dynamic_texture_platform`]. Platforms without a backend report an
-//! error from `create_dynamic_texture` instead of failing later, and the
-//! sprite atlas keeps its meaning as a cache of immutable content.
+//! CPU uploads use [`DynamicTexturePlatform`] and
+//! [`set_dynamic_texture_platform`]. Platforms without an upload backend
+//! report an error from `create_dynamic_texture`. GPU-written handles refuse
+//! CPU updates; their renderer records writes through
+//! [`crate::Window::refresh_dynamic_texture`].
 
 use anyhow::{Context as _, Result};
 use std::{
@@ -92,22 +90,17 @@ impl DynamicTexture {
         self.id
     }
 
-    /// Allocates a GPU-written texture with a specific platform backend.
+    /// Registers the size and version of a GPU-written texture.
     ///
-    /// Renderer crates use this to create textures on their own device without
-    /// replacing the process's default upload backend. Applications should use
-    /// their renderer's constructor, then paint the returned handle normally.
-    pub fn new_gpu(
-        size: crate::Size<DevicePixels>,
-        backend: Arc<dyn DynamicTexturePlatform>,
-    ) -> Result<Self> {
+    /// Renderer crates allocate and own its GPU memory on their own context.
+    /// Applications should use their renderer's constructor. This method never
+    /// selects or calls the process's upload platform.
+    pub fn new_gpu(size: crate::Size<DevicePixels>) -> Result<Self> {
         anyhow::ensure!(
             size.width.0 > 0 && size.height.0 > 0,
             "dynamic texture dimensions must be positive"
         );
-        allocate(size, backend, |backend, id| {
-            backend.create_gpu_texture(id, size)
-        })
+        allocate(size, TextureSource::Gpu, |_| Ok(()))
     }
 
     /// Releases the texture without requiring a live window, for example
@@ -121,7 +114,7 @@ impl DynamicTexture {
 /// The GPU side of dynamic textures, implemented by the platform crates that
 /// can upload into an existing texture.
 ///
-/// Upload methods receive tightly packed BGRA8 rows — the caller repacks
+/// Every method receives tightly packed BGRA8 rows — the caller repacks
 /// strided input, so the backend never sees row padding.
 pub trait DynamicTexturePlatform: Send + Sync {
     /// Allocates a texture of `size` for `id` and uploads `bytes` into it.
@@ -147,21 +140,6 @@ pub trait DynamicTexturePlatform: Send + Sync {
 
     /// Releases the texture allocated for `id`.
     fn remove_texture(&self, id: DynamicTextureId);
-
-    /// Allocates a texture of `size` for `id` that a producer renders on the
-    /// backend's own device and queue, without an initial upload. It reads
-    /// as transparent until the producer first writes it.
-    ///
-    /// Backends that cannot hand their textures to a producer refuse, which
-    /// is the default.
-    fn create_gpu_texture(
-        &self,
-        id: DynamicTextureId,
-        size: crate::Size<DevicePixels>,
-    ) -> Result<()> {
-        let _ = (id, size);
-        anyhow::bail!("GPU-written dynamic textures are not supported on this platform")
-    }
 }
 
 static PLATFORM: parking_lot::RwLock<Option<Arc<dyn DynamicTexturePlatform>>> =
@@ -169,9 +147,9 @@ static PLATFORM: parking_lot::RwLock<Option<Arc<dyn DynamicTexturePlatform>>> =
 
 /// Installs the platform backend for dynamic textures.
 ///
-/// Called by the platform's renderer while it is coming up. The first
-/// backend is the default for uploads. A renderer creating a GPU-written
-/// texture can choose its own backend through [`DynamicTexture::new_gpu`].
+/// Called once by the platform's renderer while it is coming up. The first
+/// backend wins: every renderer in the process selects the same Metal device,
+/// and textures must stay on the device that draws them.
 pub fn set_dynamic_texture_platform(backend: Arc<dyn DynamicTexturePlatform>) {
     let mut platform = PLATFORM.write();
     if platform.is_none() {
@@ -208,15 +186,21 @@ static LIVE_TEXTURES: parking_lot::Mutex<Option<HashMap<DynamicTextureId, Textur
     parking_lot::Mutex::new(None);
 
 /// A live texture's created size and its content version.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct TextureState {
     size: crate::Size<DevicePixels>,
-    backend: Arc<dyn DynamicTexturePlatform>,
+    source: TextureSource,
     /// Bumped on every sub-region update. Painted sprites carry it in
     /// [`PolychromeSprite::pad`], which the scroll-layer tile hashes cover,
     /// so tiles showing refreshed contents are re-rendered instead of
     /// kept from the cache.
     version: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TextureSource {
+    Upload,
+    Gpu,
 }
 
 fn live_textures() -> parking_lot::MappedMutexGuard<'static, HashMap<DynamicTextureId, TextureState>>
@@ -270,7 +254,8 @@ pub(crate) fn create(
     );
 
     let packed = pack_rows(bytes, stride, row_bytes, height);
-    allocate(size, platform()?, |backend, id| {
+    let backend = platform()?;
+    allocate(size, TextureSource::Upload, |id| {
         backend.create_texture(id, size, &packed)
     })
 }
@@ -279,8 +264,8 @@ pub(crate) fn create(
 /// `create`, and tracks it as live.
 fn allocate(
     size: crate::Size<DevicePixels>,
-    backend: Arc<dyn DynamicTexturePlatform>,
-    create: impl FnOnce(&dyn DynamicTexturePlatform, DynamicTextureId) -> Result<()>,
+    source: TextureSource,
+    create: impl FnOnce(DynamicTextureId) -> Result<()>,
 ) -> Result<DynamicTexture> {
     let id = DynamicTextureId(NEXT_TEXTURE_ID.fetch_add(1, Ordering::Relaxed));
     // Ids count up for the life of the process into the reserved atlas
@@ -291,12 +276,12 @@ fn allocate(
         IDS_EXHAUSTED.store(true, Ordering::Relaxed);
         anyhow::bail!("dynamic texture ids are exhausted");
     }
-    create(&*backend, id).with_context(|| format!("failed to create dynamic texture {id:?}"))?;
+    create(id).with_context(|| format!("failed to create dynamic texture {id:?}"))?;
     live_textures().insert(
         id,
         TextureState {
             size,
-            backend,
+            source,
             version: 1,
         },
     );
@@ -318,12 +303,15 @@ pub(crate) fn update(
 ) -> Result<()> {
     let state = live_textures()
         .get(&texture.id)
-        .cloned()
+        .copied()
         .context("unknown dynamic texture")?;
+    anyhow::ensure!(
+        state.source == TextureSource::Upload,
+        "GPU-written textures must be updated by their producer"
+    );
     let packed = validate_region(state.size, bounds, bytes, bytes_per_row)?;
 
-    state
-        .backend
+    platform()?
         .update_texture(texture.id, bounds, &packed)
         .with_context(|| format!("failed to update dynamic texture {texture:?}"))?;
     if let Some(state) = live_textures().get_mut(&texture.id) {
@@ -387,8 +375,10 @@ pub(crate) fn paint(
 /// Releases a mutable texture and its GPU memory.
 pub(crate) fn remove(texture: DynamicTexture) {
     let state = live_textures().remove(&texture.id);
-    if let Some(state) = state {
-        state.backend.remove_texture(texture.id);
+    if state.is_some_and(|state| state.source == TextureSource::Upload)
+        && let Ok(backend) = platform()
+    {
+        backend.remove_texture(texture.id);
     }
 }
 
@@ -561,10 +551,8 @@ mod tests {
     ///
     /// The backend global is process-wide and installed once, so every test
     /// shares this one instance and resets the call records it cares about.
-    #[derive(Default)]
     struct MockPlatform {
         created: parking_lot::Mutex<Vec<(DynamicTextureId, crate::Size<DevicePixels>, usize)>>,
-        gpu_created: parking_lot::Mutex<Vec<(DynamicTextureId, crate::Size<DevicePixels>)>>,
         updated: parking_lot::Mutex<Vec<(DynamicTextureId, Bounds<DevicePixels>, usize)>>,
         removed: parking_lot::Mutex<Vec<DynamicTextureId>>,
         fail_updates: AtomicBool,
@@ -597,15 +585,6 @@ mod tests {
         fn remove_texture(&self, id: DynamicTextureId) {
             self.removed.lock().push(id);
         }
-
-        fn create_gpu_texture(
-            &self,
-            id: DynamicTextureId,
-            size: crate::Size<DevicePixels>,
-        ) -> Result<()> {
-            self.gpu_created.lock().push((id, size));
-            Ok(())
-        }
     }
 
     /// Serializes the tests that share the process-wide backend.
@@ -617,7 +596,6 @@ mod tests {
         MOCK.get_or_init(|| {
             let mock = Arc::new(MockPlatform {
                 created: parking_lot::Mutex::new(Vec::new()),
-                gpu_created: parking_lot::Mutex::new(Vec::new()),
                 updated: parking_lot::Mutex::new(Vec::new()),
                 removed: parking_lot::Mutex::new(Vec::new()),
                 fail_updates: AtomicBool::new(false),
@@ -632,7 +610,6 @@ mod tests {
         let lock = MOCK_LOCK.lock();
         let mock = shared_mock();
         mock.created.lock().clear();
-        mock.gpu_created.lock().clear();
         mock.updated.lock().clear();
         mock.removed.lock().clear();
         mock.fail_updates.store(false, Ordering::SeqCst);
@@ -833,78 +810,6 @@ mod tests {
     }
 
     #[test]
-    fn a_gpu_written_texture_allocates_no_bytes_and_versions_each_write() {
-        let (_lock, default_backend) = fresh_mock();
-        let mock = Arc::new(MockPlatform::default());
-
-        assert!(
-            DynamicTexture::new_gpu(size_of(0, 4), mock.clone()).is_err(),
-            "zero width must be refused before the backend"
-        );
-        let texture = DynamicTexture::new_gpu(size_of(4, 4), mock.clone()).expect("created");
-        assert_eq!(*mock.gpu_created.lock(), vec![(texture.id, texture.size)]);
-        assert!(
-            mock.created.lock().is_empty(),
-            "a GPU-written texture must not upload initial bytes"
-        );
-
-        let version = painted_version(texture.id);
-        mark_written(texture).expect("a live texture records a write");
-        assert_ne!(
-            painted_version(texture.id),
-            version,
-            "a write must advance the version the next paint carries"
-        );
-
-        update(texture, bounds_at((0, 0), 4, 4), &packed_bytes(4, 4), 16)
-            .expect("uploads use the texture's owning backend");
-        assert_eq!(mock.updated.lock().len(), 1);
-        assert!(default_backend.updated.lock().is_empty());
-
-        texture.remove();
-        assert_eq!(mock.removed.lock().len(), 1);
-        assert!(default_backend.removed.lock().is_empty());
-        assert!(
-            mark_written(texture).is_err(),
-            "a removed texture must be refused"
-        );
-    }
-
-    #[test]
-    fn backends_refuse_gpu_written_textures_unless_they_support_them() {
-        struct UploadsOnly;
-
-        impl DynamicTexturePlatform for UploadsOnly {
-            fn create_texture(
-                &self,
-                _: DynamicTextureId,
-                _: crate::Size<DevicePixels>,
-                _: &[u8],
-            ) -> Result<()> {
-                Ok(())
-            }
-
-            fn update_texture(
-                &self,
-                _: DynamicTextureId,
-                _: Bounds<DevicePixels>,
-                _: &[u8],
-            ) -> Result<()> {
-                Ok(())
-            }
-
-            fn remove_texture(&self, _: DynamicTextureId) {}
-        }
-
-        assert!(
-            UploadsOnly
-                .create_gpu_texture(DynamicTextureId(0), size_of(4, 4))
-                .is_err(),
-            "a backend without a GPU producer path must refuse, not draw nothing"
-        );
-    }
-
-    #[test]
     fn atlas_ids_stay_out_of_the_atlas_range() {
         let id = DynamicTextureId(0);
         let atlas_id = id.atlas_texture_id();
@@ -1008,5 +913,21 @@ mod tests {
             ),
             unchanged,
         );
+    }
+
+    #[test]
+    fn gpu_metadata_never_calls_the_upload_platform() {
+        let (_lock, mock) = fresh_mock();
+        assert!(DynamicTexture::new_gpu(size_of(0, 4)).is_err());
+        let texture = DynamicTexture::new_gpu(size_of(4, 4)).expect("GPU metadata");
+        assert!(mock.created.lock().is_empty());
+        let version = painted_version(texture.id);
+        mark_written(texture).expect("recorded GPU write");
+        assert_ne!(painted_version(texture.id), version);
+        assert!(update(texture, bounds_at((0, 0), 4, 4), &packed_bytes(4, 4), 16).is_err());
+        texture.remove();
+        assert!(mock.updated.lock().is_empty());
+        assert!(mock.removed.lock().is_empty());
+        assert!(mark_written(texture).is_err());
     }
 }

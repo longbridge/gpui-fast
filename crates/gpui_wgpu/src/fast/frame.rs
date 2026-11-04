@@ -71,6 +71,7 @@ pub(crate) struct FrameState {
 /// The GPU objects a frame is recorded with, borrowed from whoever owns them:
 /// the on-screen renderer, or the pixel tests' surfaceless harness.
 pub(crate) struct FrameTarget<'a> {
+    pub(crate) dynamic_textures: &'a crate::fast::dynamic_textures::TextureStore,
     pub(crate) device: &'a wgpu::Device,
     pub(crate) queue: &'a wgpu::Queue,
     pub(crate) pipelines: &'a WgpuPipelines,
@@ -139,6 +140,7 @@ impl FrameHost for WgpuRendererCore {
             InstanceData::Texture { view, .. } => InstanceSource::Texture(view),
         };
         Ok(FrameTarget {
+            dynamic_textures: &self.fast_dynamic_textures,
             device: &resources.device,
             queue: &resources.queue,
             pipelines: &resources.pipelines,
@@ -988,9 +990,8 @@ fn polychrome_bind_group(
     texture_bind_group: &impl Fn(&str, &wgpu::TextureView) -> wgpu::BindGroup,
     texture_id: AtlasTextureId,
 ) -> Option<wgpu::BindGroup> {
-    #[cfg(not(target_family = "wasm"))]
     if let Some(id) = gpui::DynamicTextureId::from_atlas_texture_id(texture_id) {
-        let view = crate::fast::dynamic_textures::view(target.device, id)?;
+        let view = target.dynamic_textures.view(id)?;
         return Some(texture_bind_group("dynamic_texture_bind_group", &view));
     }
     atlas_bind_group(target.atlas, texture_bind_group, texture_id)
