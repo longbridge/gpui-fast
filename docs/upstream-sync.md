@@ -62,8 +62,11 @@ only hold the hooks that call into it.
    frame reallocates atlas tiles and invalidates the glyphs sharing them. The
    surface stays at the minimum that makes the feature usable: the opaque
    `DynamicTexture` handle and `DynamicTextureId`, the `DynamicTexturePlatform`
-   trait and its installer (the seam the platform crates implement), and four
-   `Window` methods. Everything else in the module is `pub(crate)`, and the
+   trait and its installer (the seam the platform crates implement), five
+   `Window` methods, and `DynamicTexture::new_gpu`, `id` and `remove` for
+   renderer crates. The wgpu crate adds an
+   owning GPU texture type and its context constructor under the same
+   `fast::dynamic_textures` exception. Everything else is `pub(crate)`, and the
    module adds no rendering behavior an app could observe without calling the
    new methods.
 6. **New files only inside `fast/`, or in our own crates** such as
@@ -214,6 +217,22 @@ No application-specific timeline policy belongs here.
   can register their backends, and everything else in
   `fast::dynamic_textures` is `pub(crate)`; without calling the new methods,
   an app observes no difference in what GPUI draws.
+
+  Content rendered on the window renderer's device can use
+  `WgpuContext::create_dynamic_texture` instead of an intermediate image.
+  Its `WgpuDynamicTexture` owner provides `render` and `paint`: the producer
+  submits on the shared queue, then the ordinary sprite pipeline samples
+  that same texture, with no upload or transfer copy. A successful write
+  refreshes the window and advances the content version for retained views
+  and scroll-layer tiles.
+
+  Each context owns its texture lookup table; clones share it, while a new
+  device starts with an empty table. The owning handle removes its entry
+  and retires its core metadata on drop. GPU objects never enter the global
+  upload platform, so this ownership works on browser WebGPU and WebGL as
+  well as native wgpu. The existing Metal upload backend and its installer
+  are unchanged; CPU updates refuse GPU-written metadata. A native Metal
+  producer interface is outside this extension.
 
 When the check fails, move the change into a `fast/` module and leave a hook
 behind that names it; use `git diff <import_commit> -- <file>` to see what

@@ -8,11 +8,16 @@
 //! [`crate::Window::update_dynamic_texture`]; the upload goes straight into
 //! the existing GPU texture instead of rebuilding an image.
 //!
-//! The GPU work itself is platform-specific: a backend implements
-//! [`DynamicTexturePlatform`] and installs itself with
-//! [`set_dynamic_texture_platform`]. Platforms without a backend report an
-//! error from `create_dynamic_texture` instead of failing later, and the
-//! sprite atlas keeps its meaning as a cache of immutable content.
+//! Renderer crates can also register a GPU-written texture through
+//! [`DynamicTexture::new_gpu`], retaining its GPU memory on their own context.
+//! GPUI tracks only the size and content version; no GPU object enters the
+//! upload platform or the process-wide metadata table.
+//!
+//! CPU uploads use [`DynamicTexturePlatform`] and
+//! [`set_dynamic_texture_platform`]. Platforms without an upload backend
+//! report an error from `create_dynamic_texture`. GPU-written handles refuse
+//! CPU updates; their renderer records writes through
+//! [`crate::Window::refresh_dynamic_texture`].
 
 use anyhow::{Context as _, Result};
 use std::{
@@ -70,12 +75,46 @@ impl DynamicTextureId {
     }
 }
 
-/// A handle to a mutable texture created with
-/// [`crate::Window::create_dynamic_texture`].
+/// A copyable handle to a mutable texture, not an owner of its GPU memory.
+///
+/// Applications obtain uploaded textures from
+/// [`crate::Window::create_dynamic_texture`]. Renderer crates can register
+/// GPU-written textures with [`Self::new_gpu`] and own their GPU memory.
+/// Removing a texture retires every copy of its handle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DynamicTexture {
     id: DynamicTextureId,
     size: crate::Size<DevicePixels>,
+}
+
+impl DynamicTexture {
+    /// Identifies the texture in its renderer's lookup table.
+    /// This is not a GPU resource or an ownership token.
+    pub fn id(&self) -> DynamicTextureId {
+        self.id
+    }
+
+    /// Registers the size and version of a GPU-written texture.
+    ///
+    /// Renderer crates allocate and own its GPU memory on their own context.
+    /// Applications should use their renderer's constructor. This method never
+    /// selects or calls the process's upload platform.
+    pub fn new_gpu(size: crate::Size<DevicePixels>) -> Result<Self> {
+        anyhow::ensure!(
+            size.width.0 > 0 && size.height.0 > 0,
+            "dynamic texture dimensions must be positive"
+        );
+        allocate(size, TextureSource::Gpu, |_| Ok(()))
+    }
+
+    /// Releases the texture without requiring a live window, for example
+    /// when the producer is dropped. Other copies of the handle become stale.
+    /// Releasing an already removed texture has no effect.
+    /// Renderer owners must also release GPU memory held outside the upload
+    /// platform; this method retires only the metadata of GPU-written textures.
+    pub fn remove(self) {
+        remove(self);
+    }
 }
 
 /// The GPU side of dynamic textures, implemented by the platform crates that
@@ -156,11 +195,18 @@ static LIVE_TEXTURES: parking_lot::Mutex<Option<HashMap<DynamicTextureId, Textur
 #[derive(Clone, Copy)]
 struct TextureState {
     size: crate::Size<DevicePixels>,
+    source: TextureSource,
     /// Bumped on every sub-region update. Painted sprites carry it in
     /// [`PolychromeSprite::pad`], which the scroll-layer tile hashes cover,
     /// so tiles showing refreshed contents are re-rendered instead of
     /// kept from the cache.
     version: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TextureSource {
+    Upload,
+    Gpu,
 }
 
 fn live_textures() -> parking_lot::MappedMutexGuard<'static, HashMap<DynamicTextureId, TextureState>>
@@ -215,6 +261,18 @@ pub(crate) fn create(
 
     let packed = pack_rows(bytes, stride, row_bytes, height);
     let backend = platform()?;
+    allocate(size, TextureSource::Upload, |id| {
+        backend.create_texture(id, size, &packed)
+    })
+}
+
+/// Grants a texture id, has the backend allocate the texture under it with
+/// `create`, and tracks it as live.
+fn allocate(
+    size: crate::Size<DevicePixels>,
+    source: TextureSource,
+    create: impl FnOnce(DynamicTextureId) -> Result<()>,
+) -> Result<DynamicTexture> {
     let id = DynamicTextureId(NEXT_TEXTURE_ID.fetch_add(1, Ordering::Relaxed));
     // Ids count up for the life of the process into the reserved atlas
     // range, so an id past the range would name a layer tile's texture.
@@ -224,10 +282,15 @@ pub(crate) fn create(
         IDS_EXHAUSTED.store(true, Ordering::Relaxed);
         anyhow::bail!("dynamic texture ids are exhausted");
     }
-    backend
-        .create_texture(id, size, &packed)
-        .with_context(|| format!("failed to create dynamic texture {id:?}"))?;
-    live_textures().insert(id, TextureState { size, version: 1 });
+    create(id).with_context(|| format!("failed to create dynamic texture {id:?}"))?;
+    live_textures().insert(
+        id,
+        TextureState {
+            size,
+            source,
+            version: 1,
+        },
+    );
 
     Ok(DynamicTexture { id, size })
 }
@@ -244,8 +307,15 @@ pub(crate) fn update(
     bytes: &[u8],
     bytes_per_row: u32,
 ) -> Result<()> {
-    let texture_size = live_size(texture.id)?;
-    let packed = validate_region(texture_size, bounds, bytes, bytes_per_row)?;
+    let state = live_textures()
+        .get(&texture.id)
+        .copied()
+        .context("unknown dynamic texture")?;
+    anyhow::ensure!(
+        state.source == TextureSource::Upload,
+        "GPU-written textures must be updated by their producer"
+    );
+    let packed = validate_region(state.size, bounds, bytes, bytes_per_row)?;
 
     platform()?
         .update_texture(texture.id, bounds, &packed)
@@ -254,6 +324,17 @@ pub(crate) fn update(
         state.version = state.version.wrapping_add(1).max(1);
     }
 
+    Ok(())
+}
+
+/// Records that a GPU producer wrote new contents into `texture`: the version
+/// the next paint carries advances, as an update's does.
+pub(crate) fn mark_written(texture: DynamicTexture) -> Result<()> {
+    let mut textures = live_textures();
+    let state = textures
+        .get_mut(&texture.id)
+        .context("unknown dynamic texture")?;
+    state.version = state.version.wrapping_add(1).max(1);
     Ok(())
 }
 
@@ -299,10 +380,11 @@ pub(crate) fn paint(
 
 /// Releases a mutable texture and its GPU memory.
 pub(crate) fn remove(texture: DynamicTexture) {
-    if live_textures().remove(&texture.id).is_some() {
-        if let Some(backend) = PLATFORM.read().clone() {
-            backend.remove_texture(texture.id);
-        }
+    let state = live_textures().remove(&texture.id);
+    if state.is_some_and(|state| state.source == TextureSource::Upload)
+        && let Ok(backend) = platform()
+    {
+        backend.remove_texture(texture.id);
     }
 }
 
@@ -354,6 +436,18 @@ impl Window {
         Ok(())
     }
 
+    /// Records that a GPU producer wrote new contents into `texture`.
+    ///
+    /// Like [`Window::update_dynamic_texture`], this advances the version the
+    /// next paint carries and, called outside a frame, marks the window for a
+    /// full redraw, so cached views and scroll-layer tiles showing the
+    /// texture render again. A removed texture is refused.
+    pub fn refresh_dynamic_texture(&mut self, texture: DynamicTexture) -> Result<()> {
+        mark_written(texture)?;
+        self.refresh();
+        Ok(())
+    }
+
     /// Paints the current contents of a mutable texture into the scene.
     ///
     /// This method should only be called as part of the paint phase of
@@ -376,7 +470,6 @@ impl Window {
 fn live_size(id: DynamicTextureId) -> Result<crate::Size<DevicePixels>> {
     live_textures()
         .get(&id)
-        .copied()
         .map(|state| state.size)
         .context("unknown dynamic texture")
 }
@@ -447,7 +540,7 @@ fn pack_rows(bytes: &[u8], stride: usize, row_bytes: usize, height: usize) -> Ve
 mod tests {
     use super::{
         BYTES_PER_PIXEL, DYNAMIC_INDEX_BASE, DynamicTexture, DynamicTextureId,
-        DynamicTexturePlatform, create, live_size, painted_version, remove,
+        DynamicTexturePlatform, create, live_size, mark_written, painted_version, remove,
         set_dynamic_texture_platform, update, validate_region,
     };
     use crate::{
@@ -826,5 +919,21 @@ mod tests {
             ),
             unchanged,
         );
+    }
+
+    #[test]
+    fn gpu_metadata_never_calls_the_upload_platform() {
+        let (_lock, mock) = fresh_mock();
+        assert!(DynamicTexture::new_gpu(size_of(0, 4)).is_err());
+        let texture = DynamicTexture::new_gpu(size_of(4, 4)).expect("GPU metadata");
+        assert!(mock.created.lock().is_empty());
+        let version = painted_version(texture.id);
+        mark_written(texture).expect("recorded GPU write");
+        assert_ne!(painted_version(texture.id), version);
+        assert!(update(texture, bounds_at((0, 0), 4, 4), &packed_bytes(4, 4), 16).is_err());
+        texture.remove();
+        assert!(mock.updated.lock().is_empty());
+        assert!(mock.removed.lock().is_empty());
+        assert!(mark_written(texture).is_err());
     }
 }

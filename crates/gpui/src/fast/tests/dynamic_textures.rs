@@ -164,11 +164,12 @@ fn window(
     (window, paints, created)
 }
 
-/// An update marks the window for a full redraw, so a cached view showing
-/// the texture renders again — and carries the new contents — even though
-/// nothing it read changed and it would otherwise draw nothing again.
+/// An update, or a recorded GPU write, marks the window for a full redraw, so
+/// a cached view showing the texture renders again — and carries the new
+/// contents — even though nothing it read changed and it would otherwise draw
+/// nothing again.
 #[test]
-fn an_update_renders_a_cached_view_showing_the_texture_again() {
+fn a_write_renders_a_cached_view_showing_the_texture_again() {
     let mut cx = TestAppContext::single();
     let (window, paints, created) = window(&mut cx);
 
@@ -204,5 +205,22 @@ fn an_update_renders_a_cached_view_showing_the_texture_again() {
         paints.get(),
         2,
         "the cached view must be rendered again after an update"
+    );
+
+    // A GPU producer's write is recorded the same way.
+    cx.update_window(window.into(), |_, window, _| {
+        window
+            .refresh_dynamic_texture(texture)
+            .expect("the texture is live");
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+    assert_eq!(
+        paints.get(),
+        3,
+        "the cached view must be rendered again after a GPU write"
     );
 }

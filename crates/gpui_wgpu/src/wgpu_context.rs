@@ -11,6 +11,7 @@ use wgpu::TextureFormat;
 
 #[derive(Clone)]
 pub struct WgpuContext {
+    pub(crate) fast_dynamic_textures: crate::fast::dynamic_textures::TextureStore,
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
     pub device: Arc<wgpu::Device>,
@@ -207,7 +208,7 @@ impl WgpuContext {
         not(target_family = "wasm"),
         any(test, feature = "bench-support", feature = "test-support")
     ))]
-    fn create_headless() -> anyhow::Result<(Self, wgpu::TextureFormat)> {
+    pub(crate) fn create_headless() -> anyhow::Result<(Self, wgpu::TextureFormat)> {
         let instance = crate::fast::rounded_clip::headless_instance();
         let device_id_filter = Self::device_id_filter();
         let (adapter, device, queue, dual_source_blending, color_texture_format, target_format) =
@@ -319,6 +320,7 @@ impl WgpuContext {
             dual_source_blending,
             color_texture_format,
             errors,
+            fast_dynamic_textures: crate::fast::dynamic_textures::TextureStore::default(),
         }
     }
 
@@ -418,6 +420,7 @@ impl WgpuContext {
             dual_source_blending,
             color_texture_format,
             errors,
+            fast_dynamic_textures: crate::fast::dynamic_textures::TextureStore::default(),
         };
         Ok(PreparedWebGraphics { context, surface })
     }

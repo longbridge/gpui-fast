@@ -55,6 +55,10 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo test -p gpui_apple fast::layers -- --nocapture
 
+      - name: Test GPU-written dynamic textures on WGPU
+        if: runner.os == 'macOS'
+        run: cargo test -p gpui_wgpu --features test-support fast::dynamic_textures -- --nocapture
+
       - name: Test scroll layers on Direct3D
         if: runner.os == 'Windows'
         run: cargo test -p gpui_windows --features test-support fast::layers -- --nocapture
