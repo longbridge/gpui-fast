@@ -45,7 +45,7 @@ fn composition_whole_scene_matches_combined_window_pixels(cx: &mut gpui::TestApp
             };
             let empty = gpui::ComposedSceneLayer {
                 ranges: vec![],
-                ..full.clone()
+                ..full
             };
             for (layers, expected_target) in [
                 (vec![full.clone(), empty.clone()], 0),
