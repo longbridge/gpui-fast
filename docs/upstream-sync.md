@@ -69,6 +69,14 @@ only hold the hooks that call into it.
    `fast::dynamic_textures` exception. Everything else is `pub(crate)`, and the
    module adds no rendering behavior an app could observe without calling the
    new methods.
+   A second exception is `gpui_web`'s `fast::wgpu_context`
+   (longbridge/gpui-fast#99): a browser page has no window composition, so a
+   wgpu-rendered element there can only reach the screen by drawing during
+   `paint` into a `WgpuDynamicTexture` allocated from the context that draws
+   the window. `WebPlatform` keeps that context private, which leaves the
+   feature unreachable to an application that does not replace the platform.
+   The addition is one accessor returning a clone of the `Rc` it already
+   holds, and nothing else about the web platform becomes public.
 6. **New files only inside `fast/`, or in our own crates** such as
    `crates/gpui_perf` (benchmarks, examples and the frame-measuring app) and
    `compat/` (the `gpui-pre-*` stand-ins GPUI Kit applications patch in).
