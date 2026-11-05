@@ -176,6 +176,9 @@ impl WgpuAtlasTextures {
             }
         }
 
+        if !crate::fast::atlas::fits(size, self.max_texture_size) {
+            return None;
+        }
         let texture = self.push_texture(size, texture_kind);
         texture.allocate(size)
     }
