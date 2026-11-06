@@ -261,6 +261,21 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
         kind,
         NSEventType::LeftMouseUp | NSEventType::RightMouseUp | NSEventType::OtherMouseUp
     );
+    // A press on the window's own chrome (the resize border, the titlebar
+    // buttons) belongs to AppKit, as in a window without composition.
+    // `root.hitTest` below cannot see the frame view, so a resize grabbed where
+    // a native view reaches the window's edge would make that view the press
+    // owner and dispatch the press to GPUI. AppKit's live-resize loop can then
+    // consume the matching mouse-up (it does with a physical mouse on macOS
+    // 26.6), which leaves the press open and loses the next click. A release
+    // that does reach `sendEvent:` still takes the path below, which clears
+    // the owner.
+    if observe && !up && unsafe { hits_window_chrome(this, root.as_ptr(), event) } {
+        unsafe {
+            let _: () = msg_send![super(this, superclass), sendEvent: event];
+        }
+        return;
+    }
     let button = if observe {
         let number: NSInteger = unsafe { msg_send![event, buttonNumber] };
         1u64.checked_shl(number as u32).unwrap_or(0)
@@ -344,6 +359,29 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
         let _: () = msg_send![super(this, superclass), sendEvent: event];
     }
     state.lock().fast_composition.native_event = previous;
+}
+
+/// Whether AppKit hit-tests `event` outside the window's view `root`: to the
+/// frame view itself (its resize border) or to one of its controls, such as
+/// the titlebar buttons.
+unsafe fn hits_window_chrome(window: &AnyObject, root: Id, event: Id) -> bool {
+    unsafe {
+        let content: Id = msg_send![window, contentView];
+        if content.is_null() {
+            return false;
+        }
+        let frame_view: Id = msg_send![content, superview];
+        if frame_view.is_null() {
+            return false;
+        }
+        let location: NSPoint = msg_send![event, locationInWindow];
+        let target: Id = msg_send![frame_view, hitTest: location];
+        if target.is_null() {
+            return false;
+        }
+        let inside: Bool = msg_send![target, isDescendantOf: root];
+        !inside.as_bool()
+    }
 }
 
 unsafe fn belongs_to_native(view: Id, native: &[usize]) -> bool {
