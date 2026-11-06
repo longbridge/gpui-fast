@@ -17,6 +17,11 @@ impl WebPlatform {
     /// initialized: from the moment the application finishes launching. An
     /// application that renders with wgpu allocates its dynamic textures from
     /// here, so GPUI can sample what it drew.
+    ///
+    /// The web helpers in `gpui_platform` build a platform without handing it
+    /// back, so reaching this takes an application that constructs
+    /// `WebPlatform` itself and keeps the `Rc` it gives to
+    /// `Application::with_platform`.
     pub fn wgpu_context(&self) -> Option<WgpuContext> {
         self.wgpu_context.borrow().clone()
     }
