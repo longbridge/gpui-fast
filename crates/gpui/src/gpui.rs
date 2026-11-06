@@ -55,6 +55,7 @@ mod style;
 mod styled;
 mod subscription;
 mod svg_renderer;
+#[path = "fast/tab_stop.rs"]
 mod tab_stop;
 mod taffy;
 mod text_system;

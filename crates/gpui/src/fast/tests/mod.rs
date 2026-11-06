@@ -22,6 +22,7 @@ mod scroll_to_bottom;
 mod splice;
 mod splice_late_layout;
 mod support;
+mod tab_stops;
 mod text;
 mod text_shaping;
 mod wheel_notifies;
