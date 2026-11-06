@@ -672,6 +672,12 @@ impl EntityAccessLog {
 }
 
 impl EntityMap {
+    /// Whether `entity_id` has not been released. A leased entity is alive,
+    /// though its slot is empty while it is leased.
+    pub(crate) fn is_alive(&self, entity_id: EntityId) -> bool {
+        self.ref_counts.read().counts.contains_key(entity_id)
+    }
+
     /// Marks where the access log stands as a boundary between stretches.
     pub(crate) fn mark_access_boundary(&mut self) {
         let log = &mut self.access_log;
@@ -1262,6 +1268,31 @@ impl RenderDependencies {
             },
             ..self.clone()
         }
+    }
+
+    /// These dependencies without the entities that have been released,
+    /// which cannot change any more.
+    pub(crate) fn without_released_entities(mut self, cx: &App) -> Self {
+        if self
+            .entities
+            .iter()
+            .all(|entity| cx.entities.is_alive(*entity))
+        {
+            return self;
+        }
+        self.entities = self
+            .entities
+            .iter()
+            .copied()
+            .filter(|entity| cx.entities.is_alive(*entity))
+            .collect();
+        self
+    }
+
+    /// Whether these dependencies hold the very list of entities `other`
+    /// holds, as a union with nothing new to add leaves it.
+    pub(crate) fn shares_entities_with(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.entities, &other.entities)
     }
 
     /// Both sets of dependencies at once, as of the earlier generation, so

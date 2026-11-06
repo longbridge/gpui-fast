@@ -2676,3 +2676,66 @@ fn an_element_no_longer_drawn_leaves_the_debug_bounds_of_a_retained_frame() {
     );
     assert_eq!(bounds(&mut cx, "kept"), Some(kept));
 }
+
+/// A view of a fixed size that reads a model which is replaced from time to
+/// time, as a page's keyed state is when the page is left and shown again.
+struct ReplacedModel {
+    model: Rc<std::cell::RefCell<Entity<Model>>>,
+    builds: Rc<Cell<usize>>,
+}
+
+impl Render for ReplacedModel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.builds.set(self.builds.get() + 1);
+        let _ = self.model.borrow().read(cx);
+        div().relative().w(px(100.)).h(px(40.))
+    }
+}
+
+/// The most entities a record of the last frame replays when it is reused.
+fn most_replayed_entities(cx: &mut TestAppContext, window: WindowHandle<Shell>) -> usize {
+    cx.update_window(window.into(), |_, window, _| {
+        window
+            .rendered_frame
+            .retained
+            .records
+            .iter()
+            .map(|record| record.dependencies.entities.len())
+            .max()
+            .unwrap_or(0)
+    })
+    .unwrap()
+}
+
+/// A view that is only ever spliced, as a window's root is while only a page
+/// in it changes, keeps of what the views in it read only what still exists.
+/// Its dependencies are last frame's joined with its gaps', so otherwise it
+/// keeps every entity they ever read, and replays them on every frame.
+#[test]
+fn a_spliced_view_forgets_the_entities_views_in_it_dropped() {
+    let mut cx = TestAppContext::single();
+    let builds = Rc::new(Cell::new(0));
+    let model = Rc::new(std::cell::RefCell::new(cx.new(|_| Model(0))));
+    let page = cx.new({
+        let (model, builds) = (model.clone(), builds.clone());
+        move |_| ReplacedModel { model, builds }
+    });
+    let (window, shell_builds) = shell(&mut cx, {
+        let page = page.clone();
+        move |_| page.into()
+    });
+    draw_shell(&mut cx, window);
+    let first = most_replayed_entities(&mut cx, window);
+    for frame in 0..20 {
+        *model.borrow_mut() = cx.new(|_| Model(frame));
+        cx.update(|cx| cx.notify(page.entity_id()));
+        draw_shell(&mut cx, window);
+        let replayed = most_replayed_entities(&mut cx, window);
+        assert!(
+            replayed <= first + 1,
+            "frame {frame}: {replayed} entities replayed, from {first}"
+        );
+    }
+    assert_eq!(shell_builds.get(), 1, "the shell was spliced throughout");
+    assert_eq!(builds.get(), 21);
+}
