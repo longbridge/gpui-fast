@@ -68,4 +68,31 @@ mod tests {
         assert_eq!(shape(16.), first, "a size laid out again after another");
         assert_eq!(shape(24.), larger);
     }
+
+    /// A font is loaded whether or not it has an `m`: most fonts for scripts
+    /// other than Latin have none, among them the system's own Arial Hebrew
+    /// and Geeza Pro, and upstream refused to load them at all.
+    #[test]
+    fn fonts_without_an_m_load_and_lay_out_their_script() {
+        let fonts = AppleTextSystem::new();
+        for (family, text) in [("Arial Hebrew", "שלום"), ("Geeza Pro", "سلام")] {
+            let font_id = fonts
+                .font_id(&font(family))
+                .unwrap_or_else(|error| panic!("{family} did not load: {error}"));
+            assert!(
+                fonts.glyph_for_char(font_id, 'm').is_none(),
+                "{family} has an m"
+            );
+            let runs = [FontRun {
+                font_id,
+                len: text.len(),
+            }];
+            let layout = fonts.layout_line(text, px(16.), &runs);
+            assert!(
+                layout.runs.iter().all(|run| run.font_id == font_id),
+                "{family} was not used for its own script"
+            );
+            assert!(layout.width > px(0.));
+        }
+    }
 }
