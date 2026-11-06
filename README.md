@@ -8,34 +8,32 @@ A performance-focused fork of [Zed's GPUI](https://gpui.rs) with incremental ren
 
 ## Performance vs GPUI
 
-Scrolling every story of the [GPUI Kit](https://github.com/longbridge/gpui-component) story gallery, built once on upstream GPUI (`gpui-pre` 0.3.9) and once on GPUI Fast (0.1.7), with the same synthetic wheel input for 15 s. GPUI Fast used less CPU on 75 of the 76 stories that scrolled; the one that rose (+6%) is within noise.
+The `gpui_perf` showcase is a component gallery written the way GPUI Kit's is: a sidebar of 243 pages, a 5,000-row data table, a list of 5,000 messages, and a trading workspace that a stream of quotes updates. Built once on GPUI Fast and once on upstream GPUI (the `gpui-pre` 0.3.7 snapshot), scrolling at 32 px a frame, at up to 144 frames per second on Linux, release builds. Main-thread CPU per frame (median) and the CPU of the whole process (100% = one core):
 
-| Process CPU while scrolling (100% = one core) | GPUI | GPUI Fast | Change |
-| --- | ---: | ---: | ---: |
-| **Mean of 76 stories** | **13.8%** | **8.7%** | **−37%** |
-| Message | 27.2% | 7.7% | −72% |
-| Table | 13.2% | 4.1% | −69% |
-| Tabs | 22.1% | 8.1% | −63% |
-| Button | 20.6% | 8.7% | −58% |
-| Shell | 28.2% | 14.2% | −50% |
-| Input Group | 48.5% | 26.0% | −46% |
-| VirtualList | 32.2% | 19.1% | −41% |
-| DataTable | 18.1% | 13.1% | −28% |
-| Editor | 11.0% | 9.8% | −11% |
+| Scenario | GPUI | GPUI Fast |
+| --- | --- | --- |
+| A spinner animating | 5.91 ms, 85% CPU | 0.73 ms, 11% CPU (−88%) |
+| Scrolling the sidebar | 5.95 ms, 86% CPU | 0.79 ms, 12% CPU (−87%) |
+| Scrolling a page of components | 5.96 ms, 82% CPU | 0.79 ms, 12% CPU (−87%) |
+| Scrolling the data table | 3.07 ms, 44% CPU | 0.54 ms, 8% CPU (−82%) |
+| Refreshing the table every 33 ms | 11% CPU | 2% CPU |
+| Scrolling the list | 2.66 ms, 39% CPU | 0.39 ms, 6% CPU (−85%) |
+| Streaming quotes into the workspace | 5.06 ms, 43% CPU | 1.35 ms, 15% CPU (−73%) |
+| Scrolling the workspace's watchlist | 5.23 ms, 77% CPU | 1.33 ms, 24% CPU (−75%) |
+| Hovering the workspace's watchlist | 5.16 ms, 42% CPU | 1.32 ms, 14% CPU (−74%) |
 
-Linux (Hyprland, Wayland, wgpu), release builds, 875x600 window at scale 1.5. The median story fell 34%. Setup, the driver script and all 76 stories are in [Story scroll CPU against gpui-pre](docs/story-scroll-cpu.md).
+Each figure is the mean of two runs alternating between the two builds. While the watchlist scrolls, GPUI draws 124 frames a second and GPUI Fast 144, so that row's process CPU does not compare directly. Results depend on the workload. To reproduce:
+
+```sh
+cargo run -p gpui_perf --release -- --auto
+cargo run -p gpui_perf --release --no-default-features --features upstream -- --auto
+```
+
+In GPUI Kit's own story gallery (`gpui-pre` 0.3.9 against GPUI Fast 0.1.7, 60 Hz), scrolling used less CPU on 75 of 76 stories, 37% less on average; see [Story scroll CPU against gpui-pre](docs/story-scroll-cpu.md).
 
 ## Retained Mode
 
-GPUI Fast tracks rendering dependencies and rebuilds only what changed. Recorded Linux release-build CPU time per frame:
-
-| Workload | Baseline | GPUI Fast |
-| --- | --- | --- |
-| Unchanged window | 3.31 ms | 0.19 ms (−94%) |
-| Sidebar scrolling | 5.95 ms | 0.79 ms (−87%) |
-| Streaming quotes | 5.06 ms | 1.35 ms (−73%) |
-
-The unchanged-window baseline disables retention in the same build; the other rows compare against upstream `gpui-pre` 0.3.7. Results depend on the workload. See [Retained Mode](docs/retained-mode.md) and [Scroll layers](docs/scroll-layers.md) for measurements and implementation details.
+GPUI Fast tracks rendering dependencies and rebuilds only what changed: a window of 60 panel views that stays still costs 0.19 ms a frame instead of 3.31 ms with retention turned off. See [Retained Mode](docs/retained-mode.md) and [Scroll layers](docs/scroll-layers.md) for measurements and implementation details.
 
 ## Window composition
 
