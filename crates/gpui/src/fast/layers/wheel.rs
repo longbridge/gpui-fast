@@ -25,11 +25,17 @@
 //! is that state outside entities that a listener changes in reaction to a
 //! scroll does not change what the view renders inside the content it
 //! scrolled; state that does belongs in an entity the listener updates.
+//!
+//! Nor does a container's own listener notify for a wheel that cannot move
+//! its content; see [`moves`].
 
 use collections::FxHashMap;
 
 use crate::fast::layers::COMPILED;
-use crate::{App, EntityId, PlatformInput, Window};
+use crate::{
+    App, Bounds, EntityId, Interactivity, IsZero, Pixels, PlatformInput, Point, Style, Window, px,
+    size,
+};
 
 /// Where the counts stood when the wheel event being dispatched began to be.
 #[derive(Default)]
@@ -79,4 +85,41 @@ pub(crate) fn end_dispatch(window: &mut Window, cx: &App) {
             scroll_notifies.insert(view, scrolls + notified - scrolled);
         }
     }
+}
+
+/// How far the content of `interactivity`'s scroll container at `bounds`
+/// scrolls on each axis: the bound `Interactivity::clamp_scroll_position`
+/// clamps its offset to, computed the same way.
+pub(crate) fn scroll_max(
+    interactivity: &Interactivity,
+    bounds: Bounds<Pixels>,
+    style: &Style,
+    window: &Window,
+) -> Point<Pixels> {
+    let padding = style
+        .padding
+        .to_pixels(bounds.size.into(), window.rem_size())
+        .map(|edge| window.pixel_snap(*edge));
+    let padding_size = size(padding.left + padding.right, padding.top + padding.bottom);
+    let padded_content_size = interactivity.content_size + padding_size;
+    Point::from(padded_content_size - bounds.size)
+        .map(|pixels| (pixels * 100.).round() / 100.)
+        .max(&Default::default())
+}
+
+/// Whether a wheel moving a scroll container's `offset` by `delta` moves its
+/// content, which can scroll up to `max`. One that cannot, because the
+/// content is already at the end the wheel points to, changes nothing.
+///
+/// The container's listener does not notify its view for such a wheel, or
+/// invalidate the retained subtrees holding it, or note it scrolled: each
+/// would draw again what did not move, and the last repaints every scroll
+/// layer holding the container. A vertical wheel over a container that
+/// scrolls only horizontally is mapped onto its one axis, so a page scrolled
+/// past a carousel at its start sends one on every event.
+pub(crate) fn moves(offset: Point<Pixels>, delta: Point<Pixels>, max: Point<Pixels>) -> bool {
+    let moves = |offset: Pixels, delta: Pixels, max: Pixels| {
+        !delta.is_zero() && (offset + delta).clamp(-max, px(0.)) != offset
+    };
+    moves(offset.x, delta.x, max.x) || moves(offset.y, delta.y, max.y)
 }
