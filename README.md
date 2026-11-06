@@ -6,6 +6,25 @@ A performance-focused fork of [Zed's GPUI](https://gpui.rs) with incremental ren
 - **Scroll layers** reuse cached GPU tiles and list rows while scrolling, on macOS, Linux and Windows.
 - **Window composition** embeds native content while keeping GPUI menus, popovers and dialogs above it.
 
+## Performance vs GPUI
+
+Scrolling every story of the [GPUI Kit](https://github.com/longbridge/gpui-component) story gallery, built once on upstream GPUI (`gpui-pre` 0.3.9) and once on GPUI Fast (0.1.7), with the same synthetic wheel input for 15 s. GPUI Fast used less CPU on 75 of the 76 stories that scrolled; the one that rose (+6%) is within noise.
+
+| Process CPU while scrolling (100% = one core) | GPUI | GPUI Fast | Change |
+| --- | ---: | ---: | ---: |
+| **Mean of 76 stories** | **13.8%** | **8.7%** | **−37%** |
+| Message | 27.2% | 7.7% | −72% |
+| Table | 13.2% | 4.1% | −69% |
+| Tabs | 22.1% | 8.1% | −63% |
+| Button | 20.6% | 8.7% | −58% |
+| Shell | 28.2% | 14.2% | −50% |
+| Input Group | 48.5% | 26.0% | −46% |
+| VirtualList | 32.2% | 19.1% | −41% |
+| DataTable | 18.1% | 13.1% | −28% |
+| Editor | 11.0% | 9.8% | −11% |
+
+Linux (Hyprland, Wayland, wgpu), release builds, 875x600 window at scale 1.5. The median story fell 34%. Setup, the driver script and all 76 stories are in [Story scroll CPU against gpui-pre](docs/story-scroll-cpu.md).
+
 ## Retained Mode
 
 GPUI Fast tracks rendering dependencies and rebuilds only what changed. Recorded Linux release-build CPU time per frame:
