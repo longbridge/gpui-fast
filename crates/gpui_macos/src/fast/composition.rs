@@ -265,9 +265,11 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
     // buttons) belongs to AppKit, as in a window without composition.
     // `root.hitTest` below cannot see the frame view, so a resize grabbed where
     // a native view reaches the window's edge would make that view the press
-    // owner and dispatch the press to GPUI, and AppKit's live-resize loop then
-    // consumes the matching mouse-up. Drags and the release of such a press
-    // never reach `sendEvent:` while AppKit tracks it.
+    // owner and dispatch the press to GPUI. AppKit's live-resize loop can then
+    // consume the matching mouse-up (it does with a physical mouse on macOS
+    // 26.6), which leaves the press open and loses the next click. A release
+    // that does reach `sendEvent:` still takes the path below, which clears
+    // the owner.
     if observe && !up && unsafe { hits_window_chrome(this, root.as_ptr(), event) } {
         unsafe {
             let _: () = msg_send![super(this, superclass), sendEvent: event];
