@@ -15,6 +15,8 @@ mod dispatcher;
 mod display;
 #[cfg(target_family = "wasm")]
 mod events;
+#[cfg(target_family = "wasm")]
+mod fast;
 #[cfg(any(target_family = "wasm", test))]
 mod glyph_cache;
 #[cfg(target_family = "wasm")]
