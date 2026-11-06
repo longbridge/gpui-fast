@@ -75,9 +75,17 @@ impl HoveredListener {
         }
     }
 
-    /// Whether a frame drawn now would leave the listener hovered.
+    /// Whether a frame drawn now would leave the listener hovered. A press
+    /// keeps it hovered only while its element is still drawn: one removed
+    /// before the press is released no longer sees the release, so the press
+    /// is never cleared.
     fn still_hovered(&self, window: &Window, cx: &App) -> bool {
-        self.has_mouse_down.borrow().is_some()
+        (self.has_mouse_down.borrow().is_some()
+            && window
+                .rendered_frame
+                .hitboxes
+                .iter()
+                .any(|hitbox| hitbox.id == self.hitbox.id))
             || (!cx.has_active_drag() && self.mode.is_hovered(&self.hitbox, window))
     }
 }
@@ -217,5 +225,10 @@ impl Window {
 impl HoverFreeze {
     pub(crate) fn end_for_test(&mut self) {
         self.last_wheel = None;
+    }
+
+    /// How many hover listeners are kept as hovered.
+    pub(crate) fn hovered_listeners(&self) -> usize {
+        self.hovered.len()
     }
 }

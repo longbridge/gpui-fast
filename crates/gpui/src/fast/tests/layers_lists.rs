@@ -3134,6 +3134,106 @@ mod rows {
         assert!(hovers.borrow().is_empty(), "{:?}", hovers.borrow());
     }
 
+    /// A hovered element that is pressed and then removed before the press is
+    /// released is no longer there to see the release, so its pending press is
+    /// never cleared. Its hover listener still hears its hover end, and is not
+    /// kept once it has.
+    #[crate::test]
+    fn a_pressed_element_removed_before_the_release_hears_its_hover_end(cx: &mut TestAppContext) {
+        use crate::{
+            InteractiveElement as _, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+            PlatformInput, point, prelude::FluentBuilder as _,
+        };
+
+        struct PressPage {
+            shown: bool,
+            hovers: Rc<RefCell<Vec<bool>>>,
+        }
+
+        impl Render for PressPage {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let hovers = self.hovers.clone();
+                div()
+                    .size_full()
+                    .bg(rgb(0xffffff))
+                    .when(self.shown, |page| {
+                        page.child(
+                            div()
+                                .id("pressed")
+                                .w(px(100.))
+                                .h(px(40.))
+                                .bg(rgb(0x336699))
+                                .on_hover(move |hovered, _, _| hovers.borrow_mut().push(*hovered))
+                                .on_click(|_, _, _| {}),
+                        )
+                    })
+            }
+        }
+
+        let hovers = Rc::new(RefCell::new(Vec::new()));
+        let page = cx.add_window({
+            let hovers = hovers.clone();
+            move |_, _| PressPage {
+                shown: true,
+                hovers,
+            }
+        });
+        let window: AnyWindowHandle = page.into();
+        let position = point(px(20.), px(20.));
+        open_at(cx, window, 1.);
+        with_window(cx, window, |window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position,
+                    pressed_button: None,
+                    modifiers: Default::default(),
+                }),
+                cx,
+            );
+        });
+        draw(cx, window);
+        cx.run_until_parked();
+        assert_eq!(*hovers.borrow(), [true], "hovered");
+        with_window(cx, window, |window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+        });
+        draw(cx, window);
+        page.update(cx, |page, _, cx| {
+            page.shown = false;
+            cx.notify();
+        })
+        .unwrap();
+        draw(cx, window);
+        cx.run_until_parked();
+        with_window(cx, window, |window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                }),
+                cx,
+            );
+        });
+        draw(cx, window);
+        cx.run_until_parked();
+        assert_eq!(*hovers.borrow(), [true, false], "its hover ended");
+        let kept = with_window(cx, window, |window, _| {
+            window.fast_layers.hover_freeze.hovered_listeners()
+        });
+        assert_eq!(kept, 0, "the listener is no longer kept");
+    }
+
     /// A hover listener that also hears hover after keyboard input, as a
     /// Material button's, is held still with the rest: a row scrolled under a
     /// still pointer does not start hovering, and the row the pointer was on
