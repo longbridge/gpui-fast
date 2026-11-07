@@ -26,7 +26,7 @@ fn whole_scene_with_empty_layers_matches_balanced_replay(cx: &mut TestAppContext
         cx.open_window(Default::default(), |_, cx| cx.new(|_| View))
             .unwrap()
     });
-    let mut renderer = MetalHeadlessRenderer::new();
+    let mut renderer = MetalHeadlessRenderer::new().unwrap();
     window
         .update(cx, |_, window, cx| {
             window.draw(cx).clear(cx);
