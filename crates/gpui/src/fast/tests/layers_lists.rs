@@ -3035,6 +3035,283 @@ mod rows {
         }
     }
 
+    /// A wheel can scroll a hovered row out of a list while hover is held still.
+    /// No frame paints that row again, so the frame after the freeze has to say
+    /// its hover ended, once, and leaves alone a row that stayed under the pointer.
+    #[crate::test]
+    fn a_row_scrolled_away_under_a_freeze_hears_its_hover_end(cx: &mut TestAppContext) {
+        use crate::InteractiveElement as _;
+
+        struct ListenerPage {
+            state: ListState,
+            hovers: Rc<RefCell<Vec<(usize, bool)>>>,
+        }
+
+        impl Render for ListenerPage {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let hovers = self.hovers.clone();
+                div().size_full().bg(rgb(0xffffff)).child(
+                    crate::list(self.state.clone(), move |ix, _, _| {
+                        let hovers = hovers.clone();
+                        div()
+                            .id(("row", ix))
+                            .w(px(VIEWPORT_WIDTH))
+                            .h(px(40.))
+                            .bg(row_color(ix))
+                            .on_hover(move |hovered, _, _| hovers.borrow_mut().push((ix, *hovered)))
+                            .into_any_element()
+                    })
+                    .w(px(VIEWPORT_WIDTH))
+                    .h(px(VIEWPORT_HEIGHT)),
+                )
+            }
+        }
+
+        let hovers = Rc::new(RefCell::new(Vec::new()));
+        let window: AnyWindowHandle = cx
+            .add_window({
+                let hovers = hovers.clone();
+                move |_, _| ListenerPage {
+                    state: ListState::new(300, ListAlignment::Top, px(0.)).measure_all(),
+                    hovers,
+                }
+            })
+            .into();
+        open_at(cx, window, 1.);
+        with_window(cx, window, |window, cx| {
+            window.dispatch_event(
+                crate::PlatformInput::MouseMove(crate::MouseMoveEvent {
+                    position: crate::point(px(20.), px(20.)),
+                    pressed_button: None,
+                    modifiers: Default::default(),
+                }),
+                cx,
+            );
+        });
+        draw(cx, window);
+        cx.run_until_parked();
+        assert_eq!(
+            hovers.borrow().last(),
+            Some(&(0, true)),
+            "over the first row"
+        );
+        hovers.borrow_mut().clear();
+        with_window(cx, window, |window, _| window.set_hover_freeze(true));
+        // Far past the first row in one wheel, and on: it is never painted again.
+        for _ in 0..6 {
+            wheel(cx, window, -2000.);
+            cx.run_until_parked();
+        }
+        assert!(
+            hovers.borrow().is_empty(),
+            "held still: {:?}",
+            hovers.borrow()
+        );
+        // As HOVER_FREEZE passing would, on a clock the test does not advance.
+        with_window(cx, window, |window, _| {
+            window.fast_layers.hover_freeze.end_for_test();
+            window.refresh();
+        });
+        draw(cx, window);
+        cx.run_until_parked();
+        let heard = hovers.borrow().clone();
+        assert_eq!(
+            heard.iter().filter(|h| **h == (0, false)).count(),
+            1,
+            "{heard:?}"
+        );
+        assert_eq!(
+            heard.iter().filter(|h| h.1).count(),
+            1,
+            "the row now under it: {heard:?}"
+        );
+        hovers.borrow_mut().clear();
+        // Nothing moves: the row under the pointer keeps hovering, retained or not.
+        for _ in 0..3 {
+            draw(cx, window);
+            cx.run_until_parked();
+        }
+        assert!(hovers.borrow().is_empty(), "{:?}", hovers.borrow());
+    }
+
+    /// A hovered element that is pressed and then removed before the press is
+    /// released is no longer there to see the release, so its pending press is
+    /// never cleared. Its hover listener still hears its hover end, and is not
+    /// kept once it has.
+    #[crate::test]
+    fn a_pressed_element_removed_before_the_release_hears_its_hover_end(cx: &mut TestAppContext) {
+        use crate::{
+            InteractiveElement as _, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+            PlatformInput, point, prelude::FluentBuilder as _,
+        };
+
+        struct PressPage {
+            shown: bool,
+            hovers: Rc<RefCell<Vec<bool>>>,
+        }
+
+        impl Render for PressPage {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let hovers = self.hovers.clone();
+                div()
+                    .size_full()
+                    .bg(rgb(0xffffff))
+                    .when(self.shown, |page| {
+                        page.child(
+                            div()
+                                .id("pressed")
+                                .w(px(100.))
+                                .h(px(40.))
+                                .bg(rgb(0x336699))
+                                .on_hover(move |hovered, _, _| hovers.borrow_mut().push(*hovered))
+                                .on_click(|_, _, _| {}),
+                        )
+                    })
+            }
+        }
+
+        let hovers = Rc::new(RefCell::new(Vec::new()));
+        let page = cx.add_window({
+            let hovers = hovers.clone();
+            move |_, _| PressPage {
+                shown: true,
+                hovers,
+            }
+        });
+        let window: AnyWindowHandle = page.into();
+        let position = point(px(20.), px(20.));
+        open_at(cx, window, 1.);
+        with_window(cx, window, |window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position,
+                    pressed_button: None,
+                    modifiers: Default::default(),
+                }),
+                cx,
+            );
+        });
+        draw(cx, window);
+        cx.run_until_parked();
+        assert_eq!(*hovers.borrow(), [true], "hovered");
+        with_window(cx, window, |window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+        });
+        draw(cx, window);
+        page.update(cx, |page, _, cx| {
+            page.shown = false;
+            cx.notify();
+        })
+        .unwrap();
+        draw(cx, window);
+        cx.run_until_parked();
+        with_window(cx, window, |window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                }),
+                cx,
+            );
+        });
+        draw(cx, window);
+        cx.run_until_parked();
+        assert_eq!(*hovers.borrow(), [true, false], "its hover ended");
+        let kept = with_window(cx, window, |window, _| {
+            window.fast_layers.hover_freeze.hovered_listeners()
+        });
+        assert_eq!(kept, 0, "the listener is no longer kept");
+    }
+
+    /// A hover listener that also hears hover after keyboard input, as a
+    /// Material button's, is held still with the rest: a row scrolled under a
+    /// still pointer does not start hovering, and the row the pointer was on
+    /// does not stop, which could start a transition that keeps the list off
+    /// its layer. A pointer that moves reports it at once.
+    #[crate::test]
+    fn hover_held_still_reaches_no_input_modality_independent_listener(cx: &mut TestAppContext) {
+        use crate::{HoverListenerMode, InteractiveElement as _};
+
+        struct ListenerPage {
+            state: ListState,
+            hovers: Rc<RefCell<usize>>,
+        }
+
+        impl Render for ListenerPage {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let hovers = self.hovers.clone();
+                div().size_full().bg(rgb(0xffffff)).child(
+                    crate::list(self.state.clone(), move |ix, _, _| {
+                        let hovers = hovers.clone();
+                        div()
+                            .id(("row", ix))
+                            .w(px(VIEWPORT_WIDTH))
+                            .h(px(40.))
+                            .bg(row_color(ix))
+                            .hover_listener_mode(HoverListenerMode::InputModalityIndependent)
+                            .on_hover(move |_, _, _| *hovers.borrow_mut() += 1)
+                            .into_any_element()
+                    })
+                    .w(px(VIEWPORT_WIDTH))
+                    .h(px(VIEWPORT_HEIGHT)),
+                )
+            }
+        }
+
+        let hovers = Rc::new(RefCell::new(0));
+        let window: AnyWindowHandle = cx
+            .add_window({
+                let hovers = hovers.clone();
+                move |_, _| ListenerPage {
+                    state: ListState::new(300, ListAlignment::Top, px(0.)).measure_all(),
+                    hovers,
+                }
+            })
+            .into();
+        open_at(cx, window, 1.);
+        with_window(cx, window, |window, _| window.set_hover_freeze(true));
+        // The window opened with the pointer over the first row.
+        let before = *hovers.borrow();
+        // A row a frame, while the list is not on its layer yet: each is
+        // painted with the pointer over it.
+        for frame in 0..60 {
+            wheel(cx, window, -41.);
+            cx.run_until_parked();
+            assert_eq!(
+                *hovers.borrow(),
+                before,
+                "frame {frame}: hover is held still"
+            );
+        }
+        with_window(cx, window, |window, cx| {
+            window.dispatch_event(
+                crate::PlatformInput::MouseMove(crate::MouseMoveEvent {
+                    position: crate::point(px(21.), px(21.)),
+                    pressed_button: None,
+                    modifiers: Default::default(),
+                }),
+                cx,
+            );
+        });
+        // The row the wheel took away from under it stops, and the one there starts.
+        assert_eq!(
+            *hovers.borrow(),
+            before + 2,
+            "the moved pointer hovers the row"
+        );
+    }
+
     /// The platform cursor stays the text cursor while a wheel scrolls under a
     /// still pointer. Hover styling is held still over that text. Moving the
     /// pointer off the text sets the arrow.
