@@ -1025,7 +1025,9 @@ impl PlatformWindow for WebWindow {
         self.inner.state.borrow().renderer.gpu_specs()
     }
 
-    fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
+    fn update_ime_position(&self, bounds: Bounds<Pixels>) {
+        crate::fast::ime_position::move_to_caret(&self.inner, bounds);
+    }
 
     fn request_decorations(&self, _decorations: WindowDecorations) {}
 
