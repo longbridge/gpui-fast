@@ -8,4 +8,5 @@
 
 pub(crate) mod ime_edit;
 #[cfg(target_family = "wasm")]
+pub(crate) mod ime_position;
 pub(crate) mod wgpu_context;
