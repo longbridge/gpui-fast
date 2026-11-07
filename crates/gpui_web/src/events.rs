@@ -1131,6 +1131,7 @@ impl WebWindowInner {
         let this = Rc::clone(self);
         self.listen_input("compositionstart", move |_event: JsValue| {
             this.is_composing.set(true);
+            crate::fast::ime_position::follow_input(&this);
         })
     }
 
@@ -1140,6 +1141,7 @@ impl WebWindowInner {
             let event: web_sys::CompositionEvent = event.unchecked_into();
             let data = event.data().unwrap_or_default();
             this.is_composing.set(true);
+            crate::fast::ime_position::follow_input(&this);
             this.with_input_handler(|handler| {
                 handler.replace_and_mark_text_in_range(None, &data, None);
             });

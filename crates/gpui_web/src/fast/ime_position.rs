@@ -4,15 +4,37 @@
 //! input method, the accent picker) to the caret of the focused editable
 //! element. For GPUI that element is the hidden `<textarea>` of
 //! `ime_mirror`, which sits in the page's top left corner, so every panel
-//! opened there rather than at the text being composed. GPUI reports the
-//! caret through `PlatformWindow::update_ime_position`, which did nothing on
-//! the web; this moves the element to the caret.
+//! opened there rather than at the text being composed.
+//!
+//! So when a composition starts, and as it goes on, the web platform asks the
+//! window's input handler where the composed text is and moves the element
+//! there, before the browser places the panel. That is what Windows does on
+//! `WM_IME_STARTCOMPOSITION`, and it needs nothing from the application: an
+//! input does not have to call `Window::invalidate_character_coordinates`,
+//! which costs a frame. `PlatformWindow::update_ime_position`, the push an
+//! editor makes with that call, moves the element too.
 
 use wasm_bindgen::JsCast;
 
 use gpui::{Bounds, Pixels};
 
 use crate::window::WebWindowInner;
+
+/// Moves the IME mirror to where the input handler places the IME panel: the
+/// caret, or once text is being composed, the start of its line.
+///
+/// Called from the mirror's `compositionstart` and `compositionupdate`
+/// listeners, in a browser event, where the handler is queried as every other
+/// listener queries it. During an update it runs before the update is applied,
+/// so it reads the text GPUI has laid out and painted.
+pub(crate) fn follow_input(inner: &WebWindowInner) {
+    let bounds = inner
+        .with_input_handler(|handler| handler.ime_candidate_bounds())
+        .flatten();
+    if let Some(bounds) = bounds {
+        move_to_caret(inner, bounds);
+    }
+}
 
 /// Moves the IME mirror to the caret at `bounds`, in window coordinates.
 ///
