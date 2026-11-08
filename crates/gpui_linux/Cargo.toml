@@ -132,6 +132,7 @@ xim = { git = "https://github.com/zed-industries/xim-rs.git", rev = "16f35a2c881
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+gpui_wgpu = { workspace = true, features = ["test-support"] }
 
 [package.metadata.cargo-shear]
 ignored = ["scap"]
