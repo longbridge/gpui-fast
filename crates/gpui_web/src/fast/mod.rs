@@ -7,5 +7,7 @@
 //! it. The logic itself is written here, one file per topic.
 
 #[cfg(target_family = "wasm")]
+pub(crate) mod ime_keys;
+#[cfg(target_family = "wasm")]
 pub(crate) mod ime_position;
 pub(crate) mod wgpu_context;
