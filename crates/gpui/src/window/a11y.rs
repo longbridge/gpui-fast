@@ -297,10 +297,6 @@ impl A11y {
         self.debug.capture_node_info(&self.nodes.node_info);
         update
     }
-
-    pub(crate) fn debug_tree_json(&self) -> Option<String> {
-        self.debug.to_json()
-    }
 }
 
 /// Builder API for synthetic children. See the docs for

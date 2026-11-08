@@ -451,3 +451,63 @@ fn scroll_page_frames(cx: &mut TestAppContext, placed: bool) -> u64 {
     }
     composited
 }
+
+/// Focusable elements, the first `shown` of `handles`.
+struct TabStops {
+    handles: Vec<FocusHandle>,
+    shown: usize,
+}
+
+impl Render for TabStops {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().children(
+            self.handles[..self.shown]
+                .iter()
+                .enumerate()
+                .map(|(ix, handle)| div().id(ix).track_focus(handle).w(px(10.)).h(px(10.))),
+        )
+    }
+}
+
+/// The accessibility dump counts the tab stops of the frame its tree was
+/// captured from, and none once frames drawn without accessibility replaced
+/// that frame on screen.
+#[crate::test]
+fn a11y_dump_counts_the_tab_stops_of_its_frame(cx: &mut TestAppContext) {
+    let window = cx.add_window(|_, cx| TabStops {
+        handles: (0..5).map(|_| cx.focus_handle().tab_stop(true)).collect(),
+        shown: 3,
+    });
+    let tab_stop_count = |cx: &mut TestAppContext| {
+        cx.update_window(window.into(), |_, window, _| {
+            let json = window.debug_a11y_tree_json().expect("a tree was captured");
+            serde_json::from_str::<serde_json::Value>(&json).unwrap()["frame"]["tab_stop_count"]
+                .clone()
+        })
+        .unwrap()
+    };
+    cx.update_window(window.into(), |_, window, cx| {
+        crate::fast::a11y::set_active_flag(&window.a11y, true);
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+    assert_eq!(tab_stop_count(cx), serde_json::json!(3));
+
+    cx.update_window(window.into(), |_, window, _| {
+        crate::fast::a11y::set_active_flag(&window.a11y, false);
+    })
+    .unwrap();
+    window
+        .update(cx, |view, _, cx| {
+            view.shown = 5;
+            cx.notify();
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    assert_eq!(
+        tab_stop_count(cx),
+        serde_json::Value::Null,
+        "the captured tree is older than the frame on screen"
+    );
+}

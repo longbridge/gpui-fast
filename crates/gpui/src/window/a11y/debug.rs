@@ -14,15 +14,13 @@ use crate::{Pixels, SharedString, Size};
 pub(crate) struct FrameDebugInfo {
     pub viewport_size: Size<Pixels>,
     pub scale_factor: f32,
-    pub tab_stop_count: usize,
 }
 
 struct CapturedFrame {
-    rendered_at: String,
+    rendered_at: crate::fast::a11y::CapturedAt,
     frame_number: u64,
     window_title: Option<SharedString>,
     node_count: usize,
-    tab_stop_count: usize,
     viewport_size: Size<Pixels>,
     scale_factor: f32,
 }
@@ -81,11 +79,10 @@ impl A11yDebug {
         self.last_active_descendant = active_descendant;
         self.frame_number += 1;
         self.last_frame = Some(CapturedFrame {
-            rendered_at: chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, false),
+            rendered_at: crate::fast::a11y::CapturedAt::now(),
             frame_number: self.frame_number,
             window_title: window_title.cloned(),
             node_count: update.nodes.len(),
-            tab_stop_count: frame.tab_stop_count,
             viewport_size: frame.viewport_size,
             scale_factor: frame.scale_factor,
         });
@@ -98,7 +95,7 @@ impl A11yDebug {
 
     /// Serialize the last tree update to a readable JSON string. Node ids are
     /// replaced with short ephemeral ids (`a`, `b`, ..., `z`, `aa`, ...).
-    pub(crate) fn to_json(&self) -> Option<String> {
+    pub(crate) fn to_json(&self, fast_tab_stop_count: Option<usize>) -> Option<String> {
         let update = self.last_tree_update.as_ref()?;
 
         let mut ephemeral: FxHashMap<NodeId, String> = FxHashMap::default();
@@ -133,11 +130,11 @@ impl A11yDebug {
 
         let frame = self.last_frame.as_ref().map(|frame| {
             serde_json::json!({
-                "rendered_at": frame.rendered_at,
+                "rendered_at": crate::fast::a11y::CapturedAt::to_rfc3339(&frame.rendered_at),
                 "frame_number": frame.frame_number,
                 "window_title": frame.window_title.as_ref().map(|title| title.to_string()),
                 "node_count": frame.node_count,
-                "tab_stop_count": frame.tab_stop_count,
+                "tab_stop_count": fast_tab_stop_count,
                 "viewport_size": {
                     "width": frame.viewport_size.width.0,
                     "height": frame.viewport_size.height.0,
