@@ -8,6 +8,8 @@
 //! tests — is written here, one file per topic.
 
 pub(crate) mod atlas;
+#[cfg(not(target_family = "wasm"))]
+pub(crate) mod backends;
 pub(crate) mod bind_groups;
 #[cfg(not(target_family = "wasm"))]
 pub(crate) mod composition;
