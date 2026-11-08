@@ -30,8 +30,8 @@ use crate::key_dispatch::{DispatchNodeId, DispatchTree};
 use crate::window::DeferredDraw;
 use crate::window::{PaintIndex, PrepaintStateIndex};
 use crate::{
-    AnyView, App, ContentMask, ElementId, EntityId, FocusId, GlobalElementId, HitboxId, LayoutId,
-    Pixels, Point, StyleRefinement, View, ViewElement, Window,
+    AnyView, App, Bounds, ContentMask, ElementId, EntityId, FocusId, GlobalElementId, HitboxId,
+    LayoutId, Pixels, Point, StyleRefinement, View, ViewElement, Window,
 };
 use collections::FxHashSet;
 use smallvec::SmallVec;
@@ -127,6 +127,9 @@ pub(crate) struct Gap {
     view: ViewElement<AnyView>,
     layout: ViewLayoutState,
     layout_id: LayoutId,
+    /// Where a cached view nested in a cached view is drawn: it is laid out on
+    /// its own, at the bounds it had, not at a node of the view around it.
+    bounds: Option<Bounds<Pixels>>,
     layout_key: u64,
     /// The layout nodes it claimed.
     claimed: Vec<u64>,
@@ -236,6 +239,13 @@ pub(crate) struct SplicedPrepaint {
     /// The records copied along with it, in this frame, each with the
     /// stretch of last frame's range, between gaps, it was copied from.
     copied: Vec<(usize, usize)>,
+}
+
+impl SplicedPrepaint {
+    /// Its record in this frame.
+    pub(crate) fn index(&self) -> usize {
+        self.index
+    }
 }
 
 /// What the window inherits at some point of the element tree, set aside while
@@ -473,6 +483,132 @@ impl Window {
         })
     }
 
+    /// Draws the cached view `id` at `bounds` from last frame around the
+    /// cached views nested in it that have to be built again, if it can be:
+    /// it is dirty only because they are, nothing it read itself changed, it
+    /// is drawn where and as it was, and every dirty view in it is a cached
+    /// view. A cached view is laid out on its own at the bounds its style gave
+    /// it, so building one again where it was leaves the view around it laid
+    /// out as it was, and no layout has to be redone around it.
+    pub(crate) fn splice_cached(
+        &mut self,
+        id: &GlobalElementId,
+        bounds: Bounds<Pixels>,
+        layout: Option<Rc<crate::fast::retained::RetainedLayout>>,
+        cx: &mut App,
+    ) -> Option<Splice> {
+        if self.refreshing
+            || cx.has_active_drag()
+            || crate::fast::a11y::stale(&self.a11y)
+            || self.is_inspector_picking(cx)
+            || self.retained_state.dirty_subtrees.contains(id)
+            || self.next_frame.retained.by_id.contains_key(id)
+            || crate::fast::layers::paint::inside_layer(self)
+        {
+            return None;
+        }
+        let entity = view_entity(id)?;
+        if self.retained_state.notified_entities.contains(&entity) {
+            return None;
+        }
+        let previous = self.rendered_frame.retained.find(id)?;
+        if !self.retained_context_matches(previous, bounds) {
+            return None;
+        }
+        let records = &self.rendered_frame.retained.records;
+        let record = &records[previous];
+        if cx.notified_dependencies_changed(&record.own_dependencies)
+            || crate::fast::layers::invalidate::offset_read_changed(self, &record.own_dependencies)
+            || !self.hovers_unchanged(&record.own_hovers)
+        {
+            return None;
+        }
+
+        let mut gaps = Vec::new();
+        let mut index = previous + 1;
+        while index <= previous + record.nested {
+            let nested = &records[index];
+            if view_entity(&nested.id).is_some_and(|entity| self.dirty_views.contains(&entity)) {
+                if !nested
+                    .rebuild
+                    .as_ref()
+                    .is_some_and(|rebuild| rebuild.is_cached())
+                    || !matches!(nested.paint, PaintStatus::Painted { .. })
+                {
+                    return None;
+                }
+                gaps.push(index);
+            }
+            index += nested.nested + 1;
+        }
+        if gaps.is_empty() {
+            return None;
+        }
+        // As in `splice_layout`: deferred draws outside the gaps could replay
+        // a dirty view.
+        let mut deferred_cursor = record.prepaint_range.start.deferred_draws_index;
+        for &gap in &gaps {
+            let range = &records[gap].prepaint_range;
+            if deferred_cursor != range.start.deferred_draws_index {
+                return None;
+            }
+            deferred_cursor = range.end.deferred_draws_index;
+        }
+        if deferred_cursor != record.prepaint_range.end.deferred_draws_index {
+            return None;
+        }
+
+        let entity_updates = cx.entities.access_log.update_generation();
+        let gaps = gaps
+            .into_iter()
+            .map(|gap| self.cached_gap(gap, cx))
+            .collect::<Option<Vec<_>>>()?;
+        Some(Splice {
+            previous,
+            entity_updates,
+            gaps,
+            layout,
+            held: Vec::new(),
+        })
+    }
+
+    /// The cached view last frame's record `record` stands for, to be built
+    /// again where it was, at the bounds it had.
+    fn cached_gap(&mut self, record: usize, cx: &mut App) -> Option<Gap> {
+        let nested = &self.rendered_frame.retained.records[record];
+        let rebuild = nested.rebuild.clone()?;
+        let previous_layout = nested.layout.clone();
+        let global_id = nested.id.clone();
+        let bounds = nested.context.bounds;
+        let element_id = global_id.ids.last().cloned()?;
+        let layout_id = previous_layout.as_ref()?.root;
+        let layout_key = self.with_parent_layout_key(rebuild.parent_layout_key, |window| {
+            let key = crate::fast::layout_key::push_layout_key(window, Some(&element_id));
+            crate::fast::layout_key::pop_layout_key(window);
+            key
+        });
+        let mut view = ViewElement::new(rebuild.view.clone()).rebuildable(rebuild.view.clone());
+        view.cached_style = rebuild.cached_style.clone();
+        // Nothing is read laying it out, but what it reads from here on is
+        // checked from now.
+        let recording = cx.begin_recording_dependencies();
+        let dependencies = cx.finish_recording_dependencies(recording);
+        let read = dependencies.all.clone();
+        Some(Gap {
+            record,
+            global_id,
+            view,
+            layout: crate::fast::retained::cached_layout_state(previous_layout, dependencies),
+            layout_id,
+            bounds: Some(bounds),
+            layout_key,
+            claimed: Vec::new(),
+            element_states: Vec::new(),
+            dependencies: read,
+            prepainted: None,
+        })
+    }
+
     /// Whether the view `splice` draws around its gaps came out of this
     /// frame's layout as it did last frame, so that what it drew around them
     /// still stands. Checked once layout is computed, when a gap was laid out
@@ -548,6 +684,7 @@ impl Window {
                 view,
                 layout,
                 layout_id,
+                bounds: None,
                 layout_key,
                 claimed,
                 element_states,
@@ -692,7 +829,9 @@ impl Window {
             let inherited =
                 self.enter_gap(&gap_id, &rebuild, context.content_mask, context.opacity);
             // What its element's prepaint does, inside the view around it.
-            let bounds = self.layout_bounds(gap.layout_id);
+            let bounds = gap
+                .bounds
+                .unwrap_or_else(|| self.layout_bounds(gap.layout_id));
             self.element_id_stack.push(gap.element_id());
             let node = match copied_node {
                 Some(node) => node,
