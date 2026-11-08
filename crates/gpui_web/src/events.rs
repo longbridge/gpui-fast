@@ -890,6 +890,8 @@ impl WebWindowInner {
                 .count()
                 .min(old_units.len() - suffix_length)
                 .min(new_units.len() - suffix_length);
+            let (prefix_length, suffix_length) =
+                crate::fast::ime_edit::whole_code_points(&new_units, prefix_length, suffix_length);
 
             let inserted_text = String::from_utf16_lossy(
                 &new_units[prefix_length..new_units.len() - suffix_length],
