@@ -49,8 +49,9 @@ pub(crate) enum Op {
     /// A leaf added under the node open, finished at this index of the
     /// frame's nodes.
     Leaf(usize),
-    /// The node open finished, at this index of the frame's nodes.
-    Pop(usize),
+    /// The node open finished, at this index of the frame's nodes. Preserve
+    /// its children when a synthetic builder rewrote their hierarchy.
+    Pop(usize, bool),
     /// A node made focusable with a focus handle, focused if the handle is.
     Focusable(NodeId, FocusId),
     /// A node claiming to be the active descendant of the focused node.
@@ -104,9 +105,9 @@ impl A11yLog {
     }
 
     #[inline]
-    pub(crate) fn pop(log: &mut Self, at: usize) {
+    pub(crate) fn pop(log: &mut Self, at: usize, preserve_children: bool) {
         if log.recording {
-            log.ops.push(Op::Pop(at));
+            log.ops.push(Op::Pop(at, preserve_children));
         }
     }
 
@@ -299,7 +300,7 @@ fn replay(window: &mut Window, source: &Source, delta: Point<Pixels>) {
                     window.a11y.nodes.record_node_info(*id, info.clone());
                 }
             }
-            Op::Pop(at) => {
+            Op::Pop(at, preserve_children) => {
                 if window.a11y.nodes.fast.replay_open.pop() != Some(true) {
                     continue;
                 }
@@ -311,9 +312,10 @@ fn replay(window: &mut Window, source: &Source, delta: Point<Pixels>) {
                     }
                 };
                 if let Some(open) = window.a11y.nodes.nodes_stack.last_mut() {
-                    // Its children are this frame's: those pushed again and
-                    // those of nested views built again.
-                    if open.children() != node.children() {
+                    // Ordinary children follow this frame's splices. A synthetic
+                    // hierarchy instead comes from the finished node: replaying
+                    // its leaves alone flattens them under this parent.
+                    if !preserve_children && open.children() != node.children() {
                         if open.children().is_empty() {
                             node.clear_children();
                         } else {
@@ -322,7 +324,7 @@ fn replay(window: &mut Window, source: &Source, delta: Point<Pixels>) {
                     }
                     *open = node;
                 }
-                window.a11y.nodes.pop();
+                window.a11y.nodes.pop_with_children(preserve_children);
             }
             Op::Focusable(node, focus) => {
                 window.a11y.set_focusable(node, focus);
@@ -414,7 +416,7 @@ pub(crate) fn capture(
     };
     for op in ops {
         let op = match *op {
-            Op::Leaf(at) | Op::Pop(at) => {
+            Op::Leaf(at) | Op::Pop(at, _) => {
                 let node = builder.all_nodes.get(at)?.clone();
                 let local = stretch.nodes.len();
                 #[cfg(debug_assertions)]
@@ -425,10 +427,10 @@ pub(crate) fn capture(
                 }
                 stretch.placed_synthetic |= matches!(op, Op::Leaf(_)) && node.1.bounds().is_some();
                 stretch.nodes.push(node);
-                if matches!(op, Op::Leaf(_)) {
-                    Op::Leaf(local)
+                if let Op::Pop(_, preserve_children) = *op {
+                    Op::Pop(local, preserve_children)
                 } else {
-                    Op::Pop(local)
+                    Op::Leaf(local)
                 }
             }
             Op::Push(id) => {
