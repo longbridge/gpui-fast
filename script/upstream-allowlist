@@ -25,5 +25,5 @@ crates/gpui_windows/src/window.rs hunk=18 # PlatformWindow's four window composi
 crates/gpui_linux/src/linux/wayland/window.rs hunk=19 # WaylandWindow's four window composition methods (zed-industries/zed#62379), each a body forwarding to fast::composition::wayland, which rustfmt spreads over three or six lines
 crates/gpui_linux/src/linux/x11/window.rs hunk=19 # X11Window's four window composition methods (zed-industries/zed#62379), each a body forwarding to fast::composition::x11, which rustfmt spreads over three or six lines
 
-crates/gpui_linux/src/linux/x11/client.rs added=46 # existing overlay input hook plus native pointer recipient, coordinate and focus-id hooks; all routing logic stays in fast::composition::x11
+crates/gpui_linux/src/linux/x11/client.rs added=48 # existing overlay input hook plus native pointer recipient, coordinate and focus-id hooks; a FocusIn/FocusOut arm ignoring focus moves into child windows through fast::x11_focus, which rustfmt spreads over two lines; all routing logic stays in fast::composition::x11
 crates/gpui_apple/src/text_system.rs removed=30 # load_family no longer skips a font without an 'm' glyph (the system's Arial Hebrew, Geeza Pro and Apple Color Emoji among them): upstream's guard block, which protected callers of em metrics in Zed's editor, is removed whole
