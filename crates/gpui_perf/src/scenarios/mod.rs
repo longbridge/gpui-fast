@@ -3,6 +3,7 @@
 
 pub mod chat;
 pub mod chat_patterns;
+pub mod focusable;
 pub mod form;
 pub mod layout;
 pub mod list;

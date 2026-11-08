@@ -4062,7 +4062,6 @@ impl Window {
             let frame_info = crate::window::a11y::debug::FrameDebugInfo {
                 viewport_size: self.viewport_size,
                 scale_factor: self.scale_factor,
-                tab_stop_count: self.next_frame.tab_stops.tab_stop_count(),
             };
             // clear the builder state regardless
             let tree_update = self.a11y.end_frame(frame_info);
@@ -7364,7 +7363,7 @@ impl Window {
 
     /// Debug representation of the last frame's accessibility information.
     pub fn debug_a11y_tree_json(&self) -> Option<String> {
-        self.a11y.debug_tree_json()
+        crate::fast::a11y::debug_tree_json(self)
     }
 
     /// Register a listener for an accessibility action on a specific node.
