@@ -1050,7 +1050,7 @@ fn draw_batch(
 /// What a path rasterization pass keeps of its target. Multisampled paths are
 /// read only through their resolve, so storing the samples would write the
 /// multisampled texture, several times the window's size, for nothing.
-pub(crate) fn path_store_op(resolve_target: Option<&wgpu::TextureView>) -> wgpu::StoreOp {
+fn path_store_op(resolve_target: Option<&wgpu::TextureView>) -> wgpu::StoreOp {
     if resolve_target.is_some() {
         wgpu::StoreOp::Discard
     } else {

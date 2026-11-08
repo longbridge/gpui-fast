@@ -53,8 +53,9 @@ fn rectangle_quad(x: f32, y: f32, width: f32, height: f32, rgba: u32) -> Quad {
     }
 }
 
-/// Two rectangles at `(x, y)`, with a quad drawn between them so that each is
-/// rasterized in a path pass of its own, drawn as paths or as quads.
+/// Two overlapping rectangles at `(x, y)`, drawn as paths or as quads, with a
+/// quad over the first drawn before the second, so that as paths each is
+/// rasterized in a pass of its own.
 fn scene(x: f32, y: f32, as_paths: bool) -> Scene {
     let mut scene = Scene::default();
     let rectangle = |scene: &mut Scene, x, y, rgba| {
@@ -65,21 +66,26 @@ fn scene(x: f32, y: f32, as_paths: bool) -> Scene {
         }
     };
     rectangle(&mut scene, x, y, RED);
-    scene.insert_primitive(rectangle_quad(x + 4., y + 20., 8., 8., 0x00ff00ff));
+    scene.insert_primitive(rectangle_quad(x + 4., y + 4., 8., 8., 0x00ff00ff));
     rectangle(&mut scene, x + 12., y + 8., BLUE);
     scene.finish();
     scene
+}
+
+/// How many path rasterization passes `fast::frame` draws `scene` in.
+fn path_passes(scene: &Scene) -> usize {
+    let (mut vertices, mut sprites, mut batches) = (Vec::new(), Vec::new(), Vec::new());
+    super::plan_paths(scene, &mut vertices, &mut sprites, &mut batches);
+    batches.iter().filter(|batch| batch.group.is_some()).count()
 }
 
 fn assert_same_pixels(paths: &image::RgbaImage, quads: &image::RgbaImage, frame: usize) {
     assert_eq!(paths.dimensions(), quads.dimensions());
     for (x, y, path) in paths.enumerate_pixels() {
         let quad = quads.get_pixel(x, y);
-        assert!(
-            path.0.iter().zip(quad.0).all(|(a, b)| a.abs_diff(b) <= 3),
-            "frame {frame}, pixel ({x}, {y}): drawn as a path {:?}, as a quad {:?}",
-            path.0,
-            quad.0
+        assert_eq!(
+            path.0, quad.0,
+            "frame {frame}, pixel ({x}, {y}): drawn as a path, as a quad"
         );
     }
 }
@@ -101,9 +107,13 @@ fn multisampled_paths_on_whole_pixels_draw_as_quads_do() {
     );
     let target = size(DevicePixels(64), DevicePixels(64));
     for (frame, (x, y)) in [(4., 4.), (20., 30.)].into_iter().enumerate() {
-        let paths = renderer
-            .render_scene_to_image(&scene(x, y, true), target)
-            .unwrap();
+        let path_scene = scene(x, y, true);
+        assert_eq!(
+            path_passes(&path_scene),
+            2,
+            "each path in a pass of its own"
+        );
+        let paths = renderer.render_scene_to_image(&path_scene, target).unwrap();
         let quads = renderer
             .render_scene_to_image(&scene(x, y, false), target)
             .unwrap();
@@ -111,12 +121,14 @@ fn multisampled_paths_on_whole_pixels_draw_as_quads_do() {
     }
 }
 
-/// GPU time of frames full of paths at window sizes, in 8 path passes split
-/// by quads drawn between them, waiting for each frame to complete, without
-/// readback.
+/// GPU time of frames of 8 layers of paths covering the target, each layer
+/// drawn over a transparent quad that covers the one before so that it is
+/// rasterized in a pass of its own, waiting for each frame to complete,
+/// without readback.
 #[test]
 #[ignore = "manual GPU performance measurement"]
 fn path_pass_frame_cost() {
+    const LAYERS: usize = 8;
     let mut renderer = WgpuHeadlessRenderer::new().expect("timing requires a GPU");
     eprintln!(
         "path sample count {}",
@@ -124,23 +136,35 @@ fn path_pass_frame_cost() {
     );
     for (width, height) in [(1440u32, 900u32), (2880, 1800)] {
         let mut scene = Scene::default();
-        let rows = height / 64;
-        for row in 0..rows {
-            if row > 0 && row % rows.div_ceil(8) == 0 {
-                scene.insert_primitive(rectangle_quad(0., row as f32 * 64., 4., 4., BLUE));
-            }
-            for column in 0..width / 64 {
-                let rgba = if (row + column) % 2 == 0 { RED } else { BLUE };
-                scene.insert_primitive(rectangle_path(
-                    column as f32 * 64. + 8.,
-                    row as f32 * 64. + 8.,
-                    48.,
-                    48.,
-                    rgba,
+        for layer in 0..LAYERS {
+            if layer > 0 {
+                scene.insert_primitive(rectangle_quad(
+                    0.,
+                    0.,
+                    width as f32,
+                    height as f32,
+                    0x00000000,
                 ));
+            }
+            for row in 0..height / 64 {
+                for column in 0..width / 64 {
+                    let rgba = if (row + column + layer as u32) % 2 == 0 {
+                        RED
+                    } else {
+                        BLUE
+                    };
+                    scene.insert_primitive(rectangle_path(
+                        column as f32 * 64. + 8.,
+                        row as f32 * 64. + 8.,
+                        48.,
+                        48.,
+                        rgba,
+                    ));
+                }
             }
         }
         scene.finish();
+        assert_eq!(path_passes(&scene), LAYERS);
         let target = size(DevicePixels(width as i32), DevicePixels(height as i32));
         let mut samples = Vec::new();
         for frame in 0..120 {
@@ -161,7 +185,7 @@ fn path_pass_frame_cost() {
         }
         samples.sort();
         eprintln!(
-            "{width}x{height}, {} paths: median {:?}, p90 {:?}",
+            "{width}x{height}, {LAYERS} passes of {} paths: median {:?}, p90 {:?}",
             (width / 64) * (height / 64),
             samples[samples.len() / 2],
             samples[samples.len() * 9 / 10]
