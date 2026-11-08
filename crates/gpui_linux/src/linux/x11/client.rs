@@ -1061,6 +1061,11 @@ impl X11Client {
                     .context("X11: Failed to handle property notify")
                     .log_err();
             }
+            // Focus moving between the window and one of its child windows (for example a
+            // native WebView embedded in it) keeps the keyboard within the window, so it stays
+            // active.
+            Event::FocusIn(event) if event.detail == xproto::NotifyDetail::INFERIOR => {}
+            Event::FocusOut(event) if event.detail == xproto::NotifyDetail::INFERIOR => {}
             Event::FocusIn(event) => {
                 let window = self.get_window(event.event)?;
                 window.set_active(true);
