@@ -1047,6 +1047,17 @@ fn draw_batch(
     );
 }
 
+/// What a path rasterization pass keeps of its target. Multisampled paths are
+/// read only through their resolve, so storing the samples would write the
+/// multisampled texture, several times the window's size, for nothing.
+fn path_store_op(resolve_target: Option<&wgpu::TextureView>) -> wgpu::StoreOp {
+    if resolve_target.is_some() {
+        wgpu::StoreOp::Discard
+    } else {
+        wgpu::StoreOp::Store
+    }
+}
+
 /// Rasterizes a group's range of the frame's path vertices into the cleared
 /// intermediate texture, in a pass of its own, as upstream's
 /// `draw_paths_to_intermediate` does for a batch. Returns false if there is
@@ -1075,7 +1086,7 @@ fn rasterize_group(
             resolve_target,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                store: wgpu::StoreOp::Store,
+                store: path_store_op(resolve_target),
             },
             depth_slice: None,
         })],
@@ -1096,3 +1107,6 @@ fn rasterize_group(
     );
     true
 }
+
+#[cfg(all(test, feature = "test-support", not(target_family = "wasm")))]
+mod tests;
