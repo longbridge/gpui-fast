@@ -1660,6 +1660,24 @@ impl<V: View> ViewElement<V> {
                 ViewLayout::Cached {
                     retained: (layout, layout_dependencies),
                 } => {
+                    // Dirty only because cached views nested in it are: drawn
+                    // from last frame around them.
+                    if window.dirty_views.contains(&entity_id)
+                        && let Some(splice) =
+                            window.splice_cached(global_id, bounds, layout.clone(), cx)
+                    {
+                        let rebuild = window.rebuild_here(
+                            &self.rebuild,
+                            self.cached_style.as_ref(),
+                            layout.as_ref().and_then(|layout| layout.parent_layout_key),
+                        );
+                        let prepaint = window.splice_prepaint(global_id, splice, cx);
+                        if let ViewPrepaint::Spliced(spliced) = &prepaint {
+                            window.next_frame.retained.records[spliced.index()].rebuild =
+                                rebuild.map(Rc::new);
+                        }
+                        return prepaint;
+                    }
                     if !window.dirty_views.contains(&entity_id)
                         && let Some(previous) = window.reusable_cached(global_id, cx)
                         && window.retained_context_matches(previous, bounds)
@@ -1860,6 +1878,17 @@ fn end_view_profile<V: View>(
             .window_profiler
             .end_view(start, view.view_type_name, phase);
     }
+}
+
+/// The layout of a cached view laid out as it was, at the style node it had,
+/// for a cached view built again inside a view drawn from last frame.
+pub(crate) fn cached_layout_state(
+    layout: Option<Rc<RetainedLayout>>,
+    dependencies: RecordedDependencies,
+) -> ViewLayoutState {
+    ViewLayoutState(ViewLayout::Cached {
+        retained: (layout, dependencies),
+    })
 }
 
 /// Prepaints the view as [`crate::Element::prepaint`] does, following up on how
