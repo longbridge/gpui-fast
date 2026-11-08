@@ -1909,7 +1909,7 @@ impl WgpuRendererCore {
                     resolve_target,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
+                        store: crate::fast::frame::path_store_op(resolve_target),
                     },
                     depth_slice: None,
                 })],
