@@ -63,10 +63,10 @@ const kCGImageAlphaOnly: u32 = 7;
 pub struct AppleTextSystem(RwLock<AppleTextSystemState>);
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-struct FontKey {
+pub(crate) struct FontKey {
     font_family: SharedString,
     font_features: FontFeatures,
-    font_fallbacks: Option<FontFallbacks>,
+    pub(crate) font_fallbacks: Option<FontFallbacks>,
 }
 
 struct AppleTextSystemState {
@@ -280,6 +280,10 @@ impl AppleTextSystemState {
             })
             .collect::<Result<Vec<_>>>()?;
         self.memory_source.add_fonts(fonts.into_iter())?;
+        crate::fast::font_fallbacks::forget_cascades(
+            &mut self.font_selections,
+            &mut self.font_ids_by_font_key,
+        );
         Ok(())
     }
 
@@ -300,7 +304,12 @@ impl AppleTextSystemState {
         for font in family.fonts() {
             let mut font = font.load()?;
 
-            apply_features_and_fallbacks(&mut font, features, fallbacks)?;
+            let fast_app_fallbacks = crate::fast::font_fallbacks::AppFallbacks::new(
+                &self.memory_source,
+                fallbacks,
+                &font,
+            );
+            apply_features_and_fallbacks(&mut font, features, fallbacks, &fast_app_fallbacks)?;
 
             // We've seen a number of panics in production caused by calling font.properties()
             // which unwraps a downcast to CFNumber. This is an attempt to avoid the panic,

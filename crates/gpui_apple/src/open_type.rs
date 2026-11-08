@@ -29,6 +29,7 @@ pub fn apply_features_and_fallbacks(
     font: &mut FontKitFont,
     features: &FontFeatures,
     fallbacks: Option<&FontFallbacks>,
+    fast_app_fallbacks: &crate::fast::font_fallbacks::AppFallbacks,
 ) -> anyhow::Result<()> {
     unsafe {
         let mut keys = vec![kCTFontFeatureSettingsAttribute];
@@ -37,7 +38,7 @@ pub fn apply_features_and_fallbacks(
             && !fallbacks.fallback_list().is_empty()
         {
             keys.push(kCTFontCascadeListAttribute);
-            values.push(generate_fallback_array(fallbacks, font));
+            values.push(generate_fallback_array(fallbacks, font, fast_app_fallbacks));
         }
         let attrs = CFDictionaryCreate(
             kCFAllocatorDefault,
@@ -102,13 +103,24 @@ fn generate_feature_array(features: &FontFeatures) -> CFMutableArrayRef {
     }
 }
 
-fn generate_fallback_array(fallbacks: &FontFallbacks, font: &mut FontKitFont) -> CFMutableArrayRef {
+fn generate_fallback_array(
+    fallbacks: &FontFallbacks,
+    font: &mut FontKitFont,
+    fast_app_fallbacks: &crate::fast::font_fallbacks::AppFallbacks,
+) -> CFMutableArrayRef {
     unsafe {
         let symbolic_traits = font.native_font().symbolic_traits();
         let all_traits = font.native_font().all_traits();
 
         let fallback_array = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
         for user_fallback in fallbacks.fallback_list() {
+            if crate::fast::font_fallbacks::AppFallbacks::append(
+                fast_app_fallbacks,
+                fallback_array,
+                user_fallback,
+            ) {
+                continue;
+            }
             let name = CFString::from(user_fallback.as_str());
 
             let traits_keys = [kCTFontWeightTrait, kCTFontSlantTrait];
