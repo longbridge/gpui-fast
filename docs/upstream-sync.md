@@ -145,8 +145,10 @@ conflict on every sync, and have to be ported into `fast/` by hand.
 
 #### Proposed exception: asynchronous quit requests (maintainer approval required)
 
-This candidate requests a narrowly scoped new exception to rule 5. Existing
-exceptions do not approve it. `App::on_quit_requested` installs one replaceable
+This draft experiment is available only with `test-support`. Production builds
+expose no new quit-request API. Maintainer approval of a new exception to rule 5
+is required before considering a production API; existing exceptions do not
+approve it. `App::on_quit_requested` installs one replaceable
 main-thread handler returning a future of `bool`, and the defaulted
 `Platform::on_quit_requested` hook accepts a handler returning `Task<bool>`.
 Registration returns an error on unsupported platforms; macOS implements it.
@@ -163,6 +165,17 @@ Queued and pending quit requests share one decision; each accepted request
 receives one reply. False cancels and permits retry, while true allows the
 existing final `on_app_quit` cleanup. Replacing a handler during preparation
 affects the next request. Without a handler, macOS keeps `Now`.
+The queued legacy dispatch callback rechecks registration when it runs and
+switches to the deferred run-loop path if a handler was installed meanwhile.
+
+Restart requests with a handler retain the first queued or pending exit intent.
+The restart helper starts only after preparation approves. Cancellation discards
+it, and a spawn failure cancels termination and permits retry. Later quit or
+restart calls merge into the existing decision without changing its intent.
+Without a handler, restart keeps the existing spawn-then-quit behavior.
+The experimental build retains App restart configuration across attempts, so
+cancellation or a failed helper spawn preserves the path and arguments for retry.
+Ordinary production builds retain upstream's consuming configuration behavior.
 
 The existing final-cleanup callback cannot cancel termination and has a 200 ms
 shutdown budget. Applications that must finish fallible persistence before
@@ -172,7 +185,8 @@ completion. Forced termination and process crashes cannot be deferred.
 
 All new implementation and tests live in `fast/`; upstream files contain only
 hooks and visibility changes. No allowlist change is needed. The independent
-`gpui_perf` example can be run with `cargo run -p gpui_perf --example termination`.
+`gpui_perf` example can be run with
+`cargo run -p gpui_perf --features test-support --example termination`.
 On macOS, request quit twice: the first attempt cancels after 500 ms, the
 window remains usable and heartbeats continue; the second attempt allows
 termination and logs final cleanup once. GUI acceptance must be recorded
@@ -181,6 +195,8 @@ Pass `-- --self-test` to exercise a hidden native window, duplicate quit calls
 in one update, and reentrant quit calls during preparation. The first decision
 must cancel without replaying any queued quit; only the later explicit retry
 may run final cleanup.
+Pass `-- --quit-before-register` to queue a legacy quit and install the handler
+in the same update, then verify cancellation, heartbeats and explicit retry.
 
 The check cannot see a change to what upstream's public types offer, so the
 few places where gpui-fast's differs from upstream's are listed here. Each is

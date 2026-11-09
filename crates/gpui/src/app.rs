@@ -2076,8 +2076,8 @@ impl App {
             .clone()
             .retain(|observer| observer(self));
         self.platform.restart(
-            self.restart_path.take(),
-            std::mem::take(&mut self.restart_arguments),
+            crate::fast::termination::restart_option(&mut self.restart_path),
+            crate::fast::termination::restart_option(&mut self.restart_arguments),
         )
     }
 

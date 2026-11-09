@@ -27,7 +27,7 @@ required-features = ["fast"]
 
 [[example]]
 name = "termination"
-required-features = ["fast"]
+required-features = ["fast", "test-support"]
 
 [[example]]
 name = "views_frames"
@@ -50,6 +50,7 @@ default = ["fast"]
 # Build against this repository's GPUI: the showcase, `--headless` and the
 # examples, with gpui-fast's counters.
 fast = ["dep:gpui_fast", "dep:gpui_platform_fast", "dep:gpui_wgpu"]
+test-support = ["gpui_fast?/test-support", "gpui_platform_fast?/test-support"]
 # Build the showcase against upstream GPUI instead, the `gpui-pre` snapshot
 # GPUI Kit pins, to compare the two on the same screens:
 # `cargo run -p gpui_perf --release --features upstream`, or with

@@ -1,6 +1,21 @@
-use crate::{App, Result, Task};
+use crate::App;
+#[cfg(any(test, feature = "test-support"))]
+use crate::{Result, Task};
+#[cfg(any(test, feature = "test-support"))]
 use std::future::Future;
 
+pub(crate) fn restart_option<T: Clone + Default>(value: &mut T) -> T {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        value.clone()
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        std::mem::take(value)
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
 impl App {
     /// Replace the asynchronous quit-request handler on supported platforms (currently macOS).
     ///
@@ -28,6 +43,7 @@ impl App {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn unsupported() -> Result<()> {
     anyhow::bail!("asynchronous quit requests are not supported on this platform")
 }
@@ -35,6 +51,40 @@ pub(crate) fn unsupported() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use crate::TestAppContext;
+    use std::{ffi::OsString, path::PathBuf};
+
+    #[gpui::test]
+    async fn restart_retry_preserves_configuration(cx: &mut TestAppContext) {
+        #[cfg(unix)]
+        let argument = {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(b"/tmp/restart data/\xff".to_vec())
+        };
+        #[cfg(not(unix))]
+        let argument = OsString::from("restart data");
+        let arguments = vec![OsString::from("--user-data-dir"), argument];
+        let path = PathBuf::from("updated-app");
+        cx.update(|cx| {
+            cx.restart_arguments = arguments.clone();
+            cx.set_restart_path(path.clone());
+        });
+
+        for _ in 0..2 {
+            let restart = cx.expect_restart();
+            cx.update(|cx| cx.restart());
+            let actual = restart.await.expect("restart was not requested");
+            assert_eq!(actual, (Some(path.clone()), arguments.clone()));
+        }
+
+        let replacement = PathBuf::from("newer-app");
+        cx.update(|cx| cx.set_restart_path(replacement.clone()));
+        let restart = cx.expect_restart();
+        cx.update(|cx| cx.restart());
+        assert_eq!(
+            restart.await.expect("restart was not requested"),
+            (Some(replacement), arguments)
+        );
+    }
 
     #[gpui::test]
     fn unsupported_platform_reports_registration_error(cx: &mut TestAppContext) {

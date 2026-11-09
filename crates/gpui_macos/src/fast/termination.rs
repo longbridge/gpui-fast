@@ -1,6 +1,6 @@
 use crate::platform::{MacPlatform, get_mac_platform};
 use dispatch2::DispatchQueue;
-use gpui::{ForegroundExecutor, Result, Task};
+use gpui::{ForegroundExecutor, Platform, Task};
 use objc2::{
     Message as _, msg_send,
     rc::Retained,
@@ -8,9 +8,10 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{NSApplication, NSApplicationTerminateReply};
-use std::{cell::RefCell, ffi::c_void, rc::Rc};
+use std::{cell::RefCell, ffi::c_void, io, process::Child, rc::Rc};
 
 type Handler = Rc<RefCell<Box<dyn FnMut() -> Task<bool>>>>;
+type Restart = Box<dyn FnOnce() -> io::Result<()>>;
 
 #[derive(Clone, Default)]
 pub(crate) struct Termination(Rc<RefCell<State>>);
@@ -20,6 +21,7 @@ struct State {
     handler: Option<Handler>,
     next_id: u64,
     phase: Phase,
+    restart: Option<Restart>,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -37,17 +39,23 @@ struct Request {
 }
 
 impl Termination {
+    #[cfg(any(test, feature = "test-support"))]
     fn install(&self, handler: Box<dyn FnMut() -> Task<bool>>) {
         self.0.borrow_mut().handler = Some(Rc::new(RefCell::new(handler)));
     }
 
     fn defer(&self, schedule: impl FnOnce()) -> bool {
+        self.defer_intent(None, schedule)
+    }
+
+    fn defer_intent(&self, restart: Option<Restart>, schedule: impl FnOnce()) -> bool {
         let mut state = self.0.borrow_mut();
         if state.handler.is_none() {
             return false;
         }
         if state.phase == Phase::Idle {
             state.phase = Phase::Queued;
+            state.restart = restart;
             drop(state);
             schedule();
         }
@@ -74,7 +82,22 @@ impl Termination {
 
     async fn prepare(&self, request: Request, reply: impl FnOnce(bool)) {
         let task = (request.handler.borrow_mut())();
-        let allow = task.await;
+        let mut allow = task.await;
+        let restart = {
+            let mut state = self.0.borrow_mut();
+            if state.phase != Phase::Pending(request.id) {
+                return;
+            }
+            state.restart.take()
+        };
+        if allow {
+            if let Some(restart) = restart {
+                if let Err(error) = restart() {
+                    log::error!("failed to spawn restart script: {:?}", error);
+                    allow = false;
+                }
+            }
+        }
         if self.complete(request.id, allow) {
             reply(allow);
         }
@@ -90,10 +113,11 @@ impl Termination {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn install(
     platform: &MacPlatform,
     handler: Box<dyn FnMut() -> Task<bool>>,
-) -> Result<()> {
+) -> gpui::Result<()> {
     let termination = platform.0.lock().fast_termination.clone();
     termination.install(handler);
     Ok(())
@@ -101,17 +125,40 @@ pub(crate) fn install(
 
 pub(crate) fn defer_quit(platform: &MacPlatform) -> bool {
     let termination = platform.0.lock().fast_termination.clone();
-    termination.defer(|| {
-        let app = NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
-        unsafe {
-            let delegate: *mut AnyObject = msg_send![&*app, delegate];
-            let _: () = msg_send![delegate,
-                performSelector: sel!(gpuiPerformDeferredQuit:),
-                withObject: std::ptr::null_mut::<AnyObject>(),
-                afterDelay: 0.0_f64,
-            ];
+    termination.defer(schedule_quit)
+}
+
+fn schedule_quit() {
+    let app = NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
+    unsafe {
+        let delegate: *mut AnyObject = msg_send![&*app, delegate];
+        let _: () = msg_send![delegate,
+            performSelector: sel!(gpuiPerformDeferredQuit:),
+            withObject: std::ptr::null_mut::<AnyObject>(),
+            afterDelay: 0.0_f64,
+        ];
+    }
+}
+
+pub(crate) fn defer_legacy_quit() -> bool {
+    let app = NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
+    unsafe {
+        let delegate: *mut AnyObject = msg_send![&*app, delegate];
+        defer_quit(get_mac_platform(&*delegate))
+    }
+}
+
+pub(crate) fn restart(platform: &MacPlatform, spawn: impl FnOnce() -> io::Result<Child> + 'static) {
+    let termination = platform.0.lock().fast_termination.clone();
+    let has_handler = termination.0.borrow().handler.is_some();
+    if has_handler {
+        termination.defer_intent(Some(Box::new(move || spawn().map(|_| ()))), schedule_quit);
+    } else {
+        match spawn() {
+            Ok(_) => platform.quit(),
+            Err(error) => log::error!("failed to spawn restart script: {:?}", error),
         }
-    })
+    }
 }
 
 pub(crate) fn register(builder: &mut ClassBuilder) {
@@ -192,12 +239,13 @@ extern "C" fn start_request(context: *mut c_void) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Phase, Request, Termination};
+    use super::{Phase, Request, Restart, Termination};
     use futures::{FutureExt as _, channel::oneshot, executor::block_on};
     use gpui::{Task, TestAppContext};
     use objc2_app_kit::NSApplicationTerminateReply;
     use std::{
         cell::{Cell, RefCell},
+        io,
         rc::Rc,
     };
 
@@ -208,6 +256,85 @@ mod tests {
             NSApplicationTerminateReply::TerminateLater
         );
         queued.unwrap()
+    }
+
+    fn spawn_counter(count: &Rc<Cell<usize>>, fail: bool) -> Restart {
+        let count = count.clone();
+        Box::new(move || {
+            count.set(count.get() + 1);
+            if fail {
+                Err(io::Error::other("synthetic spawn failure"))
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    #[test]
+    fn restart_spawns_only_after_approval_and_merges_duplicates() {
+        for allow in [false, true] {
+            let termination = Termination::default();
+            termination.install(Box::new(move || Task::ready(allow)));
+            let count = Rc::new(Cell::new(0));
+            assert!(termination.defer_intent(Some(spawn_counter(&count, false)), || {}));
+            assert!(
+                termination
+                    .defer_intent(Some(spawn_counter(&count, false)), || panic!("duplicate"))
+            );
+            assert_eq!(count.get(), 0);
+            let pending = request(&termination);
+            assert!(
+                termination.defer_intent(Some(spawn_counter(&count, false)), || panic!("pending"))
+            );
+            assert!(termination.defer(|| panic!("ordinary quit must merge")));
+            block_on(termination.prepare(pending, |reply| assert_eq!(reply, allow)));
+            assert_eq!(count.get(), usize::from(allow));
+            if !allow {
+                termination.install(Box::new(|| Task::ready(true)));
+                assert!(termination.defer(|| {}));
+                block_on(termination.prepare(request(&termination), |reply| assert!(reply)));
+                assert_eq!(
+                    count.get(),
+                    0,
+                    "cancelled restart leaked into ordinary quit"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn late_restart_cannot_replace_an_ordinary_quit() {
+        for pending in [false, true] {
+            let termination = Termination::default();
+            termination.install(Box::new(|| Task::ready(true)));
+            assert!(termination.defer(|| {}));
+            let request = pending.then(|| request(&termination));
+            let count = Rc::new(Cell::new(0));
+            assert!(
+                termination
+                    .defer_intent(Some(spawn_counter(&count, false)), || panic!("duplicate"))
+            );
+            block_on(termination.prepare(
+                request.unwrap_or_else(|| self::request(&termination)),
+                |allow| assert!(allow),
+            ));
+            assert_eq!(count.get(), 0);
+        }
+    }
+
+    #[test]
+    fn failed_restart_cancels_and_can_retry() {
+        let termination = Termination::default();
+        termination.install(Box::new(|| Task::ready(true)));
+        let count = Rc::new(Cell::new(0));
+        for fail in [true, false] {
+            assert!(termination.defer_intent(Some(spawn_counter(&count, fail)), || {}));
+            block_on(termination.prepare(request(&termination), |allow| assert_eq!(allow, !fail)));
+            assert!(
+                termination.0.borrow().phase == if fail { Phase::Idle } else { Phase::Approved }
+            );
+        }
+        assert_eq!(count.get(), 2);
     }
 
     #[test]

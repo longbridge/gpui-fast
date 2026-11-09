@@ -594,6 +594,9 @@ impl Platform for MacPlatform {
         }
 
         extern "C" fn quit(_: *mut c_void) {
+            if crate::fast::termination::defer_legacy_quit() {
+                return;
+            }
             unsafe {
                 let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
                 let _: () = msg_send![app, terminate: ptr::null_mut::<AnyObject>()];
@@ -634,7 +637,7 @@ impl Platform for MacPlatform {
             clippy::disallowed_methods,
             reason = "We are restarting ourselves, using std command thus is fine"
         )]
-        let restart_process = new_std_command("/bin/bash")
+        let fast_restart = move || new_std_command("/bin/bash")
             .arg("-c")
             .arg(script)
             .arg(app_pid)
@@ -643,10 +646,7 @@ impl Platform for MacPlatform {
             .process_group(0)
             .spawn();
 
-        match restart_process {
-            Ok(_) => self.quit(),
-            Err(e) => log::error!("failed to spawn restart script: {:?}", e),
-        }
+        crate::fast::termination::restart(self, fast_restart);
     }
 
     #[allow(deprecated)]
@@ -1047,6 +1047,7 @@ impl Platform for MacPlatform {
         self.0.lock().quit = Some(callback);
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn on_quit_requested(&self, handler: Box<dyn FnMut() -> Task<bool>>) -> Result<()> {
         crate::fast::termination::install(self, handler)
     }

@@ -461,6 +461,7 @@ pub trait Platform: 'static {
     fn open_with_system(&self, path: &Path);
 
     fn on_quit(&self, callback: Box<dyn FnMut() -> bool>);
+    #[cfg(any(test, feature = "test-support"))]
     fn on_quit_requested(&self, _handler: Box<dyn FnMut() -> Task<bool>>) -> Result<()> {
         crate::fast::termination::unsupported()
     }

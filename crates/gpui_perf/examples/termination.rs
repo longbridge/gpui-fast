@@ -63,7 +63,8 @@ impl Render for Example {
 }
 
 fn main() {
-    let self_test = std::env::args().skip(1).any(|arg| arg == "--self-test");
+    let quit_before_register = std::env::args().any(|arg| arg == "--quit-before-register");
+    let self_test = quit_before_register || std::env::args().any(|arg| arg == "--self-test");
     gpui_platform::application().run(move |cx: &mut App| {
         cx.on_action(quit);
         cx.bind_keys([
@@ -73,6 +74,10 @@ fn main() {
         cx.set_menus([Menu::new("Termination").items([MenuItem::action("Quit", Quit)])]);
         let state = Rc::new(RefCell::new(RunState::default()));
         let preparation_state = state.clone();
+        if quit_before_register {
+            eprintln!("self-test: queue legacy quit before registering handler");
+            cx.quit();
+        }
         cx.on_quit_requested(move |cx| {
             let mut state = preparation_state.borrow_mut();
             state.attempts += 1;
