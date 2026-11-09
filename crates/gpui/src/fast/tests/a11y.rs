@@ -312,6 +312,48 @@ fn turning_accessibility_on_builds_every_view(cx: &mut TestAppContext) {
     .unwrap();
 }
 
+struct SyntheticTree;
+
+impl Render for SyntheticTree {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("synthetic-tree")
+            .role(Role::Group)
+            .a11y_synthetic_children(|builder| {
+                let parent_id = builder.synthetic_node_id("parent");
+                let child_id = builder.synthetic_node_id("child");
+                let mut parent = accesskit::Node::new(Role::Group);
+                parent.set_children(vec![child_id]);
+                builder.push_child(child_id, accesskit::Node::new(Role::Button));
+                builder.push_child(parent_id, parent);
+                builder.parent_node().set_children(vec![parent_id]);
+            })
+    }
+}
+
+struct SyntheticHost(Entity<SyntheticTree>);
+
+impl Render for SyntheticHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().child(self.0.clone())
+    }
+}
+
+#[crate::test]
+fn reused_synthetic_subtrees_keep_their_hierarchy(cx: &mut TestAppContext) {
+    let window = cx.add_window(|_, cx| SyntheticHost(cx.new(|_| SyntheticTree)));
+    cx.update_window(window.into(), |_, window, cx| {
+        window.set_a11y_active_for_tests(true);
+        window.draw(cx).clear(cx);
+        let expected = a11y_snapshot(window);
+        window.draw(cx).clear(cx);
+        assert!(window.rendered_frame.retained.reused_any());
+        let actual = a11y_snapshot(window);
+        assert_eq!(a11y_difference(&actual, &expected, 0.), None);
+    })
+    .unwrap();
+}
+
 /// A frame drawn with accessibility active keeps the tree it sent in
 /// `A11yDebug::last_tree_update`, which views drawn again read their
 /// finished nodes from.
