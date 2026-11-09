@@ -303,9 +303,8 @@ impl A11y {
 /// [`Element::a11y_synthetic_children`].
 pub struct A11ySubtreeBuilder<'a> {
     parent_id: NodeId,
-    nodes: &'a mut A11yNodeBuilder,
-    /// Children before direct mutation, plus leaves appended through this builder.
-    expected_children: Option<Vec<NodeId>>,
+    pub(crate) nodes: &'a mut A11yNodeBuilder,
+    pub(crate) fast_children: crate::fast::a11y::SyntheticChildren,
     /// Provenance of the real element whose `a11y_synthetic_children` is
     /// running.
     #[cfg(debug_assertions)]
@@ -317,7 +316,7 @@ impl<'a> A11ySubtreeBuilder<'a> {
         Self {
             parent_id,
             nodes,
-            expected_children: None,
+            fast_children: crate::fast::a11y::SyntheticChildren::default(),
             #[cfg(debug_assertions)]
             creator: debug::NodeCreator::default(),
         }
@@ -348,9 +347,7 @@ impl<'a> A11ySubtreeBuilder<'a> {
     /// in which case the node is discarded.
     pub fn push_child(&mut self, id: NodeId, node: accesskit::Node) -> bool {
         let pushed = self.nodes.push_leaf(id, node);
-        if pushed && let Some(children) = &mut self.expected_children {
-            children.push(id);
-        }
+        crate::fast::a11y::SyntheticChildren::note_pushed(&mut self.fast_children, pushed, id);
         #[cfg(debug_assertions)]
         if pushed {
             self.nodes.record_node_info(
@@ -368,23 +365,12 @@ impl<'a> A11ySubtreeBuilder<'a> {
 
     /// A mutable reference to the parent node.
     pub fn parent_node(&mut self) -> &mut accesskit::Node {
-        let node = self
-            .nodes
-            .current_node_mut()
-            .expect("A11ySubtreeBuilder exists only while its element's node is on the stack");
-        self.expected_children
-            .get_or_insert_with(|| node.children().to_vec());
-        node
-    }
-
-    pub(crate) fn children_changed(self) -> bool {
-        self.expected_children.is_some_and(|expected| {
-            let node = self
-                .nodes
+        crate::fast::a11y::SyntheticChildren::note_parent(
+            &mut self.fast_children,
+            self.nodes
                 .current_node_mut()
-                .expect("the synthetic parent is still on the stack");
-            node.children() != expected
-        })
+                .expect("A11ySubtreeBuilder exists only while its element's node is on the stack"),
+        )
     }
 }
 
@@ -484,22 +470,13 @@ impl A11yNodeBuilder {
         self.nodes_stack.last_mut()
     }
 
-    #[cfg(test)]
     /// Pop the current node off the stack and finalize it into the all_nodes
     /// list.
     pub(crate) fn pop(&mut self) {
-        self.pop_with_children(false);
-    }
-
-    pub(crate) fn pop_with_children(&mut self, preserve_children: bool) {
         debug_assert!(self.ids_stack.len() > 1, "pop would remove the root node");
 
         if let (Some(id), Some(node)) = (self.ids_stack.pop(), self.nodes_stack.pop()) {
-            crate::fast::a11y::A11yLog::pop(
-                &mut self.fast,
-                self.all_nodes.len(),
-                preserve_children,
-            );
+            crate::fast::a11y::A11yLog::pop(&mut self.fast, self.all_nodes.len());
             self.all_nodes.push((id, node));
         }
     }

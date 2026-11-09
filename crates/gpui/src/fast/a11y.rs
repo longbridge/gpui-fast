@@ -87,6 +87,9 @@ pub(crate) struct A11yLog {
     /// pushed. Kept through the frame: a view drawn again around a nested
     /// view built again finishes its nodes after the nested view.
     replay_open: Vec<bool>,
+    /// Whether the node popped next keeps its finished children on replay
+    /// (see [`SyntheticChildren`]). Taken by every pop.
+    preserve_next_pop: bool,
 }
 
 impl A11yLog {
@@ -105,7 +108,8 @@ impl A11yLog {
     }
 
     #[inline]
-    pub(crate) fn pop(log: &mut Self, at: usize, preserve_children: bool) {
+    pub(crate) fn pop(log: &mut Self, at: usize) {
+        let preserve_children = std::mem::take(&mut log.preserve_next_pop);
         if log.recording {
             log.ops.push(Op::Pop(at, preserve_children));
         }
@@ -324,7 +328,8 @@ fn replay(window: &mut Window, source: &Source, delta: Point<Pixels>) {
                     }
                     *open = node;
                 }
-                window.a11y.nodes.pop_with_children(preserve_children);
+                window.a11y.nodes.fast.preserve_next_pop = preserve_children;
+                window.a11y.nodes.pop();
             }
             Op::Focusable(node, focus) => {
                 window.a11y.set_focusable(node, focus);
@@ -547,5 +552,46 @@ impl CapturedAt {
     pub(crate) fn to_rfc3339(&self) -> String {
         chrono::DateTime::<chrono::Local>::from(self.0)
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, false)
+    }
+}
+
+/// Whether an element's `a11y_synthetic_children` rewrote its node's child
+/// list through `A11ySubtreeBuilder::parent_node` beyond the leaves it pushed.
+/// Replay then keeps the finished hierarchy instead of re-appending the
+/// logged leaves, which would give a nested synthetic child two parents.
+#[derive(Default)]
+pub(crate) struct SyntheticChildren {
+    /// The children before direct mutation, plus leaves pushed since.
+    expected: Option<Vec<accesskit::NodeId>>,
+}
+
+impl SyntheticChildren {
+    pub(crate) fn note_pushed(this: &mut Self, pushed: bool, id: accesskit::NodeId) {
+        if pushed && let Some(children) = &mut this.expected {
+            children.push(id);
+        }
+    }
+
+    /// Notes the child list of `node`, the parent handed out for direct
+    /// mutation, and hands it back.
+    pub(crate) fn note_parent<'a>(
+        this: &mut Self,
+        node: &'a mut accesskit::Node,
+    ) -> &'a mut accesskit::Node {
+        this.expected
+            .get_or_insert_with(|| node.children().to_vec());
+        node
+    }
+
+    /// Marks the parent, about to be popped, to keep its finished children
+    /// on replay if they are not what the builder's pushes account for.
+    pub(crate) fn finish(builder: crate::window::a11y::A11ySubtreeBuilder) {
+        let nodes = builder.nodes;
+        let changed = builder.fast_children.expected.is_some_and(|expected| {
+            nodes
+                .current_node_mut()
+                .is_some_and(|node| node.children() != expected)
+        });
+        nodes.fast.preserve_next_pop = changed;
     }
 }

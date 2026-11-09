@@ -484,7 +484,6 @@ impl<E: Element> Drawable<E> {
                 window.next_frame.dispatch_tree.pop_node();
 
                 if pushed_a11y_node {
-                    let mut preserve_children = false;
                     if let Some(global_id) = global_id.as_ref() {
                         #[cfg(debug_assertions)]
                         let creator = crate::window::a11y::debug::NodeCreator {
@@ -506,9 +505,9 @@ impl<E: Element> Drawable<E> {
                         }
                         self.element
                             .a11y_synthetic_children(&mut prepaint, &mut builder);
-                        preserve_children = builder.children_changed();
+                        crate::fast::a11y::SyntheticChildren::finish(builder);
                     }
-                    window.a11y.nodes.pop_with_children(preserve_children);
+                    window.a11y.nodes.pop();
                 }
 
                 if global_id.is_some() {
