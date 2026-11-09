@@ -1143,15 +1143,47 @@ impl App {
             }
         }));
 
-        platform.on_system_sleep(crate::fast::misc::system_power::sleep_callback(
-            &app,
+        let fast_power = crate::fast::misc::system_power::PowerNotifications::new(
             platform.foreground_executor(),
-        ));
+        );
+        platform.on_system_sleep(Box::new({
+            let app = Rc::downgrade(&app);
+            let fast_power = Rc::clone(&fast_power);
+            move || {
+                if let Some(app) = app.upgrade() {
+                    let Some(cx) =
+                        &mut crate::fast::misc::system_power::PowerNotifications::borrow_for_sleep(
+                            &fast_power,
+                            &app,
+                        )
+                    else {
+                        return;
+                    };
+                    cx.system_sleep_observers
+                        .clone()
+                        .retain(move |callback| (callback)(cx));
+                }
+            }
+        }));
 
-        platform.on_system_wake(crate::fast::misc::system_power::wake_callback(
-            &app,
-            platform.foreground_executor(),
-        ));
+        platform.on_system_wake(Box::new({
+            let app = Rc::downgrade(&app);
+            move || {
+                if let Some(app) = app.upgrade() {
+                    let Some(cx) =
+                        &mut crate::fast::misc::system_power::PowerNotifications::borrow_for_wake(
+                            &fast_power,
+                            &app,
+                        )
+                    else {
+                        return;
+                    };
+                    cx.system_wake_observers
+                        .clone()
+                        .retain(move |callback| (callback)(cx));
+                }
+            }
+        }));
 
         platform.on_app_lifecycle(Box::new({
             let app = Rc::downgrade(&app);
