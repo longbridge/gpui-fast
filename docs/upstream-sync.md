@@ -143,6 +143,45 @@ conflict on every sync, and have to be ported into `fast/` by hand.
 
 ### Where our API differs from upstream's
 
+#### Proposed exception: asynchronous quit requests (maintainer approval required)
+
+This candidate requests a narrowly scoped new exception to rule 5. Existing
+exceptions do not approve it. `App::on_quit_requested` installs one replaceable
+main-thread handler returning a future of `bool`, and the defaulted
+`Platform::on_quit_requested` hook accepts a handler returning `Task<bool>`.
+Registration returns an error on unsupported platforms; macOS implements it.
+Applications can use their existing `cx.quit()` entry point.
+
+With a handler installed, `cx.quit()` schedules `terminate:` through the native
+run loop. Calling it inside a main dispatch queue callback would keep that queue
+occupied during AppKit's termination loop, preventing preparation tasks from
+running. Applications without a handler retain the existing dispatch path.
+
+AppKit's `applicationShouldTerminate:` returns `Later` when a handler is
+installed. Preparation starts on the main queue after the delegate returns.
+Queued and pending quit requests share one decision; each accepted request
+receives one reply. False cancels and permits retry, while true allows the
+existing final `on_app_quit` cleanup. Replacing a handler during preparation
+affects the next request. Without a handler, macOS keeps `Now`.
+
+The existing final-cleanup callback cannot cancel termination and has a 200 ms
+shutdown budget. Applications that must finish fallible persistence before
+irreversible cleanup need an earlier asynchronous decision. Preparation has
+no framework timeout: applications own progress, cancellation UI and eventual
+completion. Forced termination and process crashes cannot be deferred.
+
+All new implementation and tests live in `fast/`; upstream files contain only
+hooks and visibility changes. No allowlist change is needed. The independent
+`gpui_perf` example can be run with `cargo run -p gpui_perf --example termination`.
+On macOS, request quit twice: the first attempt cancels after 500 ms, the
+window remains usable and heartbeats continue; the second attempt allows
+termination and logs final cleanup once. GUI acceptance must be recorded
+separately from compilation and state-machine tests.
+Pass `-- --self-test` to exercise a hidden native window, duplicate quit calls
+in one update, and reentrant quit calls during preparation. The first decision
+must cancel without replaying any queued quit; only the later explicit retry
+may run final cleanup.
+
 The check cannot see a change to what upstream's public types offer, so the
 few places where gpui-fast's differs from upstream's are listed here. Each is
 forced by what `fast/` keeps; anything not listed here is upstream's API

@@ -91,6 +91,7 @@ unsafe fn build_classes() {
                 sel!(applicationWillTerminate:),
                 will_terminate as extern "C-unwind" fn(_, Sel, *mut AnyObject),
             );
+            crate::fast::termination::register(&mut decl);
             decl.add_method(
                 sel!(handleGPUIMenuItem:),
                 handle_menu_item as extern "C-unwind" fn(_, Sel, *mut AnyObject),
@@ -161,11 +162,11 @@ unsafe fn build_classes() {
     }
 }
 
-pub struct MacPlatform(Mutex<MacPlatformState>, MainThreadMarker);
+pub struct MacPlatform(pub(crate) Mutex<MacPlatformState>, MainThreadMarker);
 
 pub(crate) struct MacPlatformState {
     background_executor: BackgroundExecutor,
-    foreground_executor: ForegroundExecutor,
+    pub(crate) foreground_executor: ForegroundExecutor,
     text_system: Arc<dyn PlatformTextSystem>,
     renderer_context: renderer::Context,
     headless: bool,
@@ -182,6 +183,7 @@ pub(crate) struct MacPlatformState {
     on_system_wake: Option<Box<dyn FnMut()>>,
     system_power_observers_registered: bool,
     quit: Option<Box<dyn FnMut() -> bool>>,
+    pub(crate) fast_termination: crate::fast::termination::Termination,
     menu_command: Option<Box<dyn FnMut(&dyn Action)>>,
     validate_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
     will_open_menu: Option<Box<dyn FnMut()>>,
@@ -245,6 +247,7 @@ impl MacPlatform {
             find_pasteboard: Pasteboard::find(),
             reopen: None,
             quit: None,
+            fast_termination: crate::fast::termination::Termination::default(),
             menu_command: None,
             validate_menu_command: None,
             will_open_menu: None,
@@ -576,6 +579,9 @@ impl Platform for MacPlatform {
     }
 
     fn quit(&self) {
+        if crate::fast::termination::defer_quit(self) {
+            return;
+        }
         // Quitting the app causes us to close windows, which invokes `Window::on_close` callbacks
         // synchronously before this method terminates. If we call `Platform::quit` while holding a
         // borrow of the app state (which most of the time we will do), we will end up
@@ -1041,6 +1047,10 @@ impl Platform for MacPlatform {
         self.0.lock().quit = Some(callback);
     }
 
+    fn on_quit_requested(&self, handler: Box<dyn FnMut() -> Task<bool>>) -> Result<()> {
+        crate::fast::termination::install(self, handler)
+    }
+
     fn on_reopen(&self, callback: Box<dyn FnMut()>) {
         self.0.lock().reopen = Some(callback);
     }
@@ -1268,7 +1278,7 @@ unsafe fn path_from_objc(path: *mut AnyObject) -> PathBuf {
     PathBuf::from(path)
 }
 
-unsafe fn get_mac_platform(object: &AnyObject) -> &MacPlatform {
+pub(crate) unsafe fn get_mac_platform(object: &AnyObject) -> &MacPlatform {
     unsafe {
         let platform_ptr = *mac_platform_ivar(object).load::<*mut c_void>(object);
         assert!(!platform_ptr.is_null());

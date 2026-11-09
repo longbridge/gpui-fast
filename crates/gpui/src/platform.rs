@@ -461,6 +461,9 @@ pub trait Platform: 'static {
     fn open_with_system(&self, path: &Path);
 
     fn on_quit(&self, callback: Box<dyn FnMut() -> bool>);
+    fn on_quit_requested(&self, _handler: Box<dyn FnMut() -> Task<bool>>) -> Result<()> {
+        crate::fast::termination::unsupported()
+    }
     fn on_reopen(&self, callback: Box<dyn FnMut()>);
     /// Registers the callback invoked when the system is about to sleep.
     fn on_system_sleep(&self, callback: Box<dyn FnMut()>);
