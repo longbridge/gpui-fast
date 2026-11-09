@@ -78,6 +78,7 @@ struct AppleTextSystemState {
     font_ids_by_font_key: HashMap<FontKey, SmallVec<[FontId; 4]>>,
     postscript_names_by_font_id: HashMap<FontId, String>,
     sized_fonts: crate::fast::text_system::SizedFonts,
+    color_bitmap_fonts: crate::fast::color_bitmap_fonts::ColorBitmapFonts,
 }
 
 impl AppleTextSystem {
@@ -92,6 +93,7 @@ impl AppleTextSystem {
             font_ids_by_font_key: HashMap::default(),
             postscript_names_by_font_id: HashMap::default(),
             sized_fonts: crate::fast::text_system::SizedFonts::default(),
+            color_bitmap_fonts: crate::fast::color_bitmap_fonts::ColorBitmapFonts::default(),
         }))
     }
 }
@@ -371,6 +373,11 @@ impl AppleTextSystemState {
             self.postscript_names_by_font_id
                 .insert(font_id, postscript_name);
             self.fonts.push(font);
+            crate::fast::color_bitmap_fonts::ColorBitmapFonts::note(
+                &mut self.color_bitmap_fonts,
+                font_id,
+                &self.fonts[font_id.0],
+            );
         }
         Ok(font_ids)
     }
@@ -399,11 +406,22 @@ impl AppleTextSystemState {
                 .push(font_kit::font::Font::from_core_graphics_font(
                     requested_font.copy_to_CGFont(),
                 ));
+            crate::fast::color_bitmap_fonts::ColorBitmapFonts::note(
+                &mut self.color_bitmap_fonts,
+                font_id,
+                &self.fonts[font_id.0],
+            );
             font_id
         }
     }
 
     fn is_emoji(&self, font_id: FontId) -> bool {
+        if crate::fast::color_bitmap_fonts::ColorBitmapFonts::contains(
+            &self.color_bitmap_fonts,
+            font_id,
+        ) {
+            return true;
+        }
         self.postscript_names_by_font_id
             .get(&font_id)
             .is_some_and(|postscript_name| {
