@@ -522,6 +522,7 @@ pub(crate) fn insert_tile_quads(
                         ),
                     },
                 },
+                fast_transformation: crate::TransformationMatrix::unit(),
             });
         }
     }

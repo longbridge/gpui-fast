@@ -287,6 +287,7 @@ fn composite_and_compare(harness: &mut Harness, translation: (f32, f32), paths: 
                     size: device_size(TILE as i32, TILE as i32),
                 },
             },
+            fast_transformation: TransformationMatrix::unit(),
         });
     }
     composited.pop_layer();
@@ -468,6 +469,7 @@ fn rasterize_and_assemble(harness: &mut Harness, content: Scene, tiles: &[(i32, 
                     size: device_size(TILE as i32, TILE as i32),
                 },
             },
+            fast_transformation: TransformationMatrix::unit(),
         });
     }
     frame.layers.frames.push(layer);
@@ -654,6 +656,7 @@ fn add_content(
         content_mask: mask(clip),
         corner_radii: Corners::all(ScaledPixels(4.)),
         tile: image_tile(harness),
+        fast_transformation: TransformationMatrix::unit(),
     });
 }
 
@@ -1200,4 +1203,78 @@ pub(super) fn read_back(
         }
     }
     pixels
+}
+
+/// An image turned a quarter about its centre, through a sprite's
+/// `fast_transformation`: a 60×20 image over x = 20..80, y = 40..60 turned
+/// about (50, 50) stands over x = 40..60, y = 20..80, its content turned
+/// with it and its corners still rounded.
+#[test]
+fn a_quarter_turned_image_turns_about_its_centre_with_rounded_corners() {
+    let Some(mut harness) = Harness::new() else {
+        eprintln!("skipped: no wgpu adapter");
+        return;
+    };
+    let tile = image_tile(&harness);
+    let quarter_turn = TransformationMatrix::unit()
+        .translate(point(ScaledPixels(50.), ScaledPixels(50.)))
+        .rotate(gpui::Radians(std::f32::consts::FRAC_PI_2))
+        .translate(point(ScaledPixels(-50.), ScaledPixels(-50.)));
+    let mut draw = |sprite: Option<(TransformationMatrix, f32)>| {
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad(sp(0., 0., 100., 100.), Hsla::from(rgba(0x11ff22ff))));
+        if let Some((transformation, radius)) = sprite {
+            scene.insert_primitive(PolychromeSprite {
+                order: 0,
+                pad: 0,
+                grayscale: false.into(),
+                opacity: 1.,
+                bounds: sp(20., 40., 60., 20.),
+                content_mask: no_mask(),
+                corner_radii: Corners::all(ScaledPixels(radius)),
+                tile,
+                fast_transformation: transformation,
+            });
+        }
+        scene.finish();
+        harness.render(&scene, device_size(100, 100), rgba(0x00000000))
+    };
+    let empty = draw(None);
+    let flat = draw(Some((TransformationMatrix::unit(), 0.)));
+    let turned = draw(Some((quarter_turn, 0.)));
+    let rounded = draw(Some((quarter_turn, 6.)));
+    let at = |pixels: &[u8], x: usize, y: usize| pixel(pixels, 100, x, y);
+    let background = at(&empty, 0, 0);
+
+    // The turned image covers its turned footprint and nothing else.
+    for (x, y) in [(50, 50), (50, 22), (50, 77), (41, 50), (58, 50)] {
+        assert_ne!(at(&turned, x, y), background, "({x}, {y}) is covered");
+    }
+    for (x, y) in [(30, 50), (70, 50), (38, 30), (62, 70)] {
+        assert_eq!(at(&turned, x, y), background, "({x}, {y}) is uncovered");
+    }
+
+    // Its content turned with it: the pixel `(dx, dy)` from the centre of
+    // the flat image is `(-dy, dx)` from the centre of the turned one.
+    for y in 20..80usize {
+        for x in 40..60usize {
+            let (bx, by) = (x as i32 - 50, y as i32 - 50);
+            let (fx, fy) = ((50 + by) as usize, (50 - bx - 1) as usize);
+            let (t, f) = (at(&turned, x, y), at(&flat, fx, fy));
+            let near = t.iter().zip(f).all(|(a, b)| a.abs_diff(b) <= 2);
+            assert!(
+                near,
+                "turned ({x}, {y}) {t:?} is not flat ({fx}, {fy}) {f:?}"
+            );
+        }
+    }
+
+    // Its corners are rounded where it stands, not where it was.
+    for (x, y) in [(40, 20), (59, 20), (40, 79), (59, 79)] {
+        assert_ne!(at(&turned, x, y), background, "square corner ({x}, {y})");
+        assert_eq!(at(&rounded, x, y), background, "rounded corner ({x}, {y})");
+    }
+    for (x, y) in [(50, 20), (40, 50), (50, 79), (59, 50), (50, 50)] {
+        assert_eq!(at(&rounded, x, y), at(&turned, x, y), "edge ({x}, {y})");
+    }
 }

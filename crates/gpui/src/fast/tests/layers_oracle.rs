@@ -141,6 +141,7 @@ fn scenes(tiles: &[TileCoord], nudge: f32) -> (Scene, Scene) {
                     size: size(crate::DevicePixels(512), crate::DevicePixels(512)),
                 },
             },
+            fast_transformation: crate::TransformationMatrix::unit(),
         });
     }
     layered.pop_layer();

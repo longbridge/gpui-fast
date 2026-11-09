@@ -293,6 +293,7 @@ fn hash_primitive(primitive: &Primitive, tile: &Bounds<ScaledPixels>, hasher: &m
             // texture's sprite carries its content version, so a refreshed
             // texture dirties the tiles showing it.
             hasher.write_u32(sprite.pad);
+            hash_transformation(&sprite.fast_transformation, hasher);
         }
         Primitive::Surface(surface) => {
             // A surface's pixels come from outside the scene; layers never

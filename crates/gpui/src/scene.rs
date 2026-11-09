@@ -755,6 +755,7 @@ pub struct PolychromeSprite {
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
+    pub fast_transformation: TransformationMatrix,
 }
 
 impl From<PolychromeSprite> for Primitive {

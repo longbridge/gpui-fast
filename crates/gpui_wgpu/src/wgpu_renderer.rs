@@ -2843,7 +2843,10 @@ mod tests {
         assert_eq!(std::mem::size_of::<Underline>(), 16 * 4);
         assert_eq!(std::mem::size_of::<MonochromeSprite>(), 28 * 4);
         assert_eq!(std::mem::size_of::<SubpixelSprite>(), 28 * 4);
-        assert_eq!(std::mem::size_of::<PolychromeSprite>(), 24 * 4);
+        assert_eq!(
+            std::mem::size_of::<PolychromeSprite>(),
+            crate::fast::webgl_strides::shader_stride("load_poly_sprite") * 4
+        );
     }
 
     #[test]

@@ -17,3 +17,5 @@ pub(crate) mod globals;
 pub(crate) mod layers;
 pub(crate) mod pass_state;
 pub(crate) mod rounded_clip;
+#[cfg(test)]
+pub(crate) mod webgl_strides;

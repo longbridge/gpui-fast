@@ -243,6 +243,7 @@ pub(super) fn tiled_scene(
                 gpui::size(gpui::DevicePixels(512), gpui::DevicePixels(512)),
             ),
         },
+        fast_transformation: gpui::TransformationMatrix::unit(),
     });
     scene.layers.frames.push(frame);
     scene.finish();

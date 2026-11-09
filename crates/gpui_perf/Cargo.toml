@@ -37,6 +37,10 @@ required-features = ["fast"]
 name = "linux_webview"
 required-features = ["fast"]
 
+[[example]]
+name = "image_transform"
+required-features = ["fast"]
+
 [[test]]
 name = "windows_manifest_coexistence"
 required-features = ["fast", "upstream"]
@@ -69,6 +73,9 @@ smol.workspace = true
 # its own wgpu device drawing into a native surface on Linux.
 [dev-dependencies]
 anyhow.workspace = true
+# The image_transform example builds its image in memory.
+image.workspace = true
+smallvec.workspace = true
 log.workspace = true
 raw-window-handle.workspace = true
 

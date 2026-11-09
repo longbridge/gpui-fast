@@ -22,6 +22,7 @@ pub(crate) mod dynamic_textures;
 pub(crate) mod em_metrics;
 pub(crate) mod global_id;
 pub(crate) mod glyphs;
+pub(crate) mod image_transform;
 pub(crate) mod interactive_text;
 pub(crate) mod interactivity;
 pub(crate) mod layers;

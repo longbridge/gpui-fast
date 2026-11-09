@@ -215,6 +215,7 @@ fn paint(scene: &mut Scene, rng: &mut StdRng) -> Vec<Painted> {
                             content_mask,
                             corner_radii: Corners::default(),
                             tile: tile(id, AtlasTextureKind::Polychrome, texture),
+                            fast_transformation: crate::TransformationMatrix::unit(),
                         }),
                         Kind::Quad => unreachable!(),
                     }

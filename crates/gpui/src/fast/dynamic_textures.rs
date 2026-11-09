@@ -31,7 +31,7 @@ use std::{
 use crate::fast::layers::scene::LAYER_TILE_TEXTURE_BASE;
 use crate::{
     AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, DevicePixels, Pixels, PolychromeSprite,
-    TileId, Window, point,
+    TileId, TransformationMatrix, Window, point,
 };
 
 /// Bytes per pixel of a dynamic texture: BGRA8, matching the scene's
@@ -367,6 +367,7 @@ pub(crate) fn paint(
     window.next_frame.scene.insert_primitive(PolychromeSprite {
         order: 0,
         pad: painted_version(texture.id),
+        fast_transformation: TransformationMatrix::unit(),
         grayscale: false.into(),
         bounds: window.snap_bounds(bounds),
         content_mask: window.snapped_content_mask(),
@@ -545,7 +546,7 @@ mod tests {
     };
     use crate::{
         AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, ContentMask, DevicePixels,
-        PolychromeSprite, ScaledPixels, Scene, TileId, point, size,
+        PolychromeSprite, ScaledPixels, Scene, TileId, TransformationMatrix, point, size,
     };
     use anyhow::Result;
     use std::sync::{
@@ -850,6 +851,7 @@ mod tests {
         scene.insert_primitive(PolychromeSprite {
             order: 0,
             pad,
+            fast_transformation: TransformationMatrix::unit(),
             tile: AtlasTile {
                 texture_id: texture.id.atlas_texture_id(),
                 tile_id: TileId(texture.id.0),

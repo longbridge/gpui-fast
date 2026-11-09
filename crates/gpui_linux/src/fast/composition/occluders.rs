@@ -227,6 +227,7 @@ mod tests {
                 padding: 0,
                 bounds: Default::default(),
             },
+            fast_transformation: gpui::TransformationMatrix::unit(),
         });
         scene.finish();
         scene

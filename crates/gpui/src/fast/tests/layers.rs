@@ -446,6 +446,7 @@ fn translation_moves_every_position_a_primitive_carries() {
         content_mask: mask,
         corner_radii: Default::default(),
         tile: atlas_tile(),
+        fast_transformation: rotation,
     };
     let Primitive::PolychromeSprite(moved) = translate(poly.into()) else {
         unreachable!()
@@ -453,6 +454,7 @@ fn translation_moves_every_position_a_primitive_carries() {
     assert_eq!(moved.bounds, sp(8., -1., 3., 4.));
     assert_eq!(moved.content_mask.bounds, moved_mask);
     assert_eq!(moved.tile, atlas_tile());
+    assert_eq!(moved.fast_transformation, expected);
 }
 
 #[test]
@@ -1649,9 +1651,11 @@ mod paint {
 /// their bounds cover.
 mod footprints {
     use super::{atlas_tile, layer, sp, wide_mask};
+    use crate::fast::layers::scene::visible_bounds;
     use crate::fast::layers::tiles::{dirty_tiles, tile_hashes};
     use crate::{
-        Hsla, MonochromeSprite, Radians, Scene, Shadow, TileCoord, TransformationMatrix, point,
+        Hsla, MonochromeSprite, PolychromeSprite, Radians, Scene, Shadow, TileCoord,
+        TransformationMatrix, point,
     };
 
     fn shadow(color: Hsla) -> Shadow {
@@ -1687,6 +1691,45 @@ mod footprints {
                     crate::ScaledPixels(-475.),
                     crate::ScaledPixels(-135.),
                 )),
+        }
+    }
+
+    /// A 100×20 px image ending 2 px short of tile (1, 0), turned a quarter
+    /// around its centre (460, 300): it stands 20×100 px over
+    /// x = 450..470, y = 250..350.
+    fn quarter_turned_image(opacity: f32) -> PolychromeSprite {
+        PolychromeSprite {
+            order: 0,
+            pad: 0,
+            grayscale: false.into(),
+            opacity,
+            bounds: sp(410., 290., 100., 20.),
+            content_mask: wide_mask(),
+            corner_radii: crate::Corners::all(crate::ScaledPixels(6.)),
+            tile: atlas_tile(),
+            fast_transformation: TransformationMatrix::unit()
+                .translate(point(crate::ScaledPixels(460.), crate::ScaledPixels(300.)))
+                .rotate(Radians(std::f32::consts::FRAC_PI_2))
+                .translate(point(
+                    crate::ScaledPixels(-460.),
+                    crate::ScaledPixels(-300.),
+                )),
+        }
+    }
+
+    /// An image turned an eighth around its centre, so that its corners reach
+    /// into tile (1, 0) although its bounds end short of it.
+    fn rotated_image(opacity: f32) -> PolychromeSprite {
+        PolychromeSprite {
+            bounds: sp(440., 100., 70., 70.),
+            fast_transformation: TransformationMatrix::unit()
+                .translate(point(crate::ScaledPixels(475.), crate::ScaledPixels(135.)))
+                .rotate(Radians(std::f32::consts::FRAC_PI_4))
+                .translate(point(
+                    crate::ScaledPixels(-475.),
+                    crate::ScaledPixels(-135.),
+                )),
+            ..quarter_turned_image(opacity)
         }
     }
 
@@ -1763,6 +1806,61 @@ mod footprints {
                 .monochrome_sprites
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn a_quarter_turned_image_damages_the_rectangle_it_turns_into() {
+        let damage = visible_bounds(&quarter_turned_image(1.).into());
+        let expected = sp(450., 250., 20., 100.);
+        let close = |a: crate::ScaledPixels, b: crate::ScaledPixels| (a.0 - b.0).abs() < 1e-3;
+        assert!(
+            close(damage.origin.x, expected.origin.x)
+                && close(damage.origin.y, expected.origin.y)
+                && close(damage.size.width, expected.size.width)
+                && close(damage.size.height, expected.size.height),
+            "{damage:?} is not {expected:?}"
+        );
+
+        let unit = PolychromeSprite {
+            fast_transformation: TransformationMatrix::unit(),
+            ..quarter_turned_image(1.)
+        };
+        assert_eq!(visible_bounds(&unit.into()), sp(410., 290., 100., 20.));
+    }
+
+    #[test]
+    fn a_rotated_image_change_dirties_every_tile_it_turns_into() {
+        assert_eq!(
+            dirty(&scene_of(rotated_image(1.)), &scene_of(rotated_image(0.5))),
+            BOTH
+        );
+        let frame = layer(scene_of(rotated_image(1.)));
+        assert_eq!(
+            frame
+                .tile_scene(TileCoord { x: 1, y: 0 })
+                .polychrome_sprites
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn turning_an_image_changes_the_tiles_it_draws_over() {
+        let turned = |angle: f32| PolychromeSprite {
+            fast_transformation: TransformationMatrix::unit()
+                .translate(point(crate::ScaledPixels(100.), crate::ScaledPixels(100.)))
+                .rotate(Radians(angle))
+                .translate(point(
+                    crate::ScaledPixels(-100.),
+                    crate::ScaledPixels(-100.),
+                )),
+            bounds: sp(90., 90., 20., 20.),
+            ..quarter_turned_image(1.)
+        };
+        assert_eq!(
+            dirty(&scene_of(turned(0.)), &scene_of(turned(0.3))),
+            [TileCoord { x: 0, y: 0 }]
         );
     }
 }

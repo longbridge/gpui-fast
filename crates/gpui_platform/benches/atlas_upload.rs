@@ -239,6 +239,7 @@ fn tile_scene(tile: AtlasTile) -> Scene {
         AtlasTextureKind::Polychrome => scene.insert_primitive(PolychromeSprite {
             order: 0,
             pad: 0,
+            fast_transformation: TransformationMatrix::unit(),
             tile,
             grayscale: PaddedBool32::from(false),
             opacity: 1.0,

@@ -290,6 +290,7 @@ fn composited_scene(
                     size: device_size(TILE as i32, TILE as i32),
                 },
             },
+            fast_transformation: TransformationMatrix::unit(),
         });
     }
     composited.pop_layer();
@@ -460,6 +461,7 @@ fn rasterize_and_assemble(harness: &mut Harness, content: Scene, tiles: &[(i32, 
                     size: device_size(TILE as i32, TILE as i32),
                 },
             },
+            fast_transformation: TransformationMatrix::unit(),
         });
     }
     frame.layers.frames.push(layer);
@@ -631,6 +633,7 @@ fn add_content(
         content_mask: mask(clip),
         corner_radii: Corners::all(ScaledPixels(4.)),
         tile: image_tile(harness),
+        fast_transformation: TransformationMatrix::unit(),
     });
 }
 

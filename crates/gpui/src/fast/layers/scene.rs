@@ -235,8 +235,8 @@ fn translate_bounds(
 /// The part of window (or content) space `primitive` can draw into: what
 /// the renderer rasterizes for it, clipped to its content mask. A drop
 /// shadow reaches three blur radii past its bounds and an inset one fills
-/// its element's bounds (`vs_shadow`); a mono or subpixel sprite's bounds
-/// are transformed (`to_device_position_transformed`).
+/// its element's bounds (`vs_shadow`); a sprite's bounds are transformed
+/// (`to_device_position_transformed`).
 pub(crate) fn visible_bounds(primitive: &Primitive) -> Bounds<ScaledPixels> {
     drawn_bounds(primitive).intersect(&primitive.content_mask().bounds)
 }
@@ -264,6 +264,9 @@ pub(crate) fn drawn_bounds(primitive: &Primitive) -> Bounds<ScaledPixels> {
         }
         Primitive::SubpixelSprite(sprite) => {
             transformed_bounds(sprite.bounds, &sprite.transformation)
+        }
+        Primitive::PolychromeSprite(sprite) => {
+            transformed_bounds(sprite.bounds, &sprite.fast_transformation)
         }
         primitive => *primitive.bounds(),
     }
@@ -353,6 +356,7 @@ pub(crate) fn move_primitive(primitive: &mut Primitive, delta: Point<ScaledPixel
         Primitive::PolychromeSprite(sprite) => {
             mv(&mut sprite.bounds);
             mv(&mut sprite.content_mask.bounds);
+            translate_transformation(&mut sprite.fast_transformation, delta);
         }
         Primitive::Surface(surface) => {
             mv(&mut surface.bounds);
