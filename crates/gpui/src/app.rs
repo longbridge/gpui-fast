@@ -1143,11 +1143,22 @@ impl App {
             }
         }));
 
+        let fast_power = crate::fast::misc::system_power::PowerNotifications::new(
+            platform.foreground_executor(),
+        );
         platform.on_system_sleep(Box::new({
             let app = Rc::downgrade(&app);
+            let fast_power = Rc::clone(&fast_power);
             move || {
                 if let Some(app) = app.upgrade() {
-                    let cx = &mut app.borrow_mut();
+                    let Some(cx) =
+                        &mut crate::fast::misc::system_power::PowerNotifications::borrow_for_sleep(
+                            &fast_power,
+                            &app,
+                        )
+                    else {
+                        return;
+                    };
                     cx.system_sleep_observers
                         .clone()
                         .retain(move |callback| (callback)(cx));
@@ -1159,7 +1170,14 @@ impl App {
             let app = Rc::downgrade(&app);
             move || {
                 if let Some(app) = app.upgrade() {
-                    let cx = &mut app.borrow_mut();
+                    let Some(cx) =
+                        &mut crate::fast::misc::system_power::PowerNotifications::borrow_for_wake(
+                            &fast_power,
+                            &app,
+                        )
+                    else {
+                        return;
+                    };
                     cx.system_wake_observers
                         .clone()
                         .retain(move |callback| (callback)(cx));
