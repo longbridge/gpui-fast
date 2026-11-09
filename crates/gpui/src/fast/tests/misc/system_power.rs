@@ -82,3 +82,33 @@ fn wake_on_a_free_app_still_follows_a_deferred_sleep(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(*events.borrow(), ["sleep", "wake"]);
 }
+
+#[crate::test]
+fn sleep_delivered_by_an_observer_waits_behind_the_arriving_wake(cx: &mut TestAppContext) {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let power = PowerNotifications::new(cx.foreground_executor().clone());
+    let app = Rc::downgrade(&cx.app);
+    cx.update(|cx| {
+        let sleeps = events.clone();
+        let power = power.clone();
+        cx.on_system_sleep(move |_| {
+            sleeps.borrow_mut().push("sleep");
+            if sleeps.borrow().len() == 1
+                && let Some(app) = app.upgrade()
+            {
+                sleep(&power, &app);
+            }
+        })
+        .detach();
+        let wakes = events.clone();
+        cx.on_system_wake(move |_| wakes.borrow_mut().push("wake"))
+            .detach();
+    });
+    {
+        let _held = cx.app.borrow_mut();
+        sleep(&power, &cx.app);
+    }
+    wake(&power, &cx.app);
+    cx.run_until_parked();
+    assert_eq!(*events.borrow(), ["sleep", "wake", "sleep"]);
+}

@@ -63,9 +63,13 @@ impl PowerNotifications {
         })
     }
 
-    /// Borrows the app for the caller to notify its observers, after
-    /// delivering every notification deferred before this one. When the app
-    /// is already borrowed, queues `notify` instead and returns `None`.
+    /// Borrows the app for the caller to notify its observers. Returns `None`
+    /// when this notification is handled here instead, so the caller must not
+    /// run its observers:
+    ///
+    /// - the app is already borrowed: `notify` is queued for a later turn;
+    /// - earlier notifications are still queued: `notify` joins the end of
+    ///   the queue and the whole queue is delivered now, in arrival order.
     fn borrow_for<'a>(
         this: &Rc<Self>,
         app: &'a Rc<AppCell>,
@@ -76,10 +80,17 @@ impl PowerNotifications {
             Self::schedule_retry(this, Rc::downgrade(app));
             return None;
         };
+        if this.pending.borrow().is_empty() {
+            return Some(cx);
+        }
+        this.pending.borrow_mut().push_back(notify);
         Self::deliver_pending(this, &mut cx);
-        Some(cx)
+        None
     }
 
+    /// Runs the queued notifications in order. One that an observer delivers
+    /// while this runs finds the app borrowed, joins the end of the queue and
+    /// is run by this same loop.
     fn deliver_pending(this: &Rc<Self>, cx: &mut App) {
         loop {
             let Some(notify) = this.pending.borrow_mut().pop_front() else {
