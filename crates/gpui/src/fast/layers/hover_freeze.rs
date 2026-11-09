@@ -18,6 +18,12 @@
 //! hover follows the pointer as before. A pointer that moves ends the freeze
 //! at once.
 //!
+//! A trackpad swipe holds the freeze until its fingers lift, however long they
+//! pause: a finger that stops sends nothing, and content that keeps moving on
+//! its own (an edge stretched past the end and springing back) would draw the
+//! frames after [`HOVER_FREEZE`] with the row under the pointer hovered, then
+//! hide it again at the next packet, so the row flickers.
+//!
 //! A listener that was hovered may not be painted again: a wheel can scroll its
 //! row out of a list while it hears nothing, and only painting asks it. So the
 //! listeners that last heard `true` are tracked, and the first frame drawn
@@ -27,7 +33,10 @@
 use scheduler::Instant;
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use crate::{App, Hitbox, HoverListenerMode, MouseDownEvent, Pixels, Point, Window};
+use crate::{
+    App, Hitbox, HoverListenerMode, MouseDownEvent, Pixels, Point, ScrollDelta, ScrollEvent,
+    TouchPhase, Window,
+};
 
 /// How long after the last wheel event hover stays held still.
 pub(crate) const HOVER_FREEZE: Duration = Duration::from_millis(100);
@@ -35,11 +44,46 @@ pub(crate) const HOVER_FREEZE: Duration = Duration::from_millis(100);
 /// When the window last got a wheel event, and where the pointer was.
 pub(crate) struct HoverFreeze {
     last_wheel: Option<(Instant, Point<Pixels>)>,
+    fingers: Fingers,
     /// Off in the crate's own tests, which scroll under a still pointer to
     /// test what hover does as rows move; see [`set_enabled`].
     enabled: bool,
     /// The hover listeners that last heard `true`.
     hovered: Vec<HoveredListener>,
+}
+
+/// Where the fingers of a trackpad swipe are, as its wheel events tell.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Fingers {
+    /// No swipe is under way: a wheel, momentum after a swipe, or nothing.
+    #[default]
+    Lifted,
+    /// Down on the trackpad, not yet moved.
+    Resting,
+    /// Down, and they have scrolled: the freeze holds until they lift.
+    Scrolling,
+}
+
+impl Fingers {
+    /// Where the fingers are after a wheel event in `phase` that moved by `delta`.
+    ///
+    /// The platform reports a touch as `Started` before it knows a swipe
+    /// follows, and a touch that lifts without moving as a `Moved` of
+    /// nothing, never `Ended`; momentum after a lift is `Moved` too. So only a
+    /// touch that moved holds the freeze, and nothing else does.
+    fn after(self, phase: TouchPhase, delta: ScrollDelta) -> Self {
+        let moved = match delta {
+            ScrollDelta::Pixels(delta) => delta.x != Pixels::ZERO || delta.y != Pixels::ZERO,
+            ScrollDelta::Lines(delta) => delta.x != 0. || delta.y != 0.,
+        };
+        match phase {
+            TouchPhase::Started if moved => Self::Scrolling,
+            TouchPhase::Started => Self::Resting,
+            TouchPhase::Moved if self == Self::Lifted || !moved => Self::Lifted,
+            TouchPhase::Moved => Self::Scrolling,
+            TouchPhase::Ended | TouchPhase::Cancelled => Self::Lifted,
+        }
+    }
 }
 
 /// A hover listener, with what it takes to tell it hover has ended without
@@ -152,6 +196,7 @@ impl Default for HoverFreeze {
     fn default() -> Self {
         Self {
             last_wheel: None,
+            fingers: Fingers::default(),
             enabled: !cfg!(test),
             hovered: Vec::new(),
         }
@@ -160,12 +205,13 @@ impl Default for HoverFreeze {
 
 /// Notes a wheel event at the pointer's position, and draws the window again
 /// once hover is no longer held still for it.
-pub(crate) fn note_wheel(window: &mut Window, cx: &mut App) {
+pub(crate) fn note_wheel(window: &mut Window, cx: &mut App, event: &ScrollEvent) {
     let freeze = &mut window.fast_layers.hover_freeze;
     if !freeze.enabled {
         return;
     }
     freeze.last_wheel = Some((Instant::now(), window.mouse_position));
+    freeze.fingers = freeze.fingers.after(event.touch_phase, event.delta);
     window
         .spawn(cx, async move |cx| {
             cx.background_executor()
@@ -182,15 +228,14 @@ pub(crate) fn note_wheel(window: &mut Window, cx: &mut App) {
 }
 
 /// Whether hover is held still: a wheel event came less than
-/// [`HOVER_FREEZE`] ago, and the pointer has not moved since.
+/// [`HOVER_FREEZE`] ago, or a swipe's fingers are still down, and the
+/// pointer has not moved since.
 pub(crate) fn frozen(window: &Window) -> bool {
-    window
-        .fast_layers
-        .hover_freeze
-        .last_wheel
-        .is_some_and(|(at, position)| {
-            at.elapsed() < HOVER_FREEZE && position == window.mouse_position
-        })
+    let freeze = &window.fast_layers.hover_freeze;
+    freeze.last_wheel.is_some_and(|(at, position)| {
+        (freeze.fingers == Fingers::Scrolling || at.elapsed() < HOVER_FREEZE)
+            && position == window.mouse_position
+    })
 }
 
 /// Whether hover reads as nothing for a hitbox the pointer has not captured,
@@ -218,6 +263,7 @@ impl Window {
     pub(crate) fn set_hover_freeze(&mut self, enabled: bool) {
         self.fast_layers.hover_freeze.enabled = enabled;
         self.fast_layers.hover_freeze.last_wheel = None;
+        self.fast_layers.hover_freeze.fingers = Fingers::default();
     }
 }
 
@@ -225,10 +271,117 @@ impl Window {
 impl HoverFreeze {
     pub(crate) fn end_for_test(&mut self) {
         self.last_wheel = None;
+        self.fingers = Fingers::default();
     }
 
     /// How many hover listeners are kept as hovered.
     pub(crate) fn hovered_listeners(&self) -> usize {
         self.hovered.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HOVER_FREEZE, frozen};
+    use crate::{
+        Context, IntoElement, MouseMoveEvent, PlatformInput, Render, ScrollDelta, ScrollEvent,
+        Styled as _, TestAppContext, TouchPhase, Window, WindowHandle, div, point, px,
+    };
+
+    struct Page;
+
+    impl Render for Page {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full()
+        }
+    }
+
+    fn open(cx: &mut TestAppContext) -> WindowHandle<Page> {
+        let window = cx.add_window(|_, _| Page);
+        window
+            .update(cx, |_, window, _| window.set_hover_freeze(true))
+            .unwrap();
+        window
+    }
+
+    fn wheel(cx: &mut TestAppContext, window: WindowHandle<Page>, phase: TouchPhase, dy: f32) {
+        window
+            .update(cx, |_, window, cx| {
+                window.dispatch_event(
+                    PlatformInput::Scroll(ScrollEvent {
+                        position: point(px(10.), px(10.)),
+                        delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+                        touch_phase: phase,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            })
+            .unwrap();
+    }
+
+    /// Whether hover is held still once longer than [`HOVER_FREEZE`] has
+    /// passed since the last wheel event, on a clock the test does not advance.
+    fn held_after_a_pause(cx: &mut TestAppContext, window: WindowHandle<Page>) -> bool {
+        window
+            .update(cx, |_, window, _| {
+                if let Some((at, _)) = &mut window.fast_layers.hover_freeze.last_wheel {
+                    *at = at.checked_sub(HOVER_FREEZE * 2).unwrap();
+                }
+                frozen(window)
+            })
+            .unwrap()
+    }
+
+    #[crate::test]
+    fn a_swipe_holds_hover_still_until_its_fingers_lift(cx: &mut TestAppContext) {
+        let window = open(cx);
+        wheel(cx, window, TouchPhase::Started, 0.);
+        wheel(cx, window, TouchPhase::Moved, -12.);
+        assert!(held_after_a_pause(cx, window), "fingers paused mid-swipe");
+        wheel(cx, window, TouchPhase::Moved, -8.);
+        assert!(held_after_a_pause(cx, window), "and again");
+
+        wheel(cx, window, TouchPhase::Ended, 0.);
+        assert!(window.update(cx, |_, window, _| frozen(window)).unwrap());
+        assert!(!held_after_a_pause(cx, window), "lifted");
+
+        // Momentum after the lift holds it no longer than a wheel does.
+        wheel(cx, window, TouchPhase::Moved, -20.);
+        assert!(!held_after_a_pause(cx, window), "momentum");
+    }
+
+    #[crate::test]
+    fn only_a_swipe_that_moved_holds_hover_still(cx: &mut TestAppContext) {
+        let window = open(cx);
+        // A touch that lifts without moving: `Started`, then a `Moved` of nothing.
+        wheel(cx, window, TouchPhase::Started, 0.);
+        assert!(!held_after_a_pause(cx, window), "resting");
+        wheel(cx, window, TouchPhase::Moved, 0.);
+        assert!(!held_after_a_pause(cx, window), "touched and lifted");
+
+        // A wheel sends no phase.
+        wheel(cx, window, TouchPhase::Moved, -40.);
+        assert!(!held_after_a_pause(cx, window), "wheel");
+    }
+
+    #[crate::test]
+    fn a_pointer_that_moves_ends_a_held_swipe(cx: &mut TestAppContext) {
+        let window = open(cx);
+        wheel(cx, window, TouchPhase::Started, 0.);
+        wheel(cx, window, TouchPhase::Moved, -12.);
+        window
+            .update(cx, |_, window, cx| {
+                window.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position: point(px(30.), px(30.)),
+                        pressed_button: None,
+                        modifiers: Default::default(),
+                    }),
+                    cx,
+                );
+            })
+            .unwrap();
+        assert!(!window.update(cx, |_, window, _| frozen(window)).unwrap());
     }
 }
