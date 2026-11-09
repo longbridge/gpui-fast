@@ -30,6 +30,7 @@ pub(crate) mod layout_bounds;
 pub(crate) mod layout_key;
 #[cfg(test)]
 mod line_break;
+pub(crate) mod list_measure;
 pub(crate) mod misc;
 pub(crate) mod number_shaping;
 pub(crate) mod path_cache;
