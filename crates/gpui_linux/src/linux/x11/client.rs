@@ -1061,6 +1061,8 @@ impl X11Client {
                     .context("X11: Failed to handle property notify")
                     .log_err();
             }
+            Event::FocusIn(event) | Event::FocusOut(event)
+                if crate::fast::x11_focus::is_inferior(event.detail) => {}
             Event::FocusIn(event) => {
                 let window = self.get_window(event.event)?;
                 window.set_active(true);
