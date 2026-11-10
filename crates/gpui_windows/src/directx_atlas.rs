@@ -51,6 +51,11 @@ impl DirectXAtlas {
         &self,
         id: AtlasTextureId,
     ) -> Option<[Option<ID3D11ShaderResourceView>; 1]> {
+        // Dynamic textures never live in the atlas: their ids only name a
+        // texture the core's dynamic texture backend allocated.
+        if let Some(view) = crate::fast::dynamic_textures::view(id) {
+            return Some(view);
+        }
         let lock = self.0.lock();
         let texture = lock.backend.texture(id)?;
         Some(texture.view.clone())
@@ -61,6 +66,7 @@ impl DirectXAtlas {
         device: &ID3D11Device,
         device_context: &ID3D11DeviceContext,
     ) {
+        crate::fast::dynamic_textures::handle_device_lost(device, device_context);
         let mut lock = self.0.lock();
         lock.clear(|textures| {
             textures.device = device.clone();
