@@ -17,7 +17,6 @@ use calloop::{
     ping::Ping,
     timer::{TimeoutAction, Timer},
 };
-use calloop_wayland_source::WaylandSource;
 use collections::HashMap;
 use filedescriptor::Pipe;
 use gpui_util::ResultExt as _;
@@ -1216,10 +1215,7 @@ impl WaylandConnection {
             .log_err();
 
         client.register_source(
-            handle.insert_source(WaylandSource::new(conn, event_queue), {
-                let mut client = pointer;
-                move |_, queue, _| queue.dispatch_pending(&mut client)
-            }),
+            crate::fast::wayland_connection::insert_source(&handle, conn, event_queue, pointer),
             "failed to register Wayland connection source",
         )?;
 
