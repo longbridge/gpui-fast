@@ -558,7 +558,7 @@ const NS_APPLICATION_PRESENTATION_AUTO_HIDE_MENU_BAR: NSUInteger = 1 << 2;
 
 // State captured when entering simple (borderless) fullscreen, used to restore
 // the window on exit.
-struct SimpleFullscreenState {
+pub(crate) struct SimpleFullscreenState {
     frame: NSRect,
     bounds: Bounds<Pixels>,
     style_mask: NSWindowStyleMask,
@@ -653,7 +653,7 @@ pub(crate) struct MacWindowState {
     handle: AnyWindowHandle,
     foreground_executor: ForegroundExecutor,
     background_executor: BackgroundExecutor,
-    native_window: *mut AnyObject,
+    pub(crate) native_window: *mut AnyObject,
     pub(crate) native_view: NonNull<AnyObject>,
     pub(crate) fast_composition: crate::fast::composition::MacComposition,
     blurred_view: Option<*mut AnyObject>,
@@ -696,7 +696,7 @@ pub(crate) struct MacWindowState {
     app_owns_titlebar_drag: bool,
     fullscreen_restore_bounds: Bounds<Pixels>,
     is_exiting_fullscreen: bool,
-    simple_fullscreen_state: Option<SimpleFullscreenState>,
+    pub(crate) simple_fullscreen_state: Option<SimpleFullscreenState>,
     move_tab_to_new_window_callback: Option<Box<dyn FnMut()>>,
     merge_all_windows_callback: Option<Box<dyn FnMut()>>,
     select_next_tab_callback: Option<Box<dyn FnMut()>>,
@@ -2283,17 +2283,7 @@ impl PlatformWindow for MacWindow {
     }
 
     fn start_window_move(&self) {
-        let this = self.0.lock();
-        if this.simple_fullscreen_state.is_some() {
-            return;
-        }
-        let window = this.native_window;
-
-        unsafe {
-            let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-            let event: *mut AnyObject = msg_send![app, currentEvent];
-            let _: () = msg_send![window, performWindowDragWithEvent: event];
-        }
+        crate::fast::composition::start_window_move(&self.0);
     }
 
     fn can_start_external_drag(&self) -> bool {
@@ -2399,6 +2389,7 @@ impl PlatformWindow for MacWindow {
                 return false;
             }
 
+            crate::fast::composition::clear_pointer_capture(&self.0);
             let session: *mut AnyObject = msg_send![
                 native_view,
                 beginDraggingSessionWithItems: dragging_items,
@@ -3273,6 +3264,7 @@ extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *
 
     let executor = lock.foreground_executor.clone();
     drop(lock);
+    crate::fast::composition::window_activation_changed(&window_state, is_active);
 
     let a11y_events = {
         let mut lock = window_state.lock();
