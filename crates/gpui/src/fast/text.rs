@@ -2,6 +2,7 @@
 //! carried from one frame to the next, and shaping statistics.
 
 use crate::fast::layout::Adopted;
+use crate::fast::truncation::{self, Room};
 use crate::{
     App, AvailableSpace, Bounds, DecorationRun, FontRun, FrameCache, Hsla, LayoutId, LineLayout,
     LineLayoutCache, LineLayoutIndex, Pixels, PlatformTextSystem, SharedString, Size,
@@ -441,13 +442,27 @@ fn measure_text(
         if let Some(max_lines) = text_style.line_clamp
             && let Some(wrap_width) = wrap_width
         {
-            line_wrapper.truncate_wrapped_line(
+            let truncated = line_wrapper.truncate_wrapped_line(
                 text.clone(),
                 wrap_width,
                 max_lines,
                 &truncation_affix,
                 runs,
                 truncate_from,
+            );
+            let room = Room::Lines {
+                wrap_width,
+                max_lines: max_lines.max(1),
+            };
+            truncation::fit(
+                text,
+                runs,
+                truncated,
+                &truncation_affix,
+                truncate_from,
+                room,
+                font_size,
+                window,
             )
         } else if let Some(unclipped) = window
             .text_system()
@@ -457,16 +472,28 @@ fn measure_text(
                 .iter()
                 .all(|line| line.size(line_height).width <= truncate_width)
         {
-            // Truncation sums per-character advances, which overestimates the
-            // shaped width, so text that fits once shaped is not truncated.
+            // Truncation sums per-character advances, which can be more than
+            // the shaped width, so text that fits once shaped is not truncated.
             (text.clone(), Cow::Borrowed(runs))
         } else {
-            line_wrapper.truncate_line(
+            // The sum can also be less than the shaped width, so what it cuts
+            // is fitted to the shaped width.
+            let truncated = line_wrapper.truncate_line(
                 text.clone(),
                 truncate_width,
                 &truncation_affix,
                 runs,
                 truncate_from,
+            );
+            truncation::fit(
+                text,
+                runs,
+                truncated,
+                &truncation_affix,
+                truncate_from,
+                Room::Line(truncate_width),
+                font_size,
+                window,
             )
         }
     } else {

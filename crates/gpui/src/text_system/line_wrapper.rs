@@ -584,7 +584,7 @@ fn width_for_char(
     }
 }
 
-fn update_runs_after_truncation(
+pub(crate) fn update_runs_after_truncation(
     result: &str,
     ellipsis: &str,
     runs: &mut Vec<TextRun>,
@@ -620,7 +620,7 @@ fn update_runs_after_truncation(
     }
 }
 
-fn update_runs_after_middle_truncation(
+pub(crate) fn update_runs_after_middle_truncation(
     ellipsis: &str,
     runs: &mut Vec<TextRun>,
     front_end_ix: usize,

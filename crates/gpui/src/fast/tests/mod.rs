@@ -28,4 +28,5 @@ mod tab_stops;
 mod text;
 mod text_shaping;
 mod tracked_entities;
+mod truncation;
 mod wheel_notifies;
