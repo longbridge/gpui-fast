@@ -17,6 +17,16 @@ impl PointerCapture {
         self.owner
     }
 
+    /// Reconcile before snapshotting the owner or recording a down: a repeated
+    /// tracked button proves a lost up, invalidating the whole claim.
+    /// Avoid live NSEvent.pressedMouseButtons: queued right-down then left-up can
+    /// make live state invalidate a genuine chord before left-up is dispatched.
+    pub(super) fn reconcile_down(&mut self, down_button: u64) {
+        if self.buttons & down_button != 0 {
+            self.clear();
+        }
+    }
+
     /// GPUI keeps its chord, including a down consumed in capture. Native downs
     /// retain the existing policy: the latest accepted native target owns drag/up.
     /// A missing target cannot steal a native claim (including a forwarder's
@@ -107,26 +117,28 @@ mod tests {
 
     #[test]
     fn gpui_chord_delivers_without_appkit_tracking_until_final_release() {
-        for releases in [[0, 1, 2, 4], [4, 2, 1, 0]] {
+        for releases in [[1, 0], [0, 1]] {
             let mut capture = PointerCapture::default();
             // Also represents a down consumed over native content: no AppKit
             // delivery or implicit mouse-down recipient is needed by this seam.
             capture.press(1, None);
             capture.release(1 << 3);
             assert_eq!(capture.owner(), Some(PointerOwner::Gpui));
+            // Covers both a left-held right-down/up chord and queued right-down
+            // then left-up, regardless of physical state at dispatch time.
             for (phase, button) in [
                 (PointerPhase::Drag, 1),
                 (PointerPhase::Down, 1 << 1),
-                (PointerPhase::Down, 1 << 2),
-                (PointerPhase::Down, 1 << 4),
-                (PointerPhase::Drag, 1 << 4),
+                (PointerPhase::Drag, 1 << 1),
                 (PointerPhase::Up, 1 << releases[0]),
                 (PointerPhase::Up, 1 << releases[1]),
-                (PointerPhase::Up, 1 << releases[2]),
-                (PointerPhase::Up, 1 << releases[3]),
             ] {
+                if phase == PointerPhase::Down {
+                    capture.reconcile_down(button);
+                }
                 // The final up still uses the owner snapshotted before release.
                 let owner = capture.owner();
+                assert_eq!(owner, Some(PointerOwner::Gpui));
                 if phase == PointerPhase::Down {
                     capture.press(button, None);
                 } else if phase == PointerPhase::Up {
@@ -152,6 +164,8 @@ mod tests {
     fn native_additional_down_reselects_recipient_without_tracking_gpui_buttons() {
         let mut capture = PointerCapture::default();
         capture.press(1, Some(1));
+        capture.reconcile_down(1 << 1);
+        assert_eq!(capture.owner(), Some(PointerOwner::Native(1)));
         assert_eq!(
             route_pointer_event(
                 capture.owner(),
@@ -163,6 +177,7 @@ mod tests {
         );
         capture.press(1 << 1, Some(2));
         assert_eq!(capture.owner(), Some(PointerOwner::Native(2)));
+        capture.reconcile_down(1 << 2);
         capture.press(1 << 2, None);
         capture.release(1 << 1);
         assert_eq!(capture.owner(), Some(PointerOwner::Native(2)));
@@ -210,6 +225,38 @@ mod tests {
         assert_eq!(capture.owner(), Some(PointerOwner::Native(1)));
         capture.release(1);
         assert_eq!(capture.owner(), None);
+    }
+
+    #[test]
+    fn repeated_down_clears_stale_capture_before_fresh_hit_testing() {
+        for native in [None, Some(1)] {
+            for target in [None, Some(2)] {
+                for (button, other) in [(1, 0), (1 << 1, 1), (1 << 63, 1)] {
+                    let mut capture = PointerCapture::default();
+                    capture.press(button, native);
+                    capture.press(other, native);
+                    // A second down for the same button proves its up was lost.
+                    capture.reconcile_down(button);
+                    assert_eq!(capture.owner(), None);
+                    assert_eq!(
+                        route_pointer_event(
+                            capture.owner(),
+                            PointerPhase::Down,
+                            || panic!("a repeated down must not retain stale GPUI capture"),
+                            || target,
+                        ),
+                        PointerRoute::AppKit(target)
+                    );
+                    capture.press(button, target);
+                    assert_eq!(
+                        capture.owner(),
+                        Some(target.map_or(PointerOwner::Gpui, PointerOwner::Native))
+                    );
+                    capture.release(button);
+                    assert_eq!(capture.owner(), None);
+                }
+            }
+        }
     }
 
     #[test]

@@ -251,9 +251,19 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
     } else {
         0
     };
+    let up = matches!(
+        kind,
+        NSEventType::LeftMouseUp | NSEventType::RightMouseUp | NSEventType::OtherMouseUp
+    );
     let state = unsafe { get_window_state(this) };
     let (root, native_views, captured, has_forwarders) = {
-        let state = state.lock();
+        let mut state = state.lock();
+        if observe && !up {
+            state
+                .fast_composition
+                .pointer_capture
+                .reconcile_down(button);
+        }
         (
             state.native_view,
             state.fast_composition.native_views.clone(),
@@ -267,10 +277,6 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
         }
         return;
     }
-    let up = matches!(
-        kind,
-        NSEventType::LeftMouseUp | NSEventType::RightMouseUp | NSEventType::OtherMouseUp
-    );
     // A press on the window's own chrome (the resize border, the titlebar
     // buttons) belongs to AppKit, as in a window without composition.
     // `root.hitTest` below cannot see the frame view, so a resize grabbed where
@@ -306,6 +312,9 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
             .pointer_capture
             .press(button, None);
     }
+    // Captured GPUI secondary downs intentionally bypass AppKit's menuForEvent:
+    // path, just as GPUIView's rightMouseDown: dispatches handle_view_event
+    // directly. GPUI owns context-menu handling, not the native view underneath.
     let native = match route_pointer_event(
         captured,
         phase,
@@ -437,10 +446,31 @@ unsafe fn native_for_target(mut view: Id, native: &[usize]) -> Option<usize> {
     None
 }
 
+/// AppKit may consume releases during deactivation or a native tracking loop.
+/// Relinquish both GPUI and native ownership before handing a gesture to AppKit.
+pub(crate) fn clear_pointer_capture(state: &Rc<Mutex<MacWindowState>>) {
+    state.lock().fast_composition.pointer_capture.clear();
+}
+
 pub(crate) fn window_activation_changed(state: &Rc<Mutex<MacWindowState>>, active: bool) {
     if !active {
-        // AppKit may consume the release while the app/window is inactive.
-        state.lock().fast_composition.pointer_capture.clear();
+        clear_pointer_capture(state);
+    }
+}
+
+pub(crate) fn start_window_move(state: &Rc<Mutex<MacWindowState>>) {
+    let window = {
+        let state = state.lock();
+        if state.simple_fullscreen_state.is_some() {
+            return;
+        }
+        state.native_window
+    };
+    clear_pointer_capture(state);
+    unsafe {
+        let app: Id = msg_send![class!(NSApplication), sharedApplication];
+        let event: Id = msg_send![app, currentEvent];
+        let _: () = msg_send![window, performWindowDragWithEvent: event];
     }
 }
 
