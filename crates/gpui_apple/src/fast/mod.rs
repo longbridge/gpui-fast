@@ -19,3 +19,5 @@ pub(crate) mod paths;
 pub(crate) mod rounded_clip;
 #[cfg(feature = "font-kit")]
 pub(crate) mod text_system;
+#[cfg(all(test, feature = "font-kit"))]
+mod truncation_tests;

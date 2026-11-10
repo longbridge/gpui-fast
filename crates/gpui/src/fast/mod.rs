@@ -43,6 +43,7 @@ pub(crate) mod stats;
 pub(crate) mod text;
 pub(crate) mod text_style;
 pub(crate) mod tracked_entities;
+pub(crate) mod truncation;
 
 #[cfg(test)]
 mod tests;
