@@ -3273,6 +3273,7 @@ extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *
 
     let executor = lock.foreground_executor.clone();
     drop(lock);
+    crate::fast::composition::window_activation_changed(&window_state, is_active);
 
     let a11y_events = {
         let mut lock = window_state.lock();

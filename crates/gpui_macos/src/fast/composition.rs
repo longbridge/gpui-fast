@@ -37,6 +37,11 @@ use objc2_app_kit::{NSAutoresizingMaskOptions, NSEventType, NSViewLayerContentsR
 use objc2_foundation::{NSInteger, NSPoint, NSRect, NSSize};
 use parking_lot::Mutex;
 
+#[path = "composition_capture.rs"]
+mod capture;
+
+use capture::{PointerCapture, PointerOwner, PointerPhase, PointerRoute, route_pointer_event};
+
 use crate::{
     renderer,
     window::{
@@ -72,8 +77,7 @@ pub(crate) struct MacComposition {
     native_views: Rc<Vec<usize>>,
     input_order: Rc<Vec<InputLayer>>,
     native_event: usize,
-    native_buttons: u64,
-    native_owner: Option<usize>,
+    pointer_capture: PointerCapture,
     input_forwarders: FxHashSet<usize>,
     event_result: gpui::DispatchEventResult,
     forwarding_scroll: bool,
@@ -89,8 +93,7 @@ impl MacComposition {
             native_views: Rc::new(Vec::new()),
             input_order: Rc::new(Vec::new()),
             native_event: 0,
-            native_buttons: 0,
-            native_owner: None,
+            pointer_capture: PointerCapture::default(),
             input_forwarders: FxHashSet::default(),
             event_result: gpui::DispatchEventResult {
                 propagate: true,
@@ -242,13 +245,19 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
         }
         return;
     }
+    let button = if observe {
+        let number: NSInteger = unsafe { msg_send![event, buttonNumber] };
+        1u64.checked_shl(number as u32).unwrap_or(0)
+    } else {
+        0
+    };
     let state = unsafe { get_window_state(this) };
     let (root, native_views, captured, has_forwarders) = {
         let state = state.lock();
         (
             state.native_view,
             state.fast_composition.native_views.clone(),
-            state.fast_composition.native_owner,
+            state.fast_composition.pointer_capture.owner(),
             !state.fast_composition.input_forwarders.is_empty(),
         )
     };
@@ -277,29 +286,40 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
         }
         return;
     }
-    let button = if observe {
-        let number: NSInteger = unsafe { msg_send![event, buttonNumber] };
-        1u64.checked_shl(number as u32).unwrap_or(0)
-    } else {
-        0
-    };
     if up {
         let mut state = state.lock();
-        state.fast_composition.native_buttons &= !button;
-        if state.fast_composition.native_buttons == 0 {
-            state.fast_composition.native_owner = None;
-        }
+        state.fast_composition.pointer_capture.release(button);
     }
-    let native = if captured.is_some() && (dragged || up) {
-        captured
+    let phase = if up {
+        PointerPhase::Up
+    } else if observe {
+        PointerPhase::Down
+    } else if dragged {
+        PointerPhase::Drag
     } else {
-        unsafe {
+        PointerPhase::Other
+    };
+    if captured == Some(PointerOwner::Gpui) && phase == PointerPhase::Down {
+        state
+            .lock()
+            .fast_composition
+            .pointer_capture
+            .press(button, None);
+    }
+    let native = match route_pointer_event(
+        captured,
+        phase,
+        || handle_view_event(unsafe { root.as_ref() }, sel!(sendEvent:), event),
+        || unsafe {
             let parent: Id = msg_send![root.as_ptr(), superview];
             let location: NSPoint = msg_send![event, locationInWindow];
             let point: NSPoint = msg_send![parent, convertPoint: location, fromView: NIL];
             let target: Id = msg_send![root.as_ptr(), hitTest: point];
             native_for_target(target, &native_views)
-        }
+        },
+    ) {
+        PointerRoute::Delivered => return,
+        PointerRoute::AppKit(native) => native,
     };
     let forward =
         native.is_some_and(|id| state.lock().fast_composition.input_forwarders.contains(&id));
@@ -308,8 +328,7 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
     // a popup and withheld the down event from the producer.
     if forward && observe && !up {
         let mut state = state.lock();
-        state.fast_composition.native_buttons |= button;
-        state.fast_composition.native_owner = native;
+        state.fast_composition.pointer_capture.press(button, native);
     }
     if native.is_some() && (observe || forward) {
         state.lock().fast_composition.event_result = gpui::DispatchEventResult {
@@ -337,10 +356,23 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
         if forward
             || (!(captured.is_some() && up) && (!result.propagate || result.default_prevented))
         {
+            if observe && !up && !forward && captured.is_none() {
+                // A consumed capture-phase down belongs to GPUI, not the view
+                // underneath the popup that capture may just have dismissed.
+                let mut state = state.lock();
+                state.fast_composition.pointer_capture.press(button, None);
+            }
             return;
         }
     }
     if native.is_none() {
+        if observe && !up && captured.is_none() {
+            state
+                .lock()
+                .fast_composition
+                .pointer_capture
+                .press(button, None);
+        }
         unsafe {
             let _: () = msg_send![super(this, superclass), sendEvent: event];
         }
@@ -349,8 +381,7 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
     let previous = {
         let mut state = state.lock();
         if observe && !up {
-            state.fast_composition.native_buttons |= button;
-            state.fast_composition.native_owner = native;
+            state.fast_composition.pointer_capture.press(button, native);
         }
         let previous = state.fast_composition.native_event;
         state.fast_composition.native_event = event as usize;
@@ -404,6 +435,13 @@ unsafe fn native_for_target(mut view: Id, native: &[usize]) -> Option<usize> {
         view = unsafe { msg_send![view, superview] };
     }
     None
+}
+
+pub(crate) fn window_activation_changed(state: &Rc<Mutex<MacWindowState>>, active: bool) {
+    if !active {
+        // AppKit may consume the release while the app/window is inactive.
+        state.lock().fast_composition.pointer_capture.clear();
+    }
 }
 
 pub(crate) fn native_event_observed(state: &MacWindowState, event: Id) -> bool {
@@ -763,8 +801,7 @@ pub(crate) fn set_composition_order(
                     .collect(),
             );
             if lock.fast_composition.native_views.is_empty() {
-                lock.fast_composition.native_buttons = 0;
-                lock.fast_composition.native_owner = None;
+                lock.fast_composition.pointer_capture.clear();
             }
             lock.fast_composition.view_order = view_order;
         }
