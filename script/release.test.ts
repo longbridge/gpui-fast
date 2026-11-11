@@ -60,6 +60,18 @@ test("release dependencies retain inherited features and pin support snapshots",
   });
 });
 
+test("release dependencies relax upstream's exact registry pins", () => {
+  const workspace = { dependencies: { taffy: { version: "=0.15.0", "default-features": false }, cocoa: "=0.26.0" } };
+  expect(dependency("taffy", { workspace: true }, workspace, config, "0.1.5")).toEqual({
+    version: "0.15.0", "default-features": false,
+  });
+  expect(dependency("cocoa", { workspace: true }, workspace, config, "0.1.5")).toEqual({ version: "0.26.0" });
+  expect(dependency("unicode-properties", "=0.1.3", {}, config, "0.1.5")).toBe("0.1.3");
+  expect(dependency("subsecond", { version: "=0.7.10", optional: true }, {}, config, "0.1.5")).toEqual({
+    version: "0.7.10", optional: true,
+  });
+});
+
 test("release dependencies replace wgpu's Git revision with its registry release", () => {
   const workspace = { dependencies: { wgpu: {
     git: "https://github.com/gfx-rs/wgpu", rev: "3b3506ea31154edc04de64debda0e780cba2639c",

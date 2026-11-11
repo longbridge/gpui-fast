@@ -21,8 +21,14 @@ function snapshotName(name: string): string {
   return "gpui-pre-" + name.replace(/^gpui_/, "").replaceAll("_", "-");
 }
 
+// Upstream pins some registry crates exactly. gpui-pre publishes them as caret
+// requirements, so ours must match or both cores cannot share one lockfile.
+function compatible(requirement: string): string {
+  return requirement.replace(/^=\s*/, "");
+}
+
 export function dependency(key: string, input: any, workspace: Manifest, config: ReleaseConfig, version: string): any {
-  if (typeof input === "string") return input;
+  if (typeof input === "string") return compatible(input);
   let value = structuredClone(input);
   if (value.workspace) {
     delete value.workspace;
@@ -33,6 +39,7 @@ export function dependency(key: string, input: any, workspace: Manifest, config:
     value = { ...inherited, ...value };
     if (features.length) value.features = features;
   }
+  if (typeof value.version === "string") value.version = compatible(value.version);
   if ("path" in value) {
     delete value.path;
     Object.assign(value, config.crates.includes(key)
