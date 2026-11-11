@@ -22,7 +22,11 @@ impl FrameDemand {
             Rc::new(move || {
                 if let Some(frames) = frames.upgrade() {
                     frames.wake();
-                    if frames.is_attached() {
+                    let attached = frames
+                        .source
+                        .try_borrow()
+                        .is_ok_and(|source| source.is_some());
+                    if attached {
                         // Unpausing alone can leave an idle compositor without
                         // native damage, so no Metal callback arrives to draw.
                         // SAFETY: the caller keeps the view live while attached;
@@ -44,5 +48,24 @@ impl FrameDemand {
 
     pub(crate) fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
         self.waker.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{ptr, rc::Rc};
+
+    use crate::display_link::MetalFrames;
+
+    use super::FrameDemand;
+
+    #[test]
+    fn borrowed_source_does_not_reenter_or_touch_the_view() {
+        let frames = Rc::new(MetalFrames::default());
+        // No source is attached, so the native view is never used.
+        let demand = unsafe { FrameDemand::new(Some(&frames), ptr::null_mut()) };
+        let replacing = frames.source.borrow_mut();
+        demand.frame_waker().unwrap()();
+        assert!(replacing.is_none());
     }
 }
