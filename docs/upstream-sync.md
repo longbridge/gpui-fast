@@ -79,7 +79,7 @@ only hold the hooks that call into it.
    The addition is one accessor returning a clone of the `Rc` it already
    holds, and nothing else about the web platform becomes public.
    A third exception is `CursorStyle::Hidden` (in `crates/gpui/src/platform.rs`,
-   longbridge/gpui-fast#…): an application that paints the pointer itself — a
+   longbridge/gpui-fast#134): an application that paints the pointer itself — a
    remote desktop client draws the remote machine's cursor inside its frames —
    needs the native pointer gone while that is on screen, and upstream offers
    nothing of the kind: `hide_cursor_until_mouse_moves` re-shows on any mouse
