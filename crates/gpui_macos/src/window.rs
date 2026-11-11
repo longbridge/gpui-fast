@@ -2593,6 +2593,7 @@ extern "C" fn reset_cursor_rects(this: &AnyObject, _: Sel) {
         let cursor_style = window_state.lock().cursor_style;
 
         let cursor: *mut AnyObject = match cursor_style {
+            CursorStyle::Hidden => crate::fast::cursor::hidden_cursor(),
             CursorStyle::Arrow => msg_send![class!(NSCursor), arrowCursor],
             CursorStyle::IBeam => msg_send![class!(NSCursor), IBeamCursor],
             CursorStyle::Crosshair => msg_send![class!(NSCursor), crosshairCursor],

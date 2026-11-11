@@ -17,6 +17,9 @@ use gpui::CursorStyle;
 
 pub(super) fn to_shape(style: CursorStyle) -> Shape {
     match style {
+        // No `fast` cursor module answers `Hidden` on this platform yet, and
+        // wp_cursor_shape has no "none" shape, so the default one is drawn.
+        CursorStyle::Hidden => Shape::Default,
         CursorStyle::Arrow => Shape::Default,
         CursorStyle::IBeam => Shape::Text,
         CursorStyle::Crosshair => Shape::Crosshair,

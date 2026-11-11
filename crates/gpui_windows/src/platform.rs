@@ -52,7 +52,7 @@ impl TrackedWindow {
 }
 
 pub struct WindowsPlatform {
-    inner: Rc<WindowsPlatformInner>,
+    pub(crate) inner: Rc<WindowsPlatformInner>,
     raw_window_handles: Arc<RwLock<SmallVec<[TrackedWindow; 4]>>>,
     /// The windowing mode to start in, applied when `run` starts. Windowed when unset.
     initial_windowing: RefCell<Option<WindowingRequest>>,
@@ -78,11 +78,11 @@ pub struct WindowsPlatform {
     system_notifications: RefCell<SystemNotificationState>,
 }
 
-struct WindowsPlatformInner {
-    state: WindowsPlatformState,
+pub(crate) struct WindowsPlatformInner {
+    pub(crate) state: WindowsPlatformState,
     raw_window_handles: std::sync::Weak<RwLock<SmallVec<[TrackedWindow; 4]>>>,
     // The below members will never change throughout the entire lifecycle of the app.
-    validation_number: usize,
+    pub(crate) validation_number: usize,
     main_receiver: PriorityQueueReceiver<RunnableVariant>,
     dispatcher: Arc<WindowsDispatcher>,
 }
@@ -295,7 +295,7 @@ impl WindowsPlatform {
     }
 
     #[inline]
-    fn post_message(&self, message: u32, wparam: WPARAM, lparam: LPARAM) {
+    pub(crate) fn post_message(&self, message: u32, wparam: WPARAM, lparam: LPARAM) {
         self.raw_window_handles
             .read()
             .iter()
@@ -1005,6 +1005,9 @@ impl Platform for WindowsPlatform {
     }
 
     fn set_cursor_style(&self, style: CursorStyle) {
+        if crate::fast::cursor::set_style(self, style) {
+            return;
+        }
         let hcursor = load_cursor(style);
         if self.inner.state.current_cursor.get().map(|c| c.0) != hcursor.map(|c| c.0) {
             self.post_message(
