@@ -14,6 +14,8 @@
 //! `DWMSBT_AUTO`, the default. That also removes a Mica backdrop the window
 //! had before, which upstream leaves in place.
 
+use std::sync::OnceLock;
+
 use windows::Win32::{
     Foundation::HWND,
     Graphics::Dwm::{
@@ -55,12 +57,19 @@ fn set_system_backdrop(hwnd: HWND, backdrop: DWM_SYSTEMBACKDROP_TYPE) {
         )
     };
     if let Err(error) = result {
-        log::warn!("Setting the system backdrop to {} failed: {error}", backdrop.0);
+        log::warn!(
+            "Setting the system backdrop to {} failed: {error}",
+            backdrop.0
+        );
     }
 }
 
+/// Whether this Windows has `DWMWA_SYSTEMBACKDROP_TYPE`, asked once per process.
 fn has_system_backdrop() -> bool {
-    let mut version = unsafe { std::mem::zeroed() };
-    let status = unsafe { windows::Wdk::System::SystemServices::RtlGetVersion(&mut version) };
-    status.is_ok() && version.dwBuildNumber >= SYSTEM_BACKDROP_BUILD
+    static HAS: OnceLock<bool> = OnceLock::new();
+    *HAS.get_or_init(|| {
+        let mut version = unsafe { std::mem::zeroed() };
+        let status = unsafe { windows::Wdk::System::SystemServices::RtlGetVersion(&mut version) };
+        status.is_ok() && version.dwBuildNumber >= SYSTEM_BACKDROP_BUILD
+    })
 }
