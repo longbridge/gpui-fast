@@ -182,10 +182,10 @@ pub(crate) struct MacPlatformState {
     on_system_wake: Option<Box<dyn FnMut()>>,
     system_power_observers_registered: bool,
     quit: Option<Box<dyn FnMut() -> bool>>,
-    menu_command: Option<Box<dyn FnMut(&dyn Action)>>,
-    validate_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
-    will_open_menu: Option<Box<dyn FnMut()>>,
-    menu_actions: Vec<Box<dyn Action>>,
+    pub(crate) menu_command: Option<Box<dyn FnMut(&dyn Action)>>,
+    pub(crate) validate_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
+    pub(crate) will_open_menu: Option<Box<dyn FnMut()>>,
+    pub(crate) menu_actions: Vec<Box<dyn Action>>,
     open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
     finish_launching: Option<Box<dyn FnOnce()>>,
     dock_menu: Option<Retained<NSMenu>>,
@@ -1511,63 +1511,15 @@ extern "C-unwind" fn open_urls(this: &AnyObject, _: Sel, _: *mut AnyObject, urls
 }
 
 extern "C-unwind" fn handle_menu_item(this: &AnyObject, _: Sel, item: *mut AnyObject) {
-    unsafe {
-        let platform = get_mac_platform(this);
-        let mut lock = platform.0.lock();
-        if let Some(mut callback) = lock.menu_command.take() {
-            let tag: NSInteger = if item.is_null() {
-                0
-            } else {
-                msg_send![item, tag]
-            };
-            let index = tag as usize;
-            if let Some(action) = lock.menu_actions.get(index) {
-                let action = action.boxed_clone();
-                drop(lock);
-                callback(&*action);
-            }
-            platform.0.lock().menu_command.get_or_insert(callback);
-        }
-    }
+    unsafe { crate::fast::menu::handle_menu_item(&get_mac_platform(this).0, item) }
 }
 
 extern "C-unwind" fn validate_menu_item(this: &AnyObject, _: Sel, item: *mut AnyObject) -> Bool {
-    unsafe {
-        let mut result = false;
-        let platform = get_mac_platform(this);
-        let mut lock = platform.0.lock();
-        if let Some(mut callback) = lock.validate_menu_command.take() {
-            let tag: NSInteger = if item.is_null() {
-                0
-            } else {
-                msg_send![item, tag]
-            };
-            let index = tag as usize;
-            if let Some(action) = lock.menu_actions.get(index) {
-                let action = action.boxed_clone();
-                drop(lock);
-                result = callback(action.as_ref());
-            }
-            platform
-                .0
-                .lock()
-                .validate_menu_command
-                .get_or_insert(callback);
-        }
-        result.to_objc()
-    }
+    unsafe { crate::fast::menu::validate_menu_item(&get_mac_platform(this).0, item).to_objc() }
 }
 
 extern "C-unwind" fn menu_will_open(this: &AnyObject, _: Sel, _: *mut AnyObject) {
-    unsafe {
-        let platform = get_mac_platform(this);
-        let mut lock = platform.0.lock();
-        if let Some(mut callback) = lock.will_open_menu.take() {
-            drop(lock);
-            callback();
-            platform.0.lock().will_open_menu.get_or_insert(callback);
-        }
-    }
+    unsafe { crate::fast::menu::menu_will_open(&get_mac_platform(this).0) }
 }
 
 extern "C-unwind" fn handle_dock_menu(
