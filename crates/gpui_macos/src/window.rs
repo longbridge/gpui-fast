@@ -979,9 +979,7 @@ impl MacWindowState {
 pub(crate) struct MacWindow(
     Rc<Mutex<MacWindowState>>,
     MainThreadMarker,
-    /// The Metal link's frame waker, kept outside the lock so waking never
-    /// waits on it. `None` when a `CVDisplayLink` paces frames.
-    Option<Rc<MetalFrames>>,
+    crate::fast::frame_demand::FrameDemand,
 );
 
 impl MacWindow {
@@ -1173,7 +1171,11 @@ impl MacWindow {
                 accesskit_adapter: None,
                 sheet_parent: None,
             }));
-            let mut window = Self(state, marker, metal_frames);
+            let mut window = Self(
+                state,
+                marker,
+                crate::fast::frame_demand::FrameDemand::new(metal_frames.as_ref(), native_view),
+            );
 
             (*native_window)
                 .class()
@@ -2177,18 +2179,11 @@ impl PlatformWindow for MacWindow {
     // GPUI calls this without waking the frame waker when a window only needs
     // a present, so a paused Metal link must resume here too.
     fn schedule_frame(&self) {
-        if let Some(metal_frames) = &self.2 {
-            metal_frames.wake();
-        }
+        crate::fast::frame_demand::FrameDemand::schedule_frame(&self.2);
     }
 
     fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
-        let metal_frames = Rc::downgrade(self.2.as_ref()?);
-        Some(Rc::new(move || {
-            if let Some(metal_frames) = metal_frames.upgrade() {
-                metal_frames.wake();
-            }
-        }))
+        crate::fast::frame_demand::FrameDemand::frame_waker(&self.2)
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
