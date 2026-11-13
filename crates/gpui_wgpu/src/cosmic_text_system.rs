@@ -428,6 +428,7 @@ impl CosmicTextSystemState {
             // glyph.
             if font.as_swash().charmap().map('m') == 0
                 && !allowed_bad_font_names.contains(&postscript_name.as_str())
+                && !crate::fast::emoji_fonts::may_load_without_m(&postscript_name)
             {
                 continue;
             };
@@ -1199,7 +1200,7 @@ fn face_info_into_properties(
     }
 }
 
-fn check_is_known_emoji_font(postscript_name: &str) -> bool {
+pub(crate) fn check_is_known_emoji_font(postscript_name: &str) -> bool {
     // TODO: Include other common emoji fonts
     postscript_name == "NotoColorEmoji"
 }
