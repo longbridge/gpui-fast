@@ -2702,7 +2702,7 @@ mod policies {
         ParentElement as _, Path, Styled as _, TestAppContext, WindowHandle, anchored, canvas,
         deferred, div, point, px, size,
     };
-    use std::rc::Rc;
+    use std::{ops::Range, rc::Rc};
 
     /// Puts `extra` at the top of the page's scroll container.
     fn with_extra(
@@ -2898,6 +2898,137 @@ mod policies {
             "composited again within 12 frames: {decisions:?}"
         );
         assert_eq!(layers_demoted(cx, window), 0);
+    }
+
+    /// Puts a focused text input at the top of the page's scroll container.
+    fn with_focused_input(cx: &mut TestAppContext, handle: WindowHandle<LayerPage>) {
+        let window = handle.into();
+        let focus = with_window(cx, window, |_, cx| cx.focus_handle());
+        let input_focus = focus.clone();
+        with_extra(cx, handle, move || {
+            div()
+                .h(px(10.))
+                .track_focus(&input_focus)
+                .child(super::super::retained::text_input(
+                    input_focus.clone(),
+                    "inside",
+                ))
+                .into_any_element()
+        });
+        with_window(cx, window, |window, cx| window.focus(&focus, cx));
+        draw(cx, window);
+    }
+
+    /// Scrolls the page by 5 px on each of `frames`, down for 90 frames and
+    /// back up for 90, within what it has to scroll, and returns what the
+    /// container decided on each.
+    fn decisions_while_scrolling(
+        cx: &mut TestAppContext,
+        window: AnyWindowHandle,
+        frames: Range<usize>,
+    ) -> Vec<Decision> {
+        frames
+            .map(|frame| {
+                let dy = if frame / 90 % 2 == 0 { -5. } else { 5. };
+                scroll(cx, window, dy).unwrap()
+            })
+            .collect()
+    }
+
+    /// The frames of `decisions` the content was painted into its layer on.
+    fn repaints(decisions: &[Decision]) -> Vec<usize> {
+        (0..decisions.len())
+            .filter(|frame| decisions[*frame] == Decision::Repaint)
+            .collect()
+    }
+
+    #[crate::test]
+    fn content_that_stays_ineligible_is_painted_into_its_layer_less_and_less_often(
+        cx: &mut TestAppContext,
+    ) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        // The input stays focused for as long as the scroll goes on. Each
+        // time the content is painted into its layer to see whether it still
+        // holds one, it does, and the layer is dropped: a repaint, which
+        // costs about twice what drawing the content does, for nothing. The
+        // wait before the next one doubles, from 8 frames up to 256, and
+        // outlasts the 120 frames a layer not composited is kept for.
+        let handle = page(cx, false);
+        let window = handle.into();
+        with_focused_input(cx, handle);
+        promote(cx, window);
+        let decisions = decisions_while_scrolling(cx, window, 0..360);
+        assert_eq!(repaints(&decisions), [8, 25, 58, 123, 252]);
+        assert!(!decisions.contains(&Decision::Composite));
+        assert!(!has_record(cx, window));
+        assert_eq!(layers_demoted(cx, window), 0);
+    }
+
+    #[crate::test]
+    fn a_layer_whose_input_loses_focus_after_a_long_scroll_is_composited_again_at_once(
+        cx: &mut TestAppContext,
+    ) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        // By now the content waits 128 frames to be painted into its layer
+        // again. The focus leaving the input ends the wait: the container
+        // gets its layer back as soon as it has scrolled on two frames in a
+        // row, as one that never had a layer does.
+        let handle = page(cx, false);
+        let window = handle.into();
+        with_focused_input(cx, handle);
+        promote(cx, window);
+        let decisions = decisions_while_scrolling(cx, window, 0..130);
+        assert_eq!(repaints(&decisions), [8, 25, 58, 123]);
+        frame_after(cx, window, |cx| {
+            with_window(cx, window, |window, cx| window.blur(cx));
+        });
+        let decisions = decisions_while_scrolling(cx, window, 130..134);
+        assert!(
+            decisions.contains(&Decision::Composite),
+            "composited again within 4 frames: {decisions:?}"
+        );
+        assert_eq!(layers_demoted(cx, window), 0);
+    }
+
+    #[crate::test]
+    fn content_that_stays_ineligible_for_another_reason_waits_longer_too(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        // An anchored element is positioned against the window's edges for
+        // as long as it is in the content: the same wait, with no focus to
+        // end it.
+        let handle = page(cx, false);
+        let window = handle.into();
+        with_extra(cx, handle, || {
+            div()
+                .h(px(10.))
+                .child(anchored().child(div().w(px(50.)).h(px(50.)).bg(crate::red())))
+                .into_any_element()
+        });
+        promote(cx, window);
+        let decisions = decisions_while_scrolling(cx, window, 0..130);
+        assert_eq!(repaints(&decisions), [8, 25, 58, 123]);
+        // Once it is gone, the content is painted into its layer when the
+        // wait it is in ends, 128 frames after the last attempt, and
+        // composited from then on.
+        frame_after(cx, window, |cx| {
+            handle
+                .update(cx, |page, _, cx| {
+                    page.extra = None;
+                    cx.notify();
+                })
+                .unwrap();
+        });
+        let decisions = decisions_while_scrolling(cx, window, 130..260);
+        // One frame earlier than a scroll that went on: one was drawn for
+        // the change.
+        assert_eq!(repaints(&decisions), [121]);
+        assert_eq!(decisions[122..], [Decision::Composite; 8]);
     }
 
     /// Content painting a path, drawn over by `cover` when set.
