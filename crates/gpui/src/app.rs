@@ -83,7 +83,7 @@ pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(200);
 /// Strongly consider removing after stabilization.
 #[doc(hidden)]
 pub struct AppCell {
-    app: RefCell<App>,
+    pub(crate) app: RefCell<App>,
     borrow_origin: Cell<Option<(&'static std::panic::Location<'static>, &'static str)>>,
 }
 
@@ -316,6 +316,7 @@ impl Application {
         let this = self.0.clone();
         let platform = self.0.borrow().platform.clone();
         platform.run(Box::new(move || {
+            crate::fast::app_borrow::track_app(&this);
             let cx = &mut *this.borrow_mut();
             // Some platforms only connect to their display server in `run`.
             cx.displays_changed();
@@ -344,6 +345,7 @@ impl Application {
         let this = self.0.clone();
         let platform = self.0.borrow().platform.clone();
         platform.run(Box::new(move || {
+            crate::fast::app_borrow::track_app(&this);
             let cx = &mut *this.borrow_mut();
             // Some platforms only connect to their display server in `run`.
             cx.displays_changed();

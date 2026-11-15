@@ -596,12 +596,14 @@ impl Platform for WindowsPlatform {
         on_finish_launching();
 
         let mut msg = MSG::default();
+        crate::fast::app_borrow::flush_deferred();
         unsafe {
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 if !self.inner.translate_accelerator(&msg) {
                     _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
+                crate::fast::app_borrow::flush_deferred();
             }
         }
 
@@ -1252,6 +1254,14 @@ impl WindowsPlatformInner {
         if wparam.0 != self.validation_number {
             log::error!("Wrong validation number while processing message: {message}");
             return None;
+        }
+        if crate::fast::app_borrow::defer_while_app_borrowed(
+            self.dispatcher.platform_window_handle.as_raw(),
+            message,
+            wparam,
+            lparam,
+        ) {
+            return Some(0);
         }
         match message {
             WM_GPUI_CLOSE_ONE_WINDOW => {
