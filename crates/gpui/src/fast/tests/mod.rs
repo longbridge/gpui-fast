@@ -17,6 +17,7 @@ mod misc;
 mod number_shaping;
 mod oracle;
 mod path_cache;
+mod pointer;
 mod retained;
 mod retained_bench;
 mod scene_order;

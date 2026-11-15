@@ -1287,6 +1287,7 @@ pub struct Window {
     pub(crate) default_prevented: bool,
     pub(crate) mouse_position: Point<Pixels>,
     pub(crate) mouse_hit_test: HitTest,
+    pub(crate) fast_pointer_outside: bool,
     modifiers: Modifiers,
     capslock: Capslock,
     scale_factor: f32,
@@ -2416,6 +2417,7 @@ impl Window {
             default_prevented: true,
             mouse_position,
             mouse_hit_test: HitTest::default(),
+            fast_pointer_outside: false,
             modifiers,
             capslock,
             scale_factor,
@@ -4014,7 +4016,7 @@ impl Window {
 
         crate::fast::stats::FramePhaseTimes::end_prepaint(&mut self.fast_layout.phase_times);
         crate::fast::composition::finish_input(self);
-        self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
+        self.mouse_hit_test = crate::fast::pointer::hit_test(self, &self.next_frame);
 
         // Now actually paint the elements.
         #[cfg(feature = "profiler")]
@@ -5935,6 +5937,7 @@ impl Window {
         }
 
         let ambient = crate::fast::dependencies::AmbientInput::of(self);
+        crate::fast::pointer::note_input(self, &event);
         // Handlers may set this to false by calling `stop_propagation`.
         cx.propagate_event = true;
         // Handlers may set this to true by calling `prevent_default`.
@@ -6275,7 +6278,8 @@ impl Window {
     }
 
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
-        self.mouse_hit_test = self.rendered_frame.hit_test(self.mouse_position());
+        crate::fast::dependencies::read_pointer(self);
+        self.mouse_hit_test = crate::fast::pointer::hit_test(self, &self.rendered_frame);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         if self.is_inspector_picking(cx) {
