@@ -596,14 +596,14 @@ impl Platform for WindowsPlatform {
         on_finish_launching();
 
         let mut msg = MSG::default();
-        crate::fast::app_borrow::flush_deferred();
+        self.inner.handle_deferred_gpui_events();
         unsafe {
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 if !self.inner.translate_accelerator(&msg) {
                     _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
-                crate::fast::app_borrow::flush_deferred();
+                self.inner.handle_deferred_gpui_events();
             }
         }
 
@@ -1237,6 +1237,10 @@ impl WindowsPlatformInner {
             | WM_GPUI_KEYBOARD_LAYOUT_CHANGED
             | WM_GPUI_DISPLAYS_CHANGED
             | WM_GPUI_GPU_DEVICE_LOST => self.handle_gpui_events(msg, wparam, lparam),
+            WM_TIMER if wparam.0 == crate::fast::app_borrow::DEFERRED_EVENTS_TIMER_ID => {
+                self.handle_deferred_gpui_events();
+                Some(0)
+            }
             WM_POWERBROADCAST => self.handle_power_broadcast(wparam, lparam),
             WM_DISPLAYCHANGE => self.handle_display_change(handle),
             WM_QUERYENDSESSION => Some(1),
@@ -1263,6 +1267,21 @@ impl WindowsPlatformInner {
         ) {
             return Some(0);
         }
+        self.handle_deferred_gpui_events();
+        self.dispatch_gpui_event(message, lparam)
+    }
+
+    /// Handles the `WM_GPUI_*` messages deferred while the app was borrowed,
+    /// oldest first, until none is left or the app is borrowed again.
+    pub(crate) fn handle_deferred_gpui_events(&self) {
+        let platform_window = self.dispatcher.platform_window_handle.as_raw();
+        while let Some((message, lparam)) = crate::fast::app_borrow::next_deferred(platform_window)
+        {
+            self.dispatch_gpui_event(message, lparam);
+        }
+    }
+
+    fn dispatch_gpui_event(&self, message: u32, lparam: LPARAM) -> Option<isize> {
         match message {
             WM_GPUI_CLOSE_ONE_WINDOW => {
                 self.close_one_window(HWND(lparam.0 as _));

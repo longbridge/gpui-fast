@@ -30,7 +30,7 @@ pub(crate) fn track_app(cell: &Rc<AppCell>) {
 ///
 /// Platform message handlers that can run re-entrantly while the app is
 /// borrowed must check this before touching the app and defer their work
-/// (e.g. by re-posting the message) rather than calling `borrow_mut`.
+/// (e.g. by queueing the message) rather than calling `borrow_mut`.
 #[doc(hidden)]
 pub fn app_is_borrowed() -> bool {
     APP_CELL.with(|cell| {
