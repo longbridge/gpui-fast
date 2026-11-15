@@ -1287,6 +1287,10 @@ pub struct Window {
     pub(crate) default_prevented: bool,
     pub(crate) mouse_position: Point<Pixels>,
     pub(crate) mouse_hit_test: HitTest,
+    /// Set when the pointer left the window, cleared by the next pointer event.
+    /// The exit position lies on the window edge, which is still inside hitboxes
+    /// flush with that edge, so hit testing must not use it.
+    mouse_outside: bool,
     modifiers: Modifiers,
     capslock: Capslock,
     scale_factor: f32,
@@ -2416,6 +2420,7 @@ impl Window {
             default_prevented: true,
             mouse_position,
             mouse_hit_test: HitTest::default(),
+            mouse_outside: false,
             modifiers,
             capslock,
             scale_factor,
@@ -4014,7 +4019,7 @@ impl Window {
 
         crate::fast::stats::FramePhaseTimes::end_prepaint(&mut self.fast_layout.phase_times);
         crate::fast::composition::finish_input(self);
-        self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
+        self.mouse_hit_test = self.pointer_hit_test(&self.next_frame);
 
         // Now actually paint the elements.
         #[cfg(feature = "profiler")]
@@ -5945,16 +5950,19 @@ impl Window {
             // API for the mouse position can only occur on the main thread.
             PlatformInput::MouseMove(mouse_move) => {
                 self.mouse_position = mouse_move.position;
+                self.mouse_outside = false;
                 self.modifiers = mouse_move.modifiers;
                 PlatformInput::MouseMove(mouse_move)
             }
             PlatformInput::MouseDown(mouse_down) => {
                 self.mouse_position = mouse_down.position;
+                self.mouse_outside = false;
                 self.modifiers = mouse_down.modifiers;
                 PlatformInput::MouseDown(mouse_down)
             }
             PlatformInput::MouseUp(mouse_up) => {
                 self.mouse_position = mouse_up.position;
+                self.mouse_outside = false;
                 self.modifiers = mouse_up.modifiers;
                 PlatformInput::MouseUp(mouse_up)
             }
@@ -5963,6 +5971,7 @@ impl Window {
             }
             PlatformInput::MouseExited(mouse_exited) => {
                 self.modifiers = mouse_exited.modifiers;
+                self.mouse_outside = true;
                 PlatformInput::MouseExited(mouse_exited)
             }
             PlatformInput::ModifiersChanged(modifiers_changed) => {
@@ -5972,11 +5981,13 @@ impl Window {
             }
             PlatformInput::Scroll(scroll_wheel) => {
                 self.mouse_position = scroll_wheel.position;
+                self.mouse_outside = false;
                 self.modifiers = scroll_wheel.modifiers;
                 PlatformInput::Scroll(scroll_wheel)
             }
             PlatformInput::Pinch(pinch) => {
                 self.mouse_position = pinch.position;
+                self.mouse_outside = false;
                 self.modifiers = pinch.modifiers;
                 PlatformInput::Pinch(pinch)
             }
@@ -5985,6 +5996,7 @@ impl Window {
             PlatformInput::FileDrop(file_drop) => match file_drop {
                 FileDropEvent::Entered { position, paths } => {
                     self.mouse_position = position;
+                    self.mouse_outside = false;
                     let source_window = self.handle.window_id();
                     if !cx.restore_platform_drag(source_window) && cx.active_drag.is_none() {
                         cx.active_drag = Some(AnyDrag {
@@ -6003,6 +6015,7 @@ impl Window {
                 }
                 FileDropEvent::Pending { position } => {
                     self.mouse_position = position;
+                    self.mouse_outside = false;
                     PlatformInput::MouseMove(MouseMoveEvent {
                         position,
                         pressed_button: Some(MouseButton::Left),
@@ -6012,6 +6025,7 @@ impl Window {
                 FileDropEvent::Submit { position } => {
                     cx.activate(true);
                     self.mouse_position = position;
+                    self.mouse_outside = false;
                     PlatformInput::MouseUp(MouseUpEvent {
                         button: MouseButton::Left,
                         position,
@@ -6039,6 +6053,7 @@ impl Window {
                 } else {
                     long_press.position
                 };
+                self.mouse_outside = false;
                 if long_press.phase == crate::TouchPhase::Started {
                     self.long_press_capture = None;
                 }
@@ -6046,10 +6061,12 @@ impl Window {
             }
             PlatformInput::TouchDrag(touch_drag) => {
                 self.mouse_position = touch_drag.start_position;
+                self.mouse_outside = false;
                 PlatformInput::TouchDrag(touch_drag)
             }
             PlatformInput::BackGesture(back) => {
                 self.mouse_position = back.start_position;
+                self.mouse_outside = false;
                 PlatformInput::BackGesture(back)
             }
             PlatformInput::KeyDown(_) | PlatformInput::KeyUp(_) => event,
@@ -6191,11 +6208,13 @@ impl Window {
         match gesture {
             RecognizedTouchGesture::Scroll(scroll_wheel) => {
                 self.mouse_position = scroll_wheel.position;
+                self.mouse_outside = false;
                 cx.propagate_event = true;
                 self.dispatch_mouse_event(&scroll_wheel, cx);
             }
             RecognizedTouchGesture::Tap { down, up } => {
                 self.mouse_position = up.position;
+                self.mouse_outside = false;
                 cx.propagate_event = true;
                 self.dispatch_mouse_event(&down, cx);
                 cx.propagate_event = true;
@@ -6203,6 +6222,7 @@ impl Window {
             }
             RecognizedTouchGesture::TouchDrag(touch_drag) => {
                 self.mouse_position = touch_drag.start_position;
+                self.mouse_outside = false;
                 cx.propagate_event = true;
                 self.default_prevented = false;
                 let started = touch_drag.phase == crate::TouchPhase::Started;
@@ -6218,6 +6238,7 @@ impl Window {
                 } else {
                     long_press.position
                 };
+                self.mouse_outside = false;
                 cx.propagate_event = true;
                 self.default_prevented = false;
                 let started = long_press.phase == crate::TouchPhase::Started;
@@ -6274,8 +6295,17 @@ impl Window {
         });
     }
 
+    fn pointer_hit_test(&self, frame: &Frame) -> HitTest {
+        if self.mouse_outside {
+            HitTest::default()
+        } else {
+            frame.hit_test(self.mouse_position)
+        }
+    }
+
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
-        self.mouse_hit_test = self.rendered_frame.hit_test(self.mouse_position());
+        crate::fast::dependencies::read_pointer(self);
+        self.mouse_hit_test = self.pointer_hit_test(&self.rendered_frame);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         if self.is_inspector_picking(cx) {
@@ -10498,6 +10528,80 @@ mod tests {
         // the hover.
         let widen = |root: &mut Root, _: &mut Window, _: &mut Context<Root>| root.width = px(300.);
         assert_eq!(update_and_draw(window, &child, cx, widen).0, 1.);
+    }
+
+    #[gpui::test]
+    fn test_mouse_exited_on_window_edge_clears_hover(cx: &mut TestAppContext) {
+        // A control flush with the window edge: the exit position (on the edge) is
+        // still inside its bounds, so hit testing must ignore it after MouseExited.
+        struct Controls;
+
+        impl Render for Controls {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(
+                    div()
+                        .id("close")
+                        .size(px(40.))
+                        .bg(gpui::black())
+                        .hover(|style| style.bg(gpui::red())),
+                )
+            }
+        }
+
+        let window = cx.add_window(|_, _| Controls);
+        let edge = point(px(10.), px(0.));
+        let background = |window: &Window| {
+            window
+                .rendered_frame
+                .scene
+                .quads
+                .first()
+                .expect("close quad")
+                .background
+                .solid
+        };
+
+        cx.update_window(window.into(), |_, window, cx| {
+            window.hovered.set(true);
+            window.draw(cx).clear(cx);
+            window.dispatch_event(
+                MouseMoveEvent {
+                    position: edge,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+            assert_eq!(background(window), gpui::red());
+
+            window.dispatch_event(
+                crate::MouseExitEvent {
+                    position: edge,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.hovered.set(false);
+            window.refresh();
+            window.draw(cx).clear(cx);
+            assert_eq!(background(window), gpui::black());
+
+            // Re-entering hovers again.
+            window.hovered.set(true);
+            window.dispatch_event(
+                MouseMoveEvent {
+                    position: edge,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+            assert_eq!(background(window), gpui::red());
+        })
+        .expect("update window");
     }
 
     #[gpui::test]
