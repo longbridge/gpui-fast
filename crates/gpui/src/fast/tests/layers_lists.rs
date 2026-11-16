@@ -1943,11 +1943,13 @@ mod list {
     }
 
     /// A row in a view of its own, of `color`, that asks for an animation
-    /// frame each time it renders when it `animate`s, and holds an anchored
-    /// element when it is `anchored`.
+    /// frame each time it renders when it `animate`s, holds an anchored
+    /// element when it is `anchored`, and hosts its native `surface`, if
+    /// any.
     struct Ticker {
         animate: bool,
         anchored: bool,
+        surface: Option<Rc<dyn crate::PlatformSurfaceAttachment>>,
         color: usize,
     }
 
@@ -1962,6 +1964,9 @@ mod list {
                 .bg(row_color(self.color))
                 .when(self.anchored, |row| {
                     row.child(crate::anchored().child(div().w(px(50.)).h(px(50.)).bg(crate::red())))
+                })
+                .when_some(self.surface.clone(), |row, surface| {
+                    row.child(crate::fast::composition::tests::native_host(surface))
                 })
         }
     }
@@ -2004,6 +2009,7 @@ mod list {
             ticker: cx.new(|_| Ticker {
                 animate,
                 anchored,
+                surface: None,
                 color: 2,
             }),
         });
@@ -2084,6 +2090,42 @@ mod list {
         for step in 0..3 {
             wheel(cx, window, -2.);
             assert_eq!(decision(cx, window), Some(Decision::Bypass), "step {step}");
+        }
+    }
+
+    #[crate::test]
+    fn a_native_surface_in_a_row_keeps_the_list_off_its_layer(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        // A web view in a row the layer holds: placed where the row is
+        // prepainted, which a composited frame skips, leaving it where the
+        // row was.
+        let (window, ticker) = ticker_page(cx, false, false);
+        let surface = with_window(cx, window, |window, _| {
+            crate::fast::composition::tests::native_surface(window)
+        });
+        // Drawn at once, in a frame that composites the layer and renders the
+        // ticker again, alone, placing its surface.
+        ticker.update(cx, |ticker, cx| {
+            ticker.surface = Some(surface.clone());
+            cx.notify();
+        });
+        let page = window.downcast::<TickerListPage>().unwrap();
+        for step in 0..4 {
+            wheel(cx, window, -2.);
+            assert_eq!(decision(cx, window), Some(Decision::Bypass), "step {step}");
+            let top = page
+                .update(cx, |page, _, _| page.state.logical_scroll_top())
+                .unwrap();
+            let scale = with_window(cx, window, |window, _| window.scale_factor());
+            // The ticker is row 2, under two rows 20 px tall.
+            let y = (2. - top.item_ix as f32) * 20. - top.offset_in_item.0;
+            assert_eq!(
+                surface.bounds().origin.y,
+                crate::DevicePixels((y * scale).round() as i32),
+                "step {step}: the surface moves with the row"
+            );
         }
     }
 

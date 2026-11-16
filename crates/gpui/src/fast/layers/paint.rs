@@ -251,6 +251,7 @@ fn end_repainted_children(window: &mut Window, cx: &mut App) {
         return;
     };
     painting.prepaint_range.end = window.prepaint_index();
+    policy::note_surfaces_placed(window, &painting.id);
     painting.a11y = crate::fast::a11y::capture(window, &painting.prepaint_range);
     if let Some(recording) = painting.recording.take() {
         painting.dependencies = cx.finish_recording_dependencies(recording).all;

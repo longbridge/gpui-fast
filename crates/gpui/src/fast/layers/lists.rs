@@ -1572,6 +1572,7 @@ pub(crate) fn end_rows(window: &mut Window, cx: &mut App, rows: Rows) {
 /// Ends the prepaint of the rows of the list `id`: what it added to the
 /// frame and read is the frame's.
 fn finish_prepaint(window: &mut Window, cx: &mut App, id: &GlobalElementId) {
+    policy::note_surfaces_placed(window, id);
     let end = window.prepaint_index();
     let Some(frame) = frame_mut(window, id) else {
         return;
