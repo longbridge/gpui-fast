@@ -515,6 +515,8 @@ impl AppleTextSystemState {
                 cx.set_should_smooth_fonts(true);
                 cx.set_gray_fill_color(luminance, 1.0);
             } else {
+                #[cfg(target_os = "macos")]
+                crate::fast::text_system::smooth_undilated(&cx, font_smoothing_allowed_by_user());
                 cx.set_gray_fill_color(0.0, 1.0);
             }
             self.fonts[params.font_id.0]

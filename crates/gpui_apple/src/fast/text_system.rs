@@ -34,6 +34,22 @@ impl SizedFonts {
     }
 }
 
+/// A glyph drawn at dilation 0 is smoothed only when the user allows smoothing.
+///
+/// `glyph_dilation_for_color` gives 0 both for dark text and when
+/// `AppleFontSmoothing` is 0, but CoreGraphics' own smoothing flag defaults to
+/// on and CoreGraphics reads only the persistent value of the preference: an
+/// app that turns smoothing off for itself (a launch argument, the argument
+/// domain) still got every dark glyph dilated, 10–22 % more ink than the same
+/// glyph with smoothing off. With smoothing allowed this keeps CoreGraphics'
+/// default, so the usual look does not change.
+#[cfg(target_os = "macos")]
+pub(crate) fn smooth_undilated(cx: &core_graphics::context::CGContext, allowed: bool) {
+    if !allowed {
+        cx.set_should_smooth_fonts(false);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::AppleTextSystem;
