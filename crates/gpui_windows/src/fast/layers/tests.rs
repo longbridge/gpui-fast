@@ -1474,3 +1474,198 @@ fn partial_redraw_puts_the_rasterizer_state_back_when_drawing_fails() {
         None
     );
 }
+
+/// A glyph drawn through `transformation` in `color` (`None`: no glyph),
+/// over a plain background.
+fn transformed_sprite_scene(
+    harness: &Harness,
+    sprite: Option<(TransformationMatrix, u32)>,
+) -> Scene {
+    let mut scene = Scene::default();
+    scene.insert_primitive(quad(sp(0., 0., 1024., 1024.), Hsla::from(rgba(0x101418ff))));
+    if let Some((transformation, color)) = sprite {
+        scene.insert_primitive(MonochromeSprite {
+            order: 0,
+            pad: 0,
+            bounds: sp(200., 200., 120., 120.),
+            content_mask: ContentMask {
+                bounds: sp(0., 0., 1024., 1024.),
+            },
+            color: Hsla::from(rgba(color)),
+            tile: glyph_tile(harness, 1, false),
+            transformation,
+        });
+    }
+    scene.finish();
+    scene
+}
+
+/// A turn by `angle` about (`cx`, `cy`).
+fn turn_about(angle: f32, cx: f32, cy: f32) -> TransformationMatrix {
+    let (sin, cos) = angle.sin_cos();
+    TransformationMatrix {
+        rotation_scale: [[cos, -sin], [sin, cos]],
+        translation: [cx - cos * cx + sin * cy, cy - sin * cx - cos * cy],
+    }
+}
+
+#[test]
+fn partial_redraw_follows_sprites_moved_scaled_turned_and_removed() {
+    let Some(mut harness) = Harness::new() else {
+        eprintln!("skipped: no Direct3D 11 device");
+        return;
+    };
+    let mut partial = crate::fast::partial::Partial::enabled();
+    let moved = TransformationMatrix {
+        rotation_scale: [[1., 0.], [0., 1.]],
+        translation: [300., 40.],
+    };
+    let scaled = TransformationMatrix {
+        rotation_scale: [[2., 0.], [0., 1.5]],
+        translation: [0., 0.],
+    };
+    let states = [
+        None,
+        // Comes, drawn away from its bounds.
+        Some((moved, 0xffffffff)),
+        // Changes colour there.
+        Some((moved, 0xff4040ff)),
+        // Scaled, turned, and gone from where the turn took it.
+        Some((scaled, 0xff4040ff)),
+        Some((turn_about(0.7, 260., 260.), 0xffffffff)),
+        None,
+        // Comes scaled, and goes.
+        Some((scaled, 0xffffffff)),
+        None,
+    ];
+    for (n, state) in states.into_iter().enumerate() {
+        let scene = transformed_sprite_scene(&harness, state);
+        let made = partial_frame(&mut harness, &mut partial, &scene, &[]);
+        if n > 0 {
+            let (copied, rects) = made.expect("made from the last frame");
+            assert!(!copied && rects >= 1, "state {n}: {made:?}");
+        }
+    }
+}
+
+/// `source` (a window with one rounded clip) again, with a glyph turned by
+/// `angle` among the clip's content (`None`: without), reaching past the
+/// clip's edge. `side`: the window's.
+#[cfg(feature = "test-support")]
+fn clip_with_turned_sprite(
+    harness: &Harness,
+    source: &Scene,
+    side: f32,
+    angle: Option<f32>,
+) -> Scene {
+    // The scene's primitives again, in the order they are painted in.
+    fn again(source: &Scene, scene: &mut Scene) {
+        assert!(
+            source.shadows.is_empty()
+                && source.underlines.is_empty()
+                && source.paths.is_empty()
+                && source.monochrome_sprites.is_empty()
+                && source.subpixel_sprites.is_empty()
+        );
+        let mut quads = source.quads.iter().peekable();
+        let mut sprites = source.polychrome_sprites.iter().peekable();
+        loop {
+            let quad_first = match (quads.peek(), sprites.peek()) {
+                (Some(quad), Some(sprite)) => quad.order <= sprite.order,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
+            };
+            if quad_first {
+                scene.insert_primitive(*quads.next().unwrap());
+            } else {
+                scene.insert_primitive(*sprites.next().unwrap());
+            }
+        }
+    }
+    let group = source
+        .polychrome_sprites
+        .iter()
+        .find_map(|sprite| crate::fast::rounded_clip::group(source, sprite.tile.texture_id))
+        .expect("a rounded clip");
+    let content = group.content.scene().expect("the clip's content");
+    let mut child = Scene::default();
+    again(content, &mut child);
+    if let Some(angle) = angle {
+        // Near the clip's right edge: turned, its corners pass the edge.
+        let bounds = sp(side * 0.55, side * 0.3, side * 0.4, side * 0.4);
+        child.insert_primitive(MonochromeSprite {
+            order: 0,
+            pad: 0,
+            bounds,
+            content_mask: ContentMask {
+                bounds: sp(0., 0., 1024., 1024.),
+            },
+            color: Hsla::from(rgba(0xff4040ff)),
+            tile: glyph_tile(harness, 1, false),
+            transformation: turn_about(angle, side * 0.75, side * 0.5),
+        });
+    }
+    child.layers.frames = content.layers.frames.clone();
+    child.finish();
+    let mut scene = Scene::default();
+    again(source, &mut scene);
+    scene.layers.frames = source
+        .layers
+        .frames
+        .iter()
+        .map(|frame| {
+            if frame.key == group.key {
+                LayerFrame {
+                    generation: frame.generation + 1,
+                    content: Scene::default().into(),
+                    ..frame.clone()
+                }
+            } else {
+                frame.clone()
+            }
+        })
+        .collect();
+    let key = group.key;
+    if let Some(frame) = scene
+        .layers
+        .frames
+        .iter_mut()
+        .find(|frame| frame.key == key)
+    {
+        frame.content = child.into();
+    }
+    scene.finish();
+    scene
+}
+
+#[cfg(feature = "test-support")]
+#[gpui::test]
+fn partial_redraw_follows_a_transformed_sprite_inside_a_rounded_clip(
+    cx: &mut gpui::TestAppContext,
+) {
+    let mut harness =
+        Harness::new().expect("rounded clipping regression requires Direct3D or WARP");
+    rounded_clip_tests::render_with(cx, rounded_clip_tests::square_fixture, |source, size| {
+        let side = size.width.0 as f32;
+        let extent = device_size(1024, 1024);
+        let white = rgba(0xffffffff);
+        let without = clip_with_turned_sprite(&harness, source, side, None);
+        let with = clip_with_turned_sprite(&harness, source, side, Some(0.6));
+        // The glyph is drawn, and the clip is.
+        let plain = harness.render(&without, extent, white);
+        assert_ne!(plain, harness.render(&with, extent, white));
+        assert_same_pixels(&plain, &harness.render(source, extent, white), 1024);
+
+        let mut partial = crate::fast::partial::Partial::enabled();
+        for (n, angle) in [None, Some(0.6), Some(1.3), None, Some(2.0), None]
+            .into_iter()
+            .enumerate()
+        {
+            let scene = clip_with_turned_sprite(&harness, source, side, angle);
+            let made = partial_frame(&mut harness, &mut partial, &scene, &[]);
+            assert_eq!(made.is_some(), n > 0, "frame {n}: {made:?}");
+        }
+        plain
+    });
+}
