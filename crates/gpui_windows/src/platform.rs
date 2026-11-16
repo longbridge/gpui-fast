@@ -78,13 +78,13 @@ pub struct WindowsPlatform {
     system_notifications: RefCell<SystemNotificationState>,
 }
 
-struct WindowsPlatformInner {
+pub(crate) struct WindowsPlatformInner {
     state: WindowsPlatformState,
     raw_window_handles: std::sync::Weak<RwLock<SmallVec<[TrackedWindow; 4]>>>,
     // The below members will never change throughout the entire lifecycle of the app.
-    validation_number: usize,
+    pub(crate) validation_number: usize,
     main_receiver: PriorityQueueReceiver<RunnableVariant>,
-    dispatcher: Arc<WindowsDispatcher>,
+    pub(crate) dispatcher: Arc<WindowsDispatcher>,
 }
 
 pub(crate) struct WindowsPlatformState {
@@ -596,14 +596,14 @@ impl Platform for WindowsPlatform {
         on_finish_launching();
 
         let mut msg = MSG::default();
-        self.inner.handle_deferred_gpui_events();
+        crate::fast::app_borrow::drain(&self.inner);
         unsafe {
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 if !self.inner.translate_accelerator(&msg) {
                     _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
-                self.inner.handle_deferred_gpui_events();
+                crate::fast::app_borrow::drain(&self.inner);
             }
         }
 
@@ -1236,11 +1236,10 @@ impl WindowsPlatformInner {
             | WM_GPUI_DOCK_MENU_ACTION
             | WM_GPUI_KEYBOARD_LAYOUT_CHANGED
             | WM_GPUI_DISPLAYS_CHANGED
-            | WM_GPUI_GPU_DEVICE_LOST => self.handle_gpui_events(msg, wparam, lparam),
-            WM_TIMER if wparam.0 == crate::fast::app_borrow::DEFERRED_EVENTS_TIMER_ID => {
-                self.handle_deferred_gpui_events();
-                Some(0)
+            | WM_GPUI_GPU_DEVICE_LOST => {
+                crate::fast::app_borrow::handle_event(self, msg, wparam, lparam)
             }
+            WM_TIMER => crate::fast::app_borrow::handle_timer(self, wparam),
             WM_POWERBROADCAST => self.handle_power_broadcast(wparam, lparam),
             WM_DISPLAYCHANGE => self.handle_display_change(handle),
             WM_QUERYENDSESSION => Some(1),
@@ -1254,34 +1253,7 @@ impl WindowsPlatformInner {
         }
     }
 
-    fn handle_gpui_events(&self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
-        if wparam.0 != self.validation_number {
-            log::error!("Wrong validation number while processing message: {message}");
-            return None;
-        }
-        if crate::fast::app_borrow::defer_while_app_borrowed(
-            self.dispatcher.platform_window_handle.as_raw(),
-            message,
-            wparam,
-            lparam,
-        ) {
-            return Some(0);
-        }
-        self.handle_deferred_gpui_events();
-        self.dispatch_gpui_event(message, lparam)
-    }
-
-    /// Handles the `WM_GPUI_*` messages deferred while the app was borrowed,
-    /// oldest first, until none is left or the app is borrowed again.
-    pub(crate) fn handle_deferred_gpui_events(&self) {
-        let platform_window = self.dispatcher.platform_window_handle.as_raw();
-        while let Some((message, lparam)) = crate::fast::app_borrow::next_deferred(platform_window)
-        {
-            self.dispatch_gpui_event(message, lparam);
-        }
-    }
-
-    fn dispatch_gpui_event(&self, message: u32, lparam: LPARAM) -> Option<isize> {
+    pub(crate) fn fast_dispatch_gpui_event(&self, message: u32, lparam: LPARAM) -> Option<isize> {
         match message {
             WM_GPUI_CLOSE_ONE_WINDOW => {
                 self.close_one_window(HWND(lparam.0 as _));

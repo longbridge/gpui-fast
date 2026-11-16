@@ -111,6 +111,45 @@ pub(crate) fn next_deferred(platform_window: HWND) -> Option<(u32, LPARAM)> {
     DEFERRED.with_borrow_mut(VecDeque::pop_front)
 }
 
+/// Validates and handles a GPUI event after draining any older deferred work.
+pub(crate) fn handle_event(
+    platform: &crate::platform::WindowsPlatformInner,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> Option<isize> {
+    if wparam.0 != platform.validation_number {
+        log::error!("Wrong validation number while processing message: {message}");
+        return None;
+    }
+    let platform_window = platform.dispatcher.platform_window_handle.as_raw();
+    if defer_while_app_borrowed(platform_window, message, wparam, lparam) {
+        return Some(0);
+    }
+    drain(platform);
+    platform.fast_dispatch_gpui_event(message, lparam)
+}
+
+/// Handles only the timer owned by the deferred event queue.
+pub(crate) fn handle_timer(
+    platform: &crate::platform::WindowsPlatformInner,
+    wparam: WPARAM,
+) -> Option<isize> {
+    if wparam.0 != DEFERRED_EVENTS_TIMER_ID {
+        return None;
+    }
+    drain(platform);
+    Some(0)
+}
+
+/// Handles deferred events oldest first, until the queue empties or the app is borrowed again.
+pub(crate) fn drain(platform: &crate::platform::WindowsPlatformInner) {
+    let platform_window = platform.dispatcher.platform_window_handle.as_raw();
+    while let Some((message, lparam)) = next_deferred(platform_window) {
+        platform.fast_dispatch_gpui_event(message, lparam);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
