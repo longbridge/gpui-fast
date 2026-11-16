@@ -1058,7 +1058,7 @@ fn composition_whole_scene_matches_replayed_surface_pixels(cx: &mut gpui::TestAp
             };
             let empty = gpui::ComposedSceneLayer {
                 ranges: vec![],
-                ..full.clone()
+                ..full
             };
             for (layers, expected_target) in [
                 (vec![full.clone(), empty.clone()], 0),
