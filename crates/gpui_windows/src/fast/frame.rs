@@ -173,6 +173,40 @@ pub(crate) fn draw_scene_masked(
     let device_context = target.device_context;
     frame.state.forget();
     let mut restore_upload = false;
+    // Primitives a later opaque rectangle hides are not drawn (none under
+    // a mask, whose antialiased edge would show them).
+    let occlusion = if mask.is_none() {
+        crate::fast::occlusion::Occlusion::of(scene)
+    } else {
+        crate::fast::occlusion::Occlusion::default()
+    };
+    // Partly covered plain quads: their pieces follow the scene's quads in
+    // the quad buffer (`pieces[i]`: the range of quad `i`'s pieces).
+    let mut pieces: Vec<Option<std::ops::Range<usize>>> = Vec::new();
+    let mut quads: Vec<gpui::Quad> = Vec::new();
+    if !occlusion.is_empty() {
+        for (i, quad) in scene.quads.iter().enumerate() {
+            let Some(rects) = occlusion.pieces(quad) else {
+                continue;
+            };
+            if quads.is_empty() {
+                quads = scene.quads.clone();
+                pieces = vec![None; scene.quads.len()];
+            }
+            let start = quads.len();
+            quads.extend(rects.iter().map(|rect| {
+                let mut piece = *quad;
+                piece.content_mask.bounds = rect.bounds();
+                piece
+            }));
+            pieces[i] = Some(start..quads.len());
+        }
+        if !quads.is_empty() {
+            pipelines
+                .quad_pipeline
+                .update_buffer(target.device, target.device_context, &quads)?;
+        }
+    }
 
     for batch in scene.batches() {
         if let PrimitiveBatch::PolychromeSprites {
@@ -196,6 +230,13 @@ pub(crate) fn draw_scene_masked(
         }
         if restore_upload {
             upload(target, pipelines, scene)?;
+            if !quads.is_empty() {
+                pipelines.quad_pipeline.update_buffer(
+                    target.device,
+                    target.device_context,
+                    &quads,
+                )?;
+            }
             restore_upload = false;
         }
         crate::fast::rounded_clip::bind(target, &mut frame.rounded_masks, mask)?;
@@ -213,8 +254,36 @@ pub(crate) fn draw_scene_masked(
             sampler: &target.globals.sampler,
         };
         match batch {
+            PrimitiveBatch::Shadows(range) if !occlusion.is_empty() => {
+                crate::fast::occlusion::visible_runs(range, |i| {
+                    occlusion.hides_shadow(&scene.shadows[i])
+                })
+                .into_iter()
+                .try_for_each(|run| {
+                    draw.instances(&pipelines.shadow_pipeline, run.start, run.len(), None)
+                })
+            }
             PrimitiveBatch::Shadows(range) => {
                 draw.instances(&pipelines.shadow_pipeline, range.start, range.len(), None)
+            }
+            PrimitiveBatch::Quads(range) if !occlusion.is_empty() => {
+                // Runs of quads drawn as they are; a cut quad's pieces in its place.
+                let pipeline = &pipelines.quad_pipeline;
+                let mut run = range.start;
+                let mut drawn = Ok(());
+                for i in range.clone() {
+                    let cut = pieces.get(i).cloned().flatten();
+                    if cut.is_none() && !occlusion.hides_quad(&scene.quads[i]) {
+                        continue;
+                    }
+                    drawn = drawn.and_then(|()| draw.instances(pipeline, run, i - run, None));
+                    if let Some(cut) = cut {
+                        drawn = drawn
+                            .and_then(|()| draw.instances(pipeline, cut.start, cut.len(), None));
+                    }
+                    run = i + 1;
+                }
+                drawn.and_then(|()| draw.instances(pipeline, run, range.end - run, None))
             }
             PrimitiveBatch::Quads(range) => {
                 draw.instances(&pipelines.quad_pipeline, range.start, range.len(), None)
@@ -293,7 +362,11 @@ pub(crate) fn draw_scene_masked(
                     continue;
                 };
                 let pipeline = &pipelines.poly_sprites;
-                draw.instances(pipeline, range.start, range.len(), Some(&view))
+                crate::fast::occlusion::visible_runs(range, |i| {
+                    occlusion.hides_sprite(&scene.polychrome_sprites[i])
+                })
+                .into_iter()
+                .try_for_each(|run| draw.instances(pipeline, run.start, run.len(), Some(&view)))
             }
             // Upstream draws nothing for surfaces on Windows either.
             PrimitiveBatch::Surfaces(_) => Ok(()),

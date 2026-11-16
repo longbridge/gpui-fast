@@ -22,4 +22,5 @@ pub(crate) mod globals;
 pub(crate) mod layers;
 #[cfg(test)]
 pub(crate) mod native_tests;
+pub(crate) mod occlusion;
 pub(crate) mod rounded_clip;
