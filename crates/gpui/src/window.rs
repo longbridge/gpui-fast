@@ -1223,14 +1223,7 @@ impl Frame {
     }
 
     pub(crate) fn finish(&mut self, prev_frame: &mut Self) {
-        for element_state_key in &self.accessed_element_states {
-            if let Some((element_state_key, element_state)) =
-                prev_frame.element_states.remove_entry(element_state_key)
-            {
-                self.element_states.insert(element_state_key, element_state);
-            }
-        }
-
+        crate::fast::state_access::finish(self, prev_frame);
         self.scene.finish();
     }
 }

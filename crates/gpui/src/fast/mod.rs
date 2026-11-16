@@ -40,6 +40,7 @@ pub(crate) mod rounded_clip;
 pub(crate) mod rounded_clip_scene;
 pub(crate) mod scene;
 pub(crate) mod splice;
+pub(crate) mod state_access;
 pub(crate) mod stats;
 pub(crate) mod text;
 pub(crate) mod text_style;
