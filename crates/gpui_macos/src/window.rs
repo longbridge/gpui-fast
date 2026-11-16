@@ -646,7 +646,7 @@ unsafe fn apply_simple_fullscreen_plan(
 
 /// What paces a window's frames. The choice depends only on the OS version,
 /// so it is made once per window.
-enum FrameSource {
+pub(crate) enum FrameSource {
     /// macOS 14+: a `CAMetalDisplayLink` that hands out each frame's drawable.
     Metal(Rc<MetalFrames>),
     /// Earlier systems: the shared `CVDisplayLink` registry, joined on first start.
@@ -655,7 +655,7 @@ enum FrameSource {
 
 pub(crate) struct MacWindowState {
     handle: AnyWindowHandle,
-    foreground_executor: ForegroundExecutor,
+    pub(crate) foreground_executor: ForegroundExecutor,
     background_executor: BackgroundExecutor,
     pub(crate) native_window: *mut AnyObject,
     pub(crate) native_view: NonNull<AnyObject>,
@@ -664,7 +664,7 @@ pub(crate) struct MacWindowState {
     background_appearance: WindowBackgroundAppearance,
     cursor_style: CursorStyle,
     cursor_visible: Arc<AtomicBool>,
-    frame_source: FrameSource,
+    pub(crate) frame_source: FrameSource,
     pub(crate) renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     pub(crate) event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -878,7 +878,7 @@ impl MacWindowState {
 
     /// `window_state` is the handle this state lives in; a Metal link holds it
     /// weakly to deliver frames.
-    fn start_display_link(&mut self, window_state: &Rc<Mutex<MacWindowState>>) {
+    pub(crate) fn start_display_link(&mut self, window_state: &Rc<Mutex<MacWindowState>>) {
         self.stop_display_link();
         if !self
             .native_window()
@@ -3549,6 +3549,7 @@ extern "C" fn step(view: *mut c_void) {
             (None, FrameRequestSource::NativeCallback),
             |(at, source)| (Some(at), source),
         );
+        crate::fast::composition::present_for_native_views(&mut lock);
         drop(lock);
         callback(RequestFrameOptions {
             signal_at,
