@@ -1102,7 +1102,9 @@ fn culling_keeps_pixels(harness: &mut Harness, scene: &Scene) -> bool {
     crate::fast::occlusion::set_disabled(false);
     let culled = harness.render(scene, size, rgba(0xffffffff));
     assert_same_pixels(&culled, &everything, 1024);
-    let occlusion = crate::fast::occlusion::Occlusion::of(scene);
+    let occlusion = crate::fast::occlusion::Occlusion::of(scene, |sprite| {
+        harness.atlas.is_opaque(&sprite.tile)
+    });
     scene
         .quads
         .iter()
@@ -1206,7 +1208,9 @@ fn culling_under_covers_changes_no_pixel() {
     }
     // A full cover hides everything under it.
     let scene = covered_scene(&harness, Some(cover(sp(0., 0., 1024., 1024.))));
-    let occlusion = crate::fast::occlusion::Occlusion::of(&scene);
+    let occlusion = crate::fast::occlusion::Occlusion::of(&scene, |sprite| {
+        harness.atlas.is_opaque(&sprite.tile)
+    });
     let last = scene.quads.iter().map(|q| q.order).max().unwrap();
     assert!(
         scene
@@ -1216,4 +1220,99 @@ fn culling_under_covers_changes_no_pixel() {
             .all(|q| occlusion.hides_quad(q))
     );
     assert!(scene.shadows.iter().all(|s| occlusion.hides_shadow(s)));
+    assert!(!scene.monochrome_sprites.is_empty() && !scene.subpixel_sprites.is_empty());
+    assert!(
+        scene
+            .monochrome_sprites
+            .iter()
+            .all(|s| occlusion.hides_glyph(s.order, &s.bounds, &s.content_mask, &s.transformation))
+    );
+    assert!(scene.subpixel_sprites.iter().all(|s| occlusion.hides_glyph(
+        s.order,
+        &s.bounds,
+        &s.content_mask,
+        &s.transformation
+    )));
+}
+
+/// A 20x20 image, opaque or with one translucent pixel.
+fn image_cover_tile(harness: &Harness, id: usize, opaque: bool) -> AtlasTile {
+    let key = AtlasKey::Image(RenderImageParams {
+        image_id: ImageId(id),
+        frame_index: 0,
+    });
+    let bytes: Vec<u8> = (0..20 * 20)
+        .flat_map(|i: u32| {
+            let alpha = if !opaque && i == 210 { 254 } else { 255 };
+            [
+                (i * 5 % 256) as u8,
+                (i * 11 % 256) as u8,
+                (i * 17 % 256) as u8,
+                alpha,
+            ]
+        })
+        .collect();
+    harness
+        .atlas
+        .get_or_insert_with(key, &mut || {
+            Ok(Some((device_size(20, 20), Cow::Owned(bytes.clone()))))
+        })
+        .expect("image uploaded")
+        .expect("image tile")
+}
+
+fn image_cover(tile: AtlasTile, bounds: Bounds<ScaledPixels>, opacity: f32) -> PolychromeSprite {
+    PolychromeSprite {
+        order: 0,
+        pad: 0,
+        grayscale: false.into(),
+        opacity,
+        bounds,
+        content_mask: no_mask(),
+        corner_radii: Corners::default(),
+        tile,
+    }
+}
+
+#[test]
+fn culling_under_images_changes_no_pixel() {
+    let Some(mut harness) = Harness::new() else {
+        eprintln!("skipped: no Direct3D 11 device");
+        return;
+    };
+    assert!(
+        harness
+            .atlas
+            .is_opaque(&image_cover_tile(&harness, 9_001, true))
+    );
+    assert!(
+        !harness
+            .atlas
+            .is_opaque(&image_cover_tile(&harness, 9_002, false))
+    );
+    // A video frame over the player's background: magnified, at fractional
+    // bounds, so that bilinear sampling reaches the image's edges.
+    let bounds = sp(60.5, 70.25, 700.75, 520.5);
+    for (name, id, opaque, opacity, hides) in [
+        ("opaque image", 9_001, true, 1.0, true),
+        ("translucent pixel", 9_002, false, 1.0, false),
+        ("drawn translucent", 9_001, true, 0.99, false),
+    ] {
+        eprintln!("image cover: {name}");
+        let tile = image_cover_tile(&harness, id, opaque);
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad(sp(0., 0., 1024., 1024.), Hsla::from(rgba(0x000000ff))));
+        add_content(&mut scene, &harness, (0., 0.), sp(0., 0., 1024., 1024.));
+        scene.insert_primitive(image_cover(tile, bounds, opacity));
+        scene.finish();
+        culling_keeps_pixels(&mut harness, &scene);
+        let occlusion = crate::fast::occlusion::Occlusion::of(&scene, |sprite| {
+            harness.atlas.is_opaque(&sprite.tile)
+        });
+        // What is under the image's middle, away from the content's own
+        // covers, is hidden only when the image hides.
+        let mut under = quad(sp(400., 300., 20., 20.), Hsla::from(rgba(0x000000ff)));
+        under.order = scene.quads[0].order;
+        assert_eq!(occlusion.hides_quad(&under), hides, "{name}");
+    }
 }

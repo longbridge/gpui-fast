@@ -21,6 +21,9 @@ struct DirectXAtlasTextures {
     monochrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     polychrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     subpixel_textures: AtlasTextureList<DirectXAtlasTexture>,
+    /// Polychrome tiles whose every pixel is opaque, recorded as they are
+    /// uploaded (`fast::occlusion` lets such images hide what is under them).
+    opaque: std::collections::HashSet<(AtlasTextureId, u32)>,
 }
 
 struct DirectXAtlasTexture {
@@ -40,7 +43,17 @@ impl DirectXAtlas {
             monochrome_textures: Default::default(),
             polychrome_textures: Default::default(),
             subpixel_textures: Default::default(),
+            opaque: Default::default(),
         })))
+    }
+
+    /// Whether every pixel of `tile`, a polychrome tile, is opaque.
+    pub(crate) fn is_opaque(&self, tile: &AtlasTile) -> bool {
+        self.0
+            .lock()
+            .backend
+            .opaque
+            .contains(&(tile.texture_id, tile.tile_id.0))
     }
 
     /// Returns the view backing `id`, or `None` once every tile in it has been
@@ -74,6 +87,7 @@ impl DirectXAtlas {
             textures.monochrome_textures = AtlasTextureList::default();
             textures.polychrome_textures = AtlasTextureList::default();
             textures.subpixel_textures = AtlasTextureList::default();
+            textures.opaque.clear();
         });
     }
 }
@@ -108,11 +122,21 @@ impl AtlasBackend for DirectXAtlasTextures {
             .texture(tile.texture_id)
             .ok_or_else(|| anyhow::anyhow!("allocated tile refers to a missing texture"))?;
         texture.upload(&self.device_context, tile.bounds, bytes);
+        if kind == AtlasTextureKind::Polychrome {
+            // BGRA, alpha last; a tile id freed and reused is recorded anew.
+            let key = (tile.texture_id, tile.tile_id.0);
+            if bytes.chunks_exact(4).all(|pixel| pixel[3] == u8::MAX) {
+                self.opaque.insert(key);
+            } else {
+                self.opaque.remove(&key);
+            }
+        }
         Ok(tile)
     }
 
     fn remove(&mut self, tile: AtlasTile) {
         let id = tile.texture_id;
+        self.opaque.remove(&(id, tile.tile_id.0));
 
         let textures = match id.kind {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
@@ -422,5 +446,34 @@ mod tests {
 
         let tile_b = insert_tile(&atlas, big_key_b, big);
         assert_eq!(tile_b.texture_id, keeper_tile.texture_id);
+    }
+
+    #[test]
+    fn opaque_images_are_recorded_and_a_reused_tile_is_recorded_anew() {
+        let Some(atlas) = create_atlas() else {
+            return;
+        };
+        let size = Size {
+            width: DevicePixels(32),
+            height: DevicePixels(32),
+        };
+        let upload = |key: AtlasKey, alpha: u8| {
+            atlas
+                .get_or_insert_with(key, &mut || {
+                    let pixels = (0..32 * 32).flat_map(|_| [10, 20, 30, alpha]).collect();
+                    Ok(Some((size, Cow::Owned(pixels))))
+                })
+                .expect("allocation should succeed")
+                .expect("callback returns Some")
+        };
+        let opaque = upload(make_image_key(11), 255);
+        assert!(atlas.is_opaque(&opaque));
+        let translucent = upload(make_image_key(12), 128);
+        assert!(!atlas.is_opaque(&translucent));
+        // A removed tile is forgotten; its space, reused, is recorded anew.
+        atlas.remove(&make_image_key(11));
+        assert!(!atlas.is_opaque(&opaque));
+        let reused = upload(make_image_key(13), 0);
+        assert!(!atlas.is_opaque(&reused));
     }
 }

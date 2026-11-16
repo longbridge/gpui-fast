@@ -176,7 +176,7 @@ pub(crate) fn draw_scene_masked(
     // Primitives a later opaque rectangle hides are not drawn (none under
     // a mask, whose antialiased edge would show them).
     let occlusion = if mask.is_none() {
-        crate::fast::occlusion::Occlusion::of(scene)
+        crate::fast::occlusion::Occlusion::of(scene, |sprite| target.atlas.is_opaque(&sprite.tile))
     } else {
         crate::fast::occlusion::Occlusion::default()
     };
@@ -329,7 +329,13 @@ pub(crate) fn draw_scene_masked(
                     continue;
                 };
                 let pipeline = &pipelines.mono_sprites;
-                draw.instances(pipeline, range.start, range.len(), Some(&view))
+                let sprites = &scene.monochrome_sprites;
+                crate::fast::occlusion::visible_runs(range, |i| {
+                    let s = &sprites[i];
+                    occlusion.hides_glyph(s.order, &s.bounds, &s.content_mask, &s.transformation)
+                })
+                .into_iter()
+                .try_for_each(|run| draw.instances(pipeline, run.start, run.len(), Some(&view)))
             }
             PrimitiveBatch::SubpixelSprites { texture_id, range } => {
                 // The atlas has released the texture; upstream skips the batch.
@@ -337,7 +343,13 @@ pub(crate) fn draw_scene_masked(
                     continue;
                 };
                 let pipeline = &pipelines.subpixel_sprites;
-                draw.instances(pipeline, range.start, range.len(), Some(&view))
+                let sprites = &scene.subpixel_sprites;
+                crate::fast::occlusion::visible_runs(range, |i| {
+                    let s = &sprites[i];
+                    occlusion.hides_glyph(s.order, &s.bounds, &s.content_mask, &s.transformation)
+                })
+                .into_iter()
+                .try_for_each(|run| draw.instances(pipeline, run.start, run.len(), Some(&view)))
             }
             PrimitiveBatch::PolychromeSprites { texture_id, range }
                 if composite::is_layer_texture(texture_id) =>

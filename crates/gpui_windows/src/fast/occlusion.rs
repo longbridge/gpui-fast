@@ -8,12 +8,15 @@
 //! machine without a GPU) shades every one of those pixels on the CPU, and
 //! that is most of its frame.
 //!
-//! An *occluder* is a quad that paints every pixel of its rectangle
-//! opaquely: a solid background with alpha 1, square corners, and either
-//! no border or an opaque one (a dashed border's gaps show the opaque
-//! background). Its rectangle is its bounds within its content mask. The
-//! rasterizer covers a pixel when the pixel's centre is inside the
-//! primitive's rectangle (an unrounded quad has no antialiased edge), so a
+//! An *occluder* paints every pixel of its rectangle opaquely: a quad with
+//! a solid background at alpha 1, square corners, and either no border or
+//! an opaque one (a dashed border's gaps show the opaque background), or an
+//! image (polychrome sprite) drawn at opacity 1 with square corners whose
+//! every pixel is opaque (the atlas records that as it uploads the image).
+//! Its rectangle is its bounds within its content mask; an image's is inset
+//! by the band where bilinear sampling blends in the atlas around its tile. The rasterizer
+//! covers a pixel when the pixel's centre is inside the primitive's
+//! rectangle (an unrounded quad or sprite has no antialiased edge), so a
 //! primitive whose whole extent lies inside an occluder's rectangle, and
 //! which is painted before it (a lower draw order), changes no pixel the
 //! frame shows: it is skipped.
@@ -26,15 +29,14 @@
 //! Nested backgrounds (a window, its content area, the page in it) then
 //! shade each pixel once.
 //!
-//! Only the largest few occluders are kept ([`MAX_OCCLUDERS`]), and only
-//! quads, shadows and polychrome sprites (images) are culled: they are what
-//! fills large areas. A culled batch is drawn as the runs of primitives
+//! Only the largest few occluders are kept ([`MAX_OCCLUDERS`]). Quads,
+//! shadows, images and untransformed glyphs are culled. A culled batch is drawn as the runs of primitives
 //! left in it. Nothing is culled while a mask is bound (rounded clip
 //! groups), where an occluder's own edge is antialiased by the mask.
 
 use std::ops::Range;
 
-use gpui::{Bounds, ContentMask, Quad, ScaledPixels, Scene};
+use gpui::{Bounds, ContentMask, PolychromeSprite, Quad, ScaledPixels, Scene};
 
 #[cfg(test)]
 thread_local! {
@@ -188,6 +190,42 @@ fn is_plain(quad: &Quad) -> bool {
         && quad.background.as_solid().is_some()
 }
 
+/// Whether `sprite` covers its rectangle as its pixels do: drawn at full
+/// opacity with square corners.
+fn is_image_occluder(sprite: &PolychromeSprite) -> bool {
+    let c = &sprite.corner_radii;
+    sprite.opacity >= 1.0
+        && c.top_left.0 <= 0.0
+        && c.top_right.0 <= 0.0
+        && c.bottom_left.0 <= 0.0
+        && c.bottom_right.0 <= 0.0
+}
+
+/// The rectangle an opaque image covers opaquely: its bounds within its
+/// mask, less the band along its edges where bilinear sampling reaches the
+/// atlas texels around its tile (half a texel at the scale it is drawn,
+/// and a pixel more).
+fn image_rect(sprite: &PolychromeSprite) -> Rect {
+    let texels = sprite.tile.bounds.size;
+    let scale = |drawn: f32, texels: i32| drawn / texels.max(1) as f32;
+    let margin_x = 0.5 * scale(sprite.bounds.size.width.0, texels.width.0) + 1.0;
+    let margin_y = 0.5 * scale(sprite.bounds.size.height.0, texels.height.0) + 1.0;
+    let r = Rect::of(&sprite.bounds, &sprite.content_mask);
+    let b = Rect::of(
+        &sprite.bounds,
+        &ContentMask {
+            bounds: sprite.bounds,
+        },
+    );
+    // Only the image's own edges are inset; a mask edge inside it is not.
+    Rect {
+        x0: r.x0.max(b.x0 + margin_x),
+        y0: r.y0.max(b.y0 + margin_y),
+        x1: r.x1.min(b.x1 - margin_x),
+        y1: r.y1.min(b.y1 - margin_y),
+    }
+}
+
 pub(crate) fn is_occluder(quad: &Quad) -> bool {
     let c = &quad.corner_radii;
     let square = c.top_left.0 <= 0.0
@@ -205,22 +243,41 @@ pub(crate) fn is_occluder(quad: &Quad) -> bool {
 }
 
 impl Occlusion {
-    /// The largest occluders among `scene`'s quads.
-    pub(crate) fn of(scene: &Scene) -> Occlusion {
+    /// The largest occluders among `scene`'s quads and images;
+    /// `opaque_image` tells whether a sprite's pixels are all opaque.
+    pub(crate) fn of(scene: &Scene, opaque_image: impl Fn(&PolychromeSprite) -> bool) -> Occlusion {
         if !enabled() {
             return Occlusion::default();
         }
-        Occlusion::of_quads(&scene.quads)
+        Occlusion::collect(&scene.quads, &scene.polychrome_sprites, opaque_image)
     }
 
+    #[cfg(test)]
     fn of_quads(quads: &[Quad]) -> Occlusion {
-        let mut occluders: Vec<Occluder> = quads
+        Occlusion::collect(quads, &[], |_| false)
+    }
+
+    fn collect(
+        quads: &[Quad],
+        sprites: &[PolychromeSprite],
+        opaque_image: impl Fn(&PolychromeSprite) -> bool,
+    ) -> Occlusion {
+        let quads = quads
             .iter()
             .filter(|quad| is_occluder(quad))
             .map(|quad| Occluder {
                 order: quad.order,
                 rect: Rect::of(&quad.bounds, &quad.content_mask),
-            })
+            });
+        let images = sprites
+            .iter()
+            .filter(|sprite| is_image_occluder(sprite) && opaque_image(sprite))
+            .map(|sprite| Occluder {
+                order: sprite.order,
+                rect: image_rect(sprite),
+            });
+        let mut occluders: Vec<Occluder> = quads
+            .chain(images)
             .filter(|o| o.rect.area() >= MIN_OCCLUDER_AREA)
             .collect();
         occluders.sort_by(|a, b| b.rect.area().total_cmp(&a.rect.area()));
@@ -283,6 +340,21 @@ impl Occlusion {
                 .outset(3.0 * shadow.blur_radius.0.max(0.0))
         };
         self.hides(shadow.order, &rect)
+    }
+
+    /// Whether a glyph (a monochrome or subpixel sprite) is hidden; one
+    /// drawn through a transformation never is.
+    pub(crate) fn hides_glyph(
+        &self,
+        order: u32,
+        bounds: &Bounds<ScaledPixels>,
+        content_mask: &ContentMask<ScaledPixels>,
+        transformation: &gpui::TransformationMatrix,
+    ) -> bool {
+        let unit = gpui::TransformationMatrix::unit();
+        transformation.rotation_scale == unit.rotation_scale
+            && transformation.translation == unit.translation
+            && self.hides(order, &Rect::of(bounds, content_mask))
     }
 
     pub(crate) fn hides_sprite(&self, sprite: &gpui::PolychromeSprite) -> bool {
