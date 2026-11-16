@@ -12,8 +12,10 @@ pub(crate) mod bind_groups;
 #[cfg(not(target_family = "wasm"))]
 pub(crate) mod composition;
 pub(crate) mod dynamic_textures;
+pub(crate) mod emoji_fonts;
 pub(crate) mod frame;
 pub(crate) mod globals;
 pub(crate) mod layers;
+pub(crate) mod native_gl;
 pub(crate) mod pass_state;
 pub(crate) mod rounded_clip;

@@ -1905,13 +1905,6 @@ fn a_view_around_a_notified_nested_view_is_drawn_around_it() {
 /// a uniform_list item. Keeping its parent must still run this placement.
 struct RootPlacer(crate::AnyElement);
 
-impl IntoElement for RootPlacer {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl crate::Element for RootPlacer {
     type RequestLayoutState = ();
     type PrepaintState = ();
