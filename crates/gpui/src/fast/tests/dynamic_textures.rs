@@ -65,14 +65,6 @@ struct TexturePaint {
     texture: DynamicTexture,
 }
 
-impl IntoElement for TexturePaint {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl Element for TexturePaint {
     type RequestLayoutState = ();
     type PrepaintState = ();

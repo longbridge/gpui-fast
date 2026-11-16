@@ -735,14 +735,6 @@ struct MeasuredLeaf {
     height: Rc<Cell<f32>>,
 }
 
-impl IntoElement for MeasuredLeaf {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl crate::Element for MeasuredLeaf {
     type RequestLayoutState = ();
     type PrepaintState = ();
