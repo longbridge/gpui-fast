@@ -147,7 +147,11 @@ impl AppCell {
             self.borrow_origin
                 .set(Some((std::panic::Location::caller(), "shared")));
         }
-        AppRef(borrow)
+        AppRef(
+            borrow,
+            #[cfg(target_os = "windows")]
+            crate::fast::app_borrow::Guard::new(),
+        )
     }
 
     #[doc(hidden)]
@@ -176,13 +180,22 @@ impl AppCell {
         };
         self.borrow_origin
             .set(Some((std::panic::Location::caller(), "mutable")));
-        Ok(AppRefMut(borrow))
+        Ok(AppRefMut(
+            borrow,
+            #[cfg(target_os = "windows")]
+            crate::fast::app_borrow::Guard::new(),
+        ))
     }
 }
 
 #[doc(hidden)]
 #[derive(Deref, DerefMut)]
-pub struct AppRef<'a>(Ref<'a, App>);
+pub struct AppRef<'a>(
+    #[deref]
+    #[deref_mut]
+    Ref<'a, App>,
+    #[cfg(target_os = "windows")] crate::fast::app_borrow::Guard,
+);
 
 impl Drop for AppRef<'_> {
     fn drop(&mut self) {
@@ -195,7 +208,12 @@ impl Drop for AppRef<'_> {
 
 #[doc(hidden)]
 #[derive(Deref, DerefMut)]
-pub struct AppRefMut<'a>(RefMut<'a, App>);
+pub struct AppRefMut<'a>(
+    #[deref]
+    #[deref_mut]
+    RefMut<'a, App>,
+    #[cfg(target_os = "windows")] crate::fast::app_borrow::Guard,
+);
 
 impl Drop for AppRefMut<'_> {
     fn drop(&mut self) {

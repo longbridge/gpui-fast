@@ -45,7 +45,8 @@ impl SendForegroundExecutor {
     where
         R: Send + 'static,
     {
-        self.inner.spawn(future)
+        self.inner
+            .spawn(crate::fast::app_borrow::foreground(future))
     }
 }
 
@@ -379,7 +380,8 @@ impl ForegroundExecutor {
     where
         R: 'static,
     {
-        self.inner.spawn(future.boxed_local())
+        self.inner
+            .spawn(crate::fast::app_borrow::foreground(future).boxed_local())
     }
 
     /// Enqueues the given Task to run on the main thread with the given priority.
@@ -393,7 +395,8 @@ impl ForegroundExecutor {
         R: 'static,
     {
         // Priority is ignored for foreground tasks - they run in order on the main thread
-        self.inner.spawn(future)
+        self.inner
+            .spawn(crate::fast::app_borrow::foreground(future))
     }
 
     /// On platforms with dedicated support, enqueues the given future to run
@@ -414,6 +417,7 @@ impl ForegroundExecutor {
     where
         R: 'static,
     {
+        let future = crate::fast::app_borrow::foreground(future);
         let dispatcher = self.dispatcher.clone();
         #[cfg(feature = "profiler")]
         let foreground_runnables = self.foreground_runnables.clone();

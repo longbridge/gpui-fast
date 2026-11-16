@@ -15,6 +15,7 @@
 //! root one by one, in `gpui.rs`.
 
 pub(crate) mod a11y;
+pub(crate) mod app_borrow;
 pub(crate) mod composition;
 pub(crate) mod dependencies;
 pub(crate) mod dispatch;
