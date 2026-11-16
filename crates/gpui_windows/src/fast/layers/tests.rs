@@ -1101,15 +1101,38 @@ struct PartialDrawer<'a> {
     size: (u32, u32),
     clear: Rgba,
     target: Option<windows::Win32::Graphics::Direct3D11::ID3D11RenderTargetView>,
+    /// Drawing fails (a device error mid-frame).
+    fail: bool,
 }
 
 impl crate::fast::partial::Drawer for PartialDrawer<'_> {
+    fn clear(&self) -> [f32; 4] {
+        [self.clear.r, self.clear.g, self.clear.b, self.clear.a]
+    }
+
+    fn prepare(&mut self) -> Result<()> {
+        let harness = &mut *self.harness;
+        let tiles = Target {
+            device: &harness.device,
+            device_context: &harness.context,
+            atlas: &harness.atlas,
+            globals: &harness.globals,
+            paths: None,
+        };
+        rasterize(
+            &tiles,
+            &mut harness.pipelines,
+            &mut harness.frame,
+            self.scene,
+        )
+    }
+
     fn begin(
         &mut self,
         target: &Option<windows::Win32::Graphics::Direct3D11::ID3D11RenderTargetView>,
-    ) -> Result<[f32; 4]> {
+    ) -> Result<()> {
         let (width, height) = self.size;
-        let clear = [self.clear.r, self.clear.g, self.clear.b, self.clear.a];
+        let clear = crate::fast::partial::Drawer::clear(self);
         let globals = create_globals(&self.harness.device, width, height)?;
         let context = &self.harness.context;
         unsafe {
@@ -1131,10 +1154,25 @@ impl crate::fast::partial::Drawer for PartialDrawer<'_> {
             context.PSSetConstantBuffers(0, Some(slice::from_ref(&globals)));
         }
         self.target = target.clone();
-        Ok(clear)
+        Ok(())
+    }
+
+    fn upload(&mut self) -> Result<()> {
+        let harness = &mut *self.harness;
+        let target = Target {
+            device: &harness.device,
+            device_context: &harness.context,
+            atlas: &harness.atlas,
+            globals: &harness.globals,
+            paths: None,
+        };
+        upload(&target, &mut harness.pipelines, self.scene)
     }
 
     fn draw(&mut self) -> Result<bool> {
+        if self.fail {
+            anyhow::bail!("the drawer fails");
+        }
         let (width, height) = self.size;
         let harness = &mut *self.harness;
         let (intermediate_texture, intermediate_srv) =
@@ -1154,7 +1192,6 @@ impl crate::fast::partial::Drawer for PartialDrawer<'_> {
                 msaa_view: &msaa_view,
             }),
         };
-        upload(&target, &mut harness.pipelines, self.scene)?;
         draw_scene(
             &target,
             &mut harness.pipelines,
@@ -1175,8 +1212,18 @@ fn partial_frame(
     scene: &Scene,
     uploaded: &[AtlasTile],
 ) -> Option<(bool, usize)> {
+    partial_frame_cleared(harness, partial, scene, uploaded, rgba(0xffffffff))
+}
+
+/// [`partial_frame`] in a window cleared to `clear`.
+fn partial_frame_cleared(
+    harness: &mut Harness,
+    partial: &mut crate::fast::partial::Partial,
+    scene: &Scene,
+    uploaded: &[AtlasTile],
+    clear: Rgba,
+) -> Option<(bool, usize)> {
     let size = (1024u32, 1024u32);
-    let clear = rgba(0xffffffff);
     let uploaded = uploaded
         .iter()
         .map(|tile| (tile.texture_id, tile.tile_id.0))
@@ -1189,6 +1236,7 @@ fn partial_frame(
             size,
             clear,
             target: None,
+            fail: false,
         };
         partial
             .frame(&device, &context, size, scene, &uploaded, &mut drawer)
@@ -1309,5 +1357,120 @@ fn partial_redraw_draws_a_tile_uploaded_again() {
     assert_eq!(
         partial_frame(&mut harness, &mut partial, &scene, &[image]),
         Some((false, 1))
+    );
+}
+
+/// A glyph drawn large and turned by `angle` about its centre, over a
+/// plain background.
+fn turned_sprite_scene(harness: &Harness, angle: f32) -> Scene {
+    let mut scene = Scene::default();
+    scene.insert_primitive(quad(sp(0., 0., 1024., 1024.), Hsla::from(rgba(0x101418ff))));
+    let (sin, cos) = angle.sin_cos();
+    let (cx, cy) = (400. + 60., 400. + 60.);
+    scene.insert_primitive(MonochromeSprite {
+        order: 0,
+        pad: 0,
+        bounds: sp(400., 400., 120., 120.),
+        content_mask: ContentMask {
+            bounds: sp(0., 0., 1024., 1024.),
+        },
+        color: Hsla::from(rgba(0xffffffff)),
+        tile: glyph_tile(harness, 1, false),
+        transformation: TransformationMatrix {
+            rotation_scale: [[cos, -sin], [sin, cos]],
+            translation: [cx - cos * cx + sin * cy, cy - sin * cx - cos * cy],
+        },
+    });
+    scene.finish();
+    scene
+}
+
+#[test]
+fn partial_redraw_reaches_where_a_transformation_takes_a_sprite() {
+    let Some(mut harness) = Harness::new() else {
+        eprintln!("skipped: no Direct3D 11 device");
+        return;
+    };
+    let mut partial = crate::fast::partial::Partial::enabled();
+    let mut made = Vec::new();
+    for angle in [0., 0.4, 0.8, 1.9] {
+        let scene = turned_sprite_scene(&harness, angle);
+        made.push(partial_frame(&mut harness, &mut partial, &scene, &[]));
+    }
+    // Each turn is one rectangle of damage, the turned sprite's corners in it.
+    assert_eq!(
+        made,
+        [None, Some((false, 1)), Some((false, 1)), Some((false, 1))]
+    );
+}
+
+#[test]
+fn partial_redraw_draws_whole_when_the_clear_colour_changes() {
+    let Some(mut harness) = Harness::new() else {
+        eprintln!("skipped: no Direct3D 11 device");
+        return;
+    };
+    let mut partial = crate::fast::partial::Partial::enabled();
+    // No background: the clear colour shows between the primitives.
+    let scene = scrolled_scene(&harness, 0., None, false);
+    let white = rgba(0xffffffff);
+    let clear = rgba(0x00000000);
+    assert_eq!(
+        partial_frame_cleared(&mut harness, &mut partial, &scene, &[], white),
+        None
+    );
+    assert_eq!(
+        partial_frame_cleared(&mut harness, &mut partial, &scene, &[], white),
+        Some((false, 0))
+    );
+    assert_eq!(
+        partial_frame_cleared(&mut harness, &mut partial, &scene, &[], clear),
+        None
+    );
+    assert_eq!(
+        partial_frame_cleared(&mut harness, &mut partial, &scene, &[], clear),
+        Some((false, 0))
+    );
+}
+
+#[test]
+fn partial_redraw_puts_the_rasterizer_state_back_when_drawing_fails() {
+    let Some(mut harness) = Harness::new() else {
+        eprintln!("skipped: no Direct3D 11 device");
+        return;
+    };
+    let mut partial = crate::fast::partial::Partial::enabled();
+    let scene = scrolled_scene(&harness, 0., None, true);
+    assert_eq!(partial_frame(&mut harness, &mut partial, &scene, &[]), None);
+    let (device, context) = (harness.device.clone(), harness.context.clone());
+    let bound = || unsafe { context.RSGetState() }.ok();
+    let before = bound();
+    // A frame of damage whose drawing fails.
+    let scrolled = scrolled_scene(&harness, -48., None, true);
+    let failed = {
+        let mut drawer = PartialDrawer {
+            harness: &mut harness,
+            scene: &scrolled,
+            size: (1024, 1024),
+            clear: rgba(0xffffffff),
+            target: None,
+            fail: true,
+        };
+        partial.frame(
+            &device,
+            &context,
+            (1024, 1024),
+            &scrolled,
+            &Default::default(),
+            &mut drawer,
+        )
+    };
+    assert!(failed.is_err());
+    assert_eq!(bound(), before, "the scissor test is left on");
+    // The half-drawn canvas is forgotten: the next frame is drawn whole,
+    // and right.
+    assert_eq!(
+        partial_frame(&mut harness, &mut partial, &scrolled, &[]),
+        None
     );
 }

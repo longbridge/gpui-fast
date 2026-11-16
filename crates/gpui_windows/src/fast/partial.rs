@@ -38,6 +38,10 @@
 //!   slot, a glyph evicted and rasterized again) makes its sprites changed,
 //!   whatever their bytes say ([`Uploads`]); a dynamic texture's sprites
 //!   always are.
+//! - A sprite drawn through a transformation (a rotating icon) reaches
+//!   wherever its matrix takes its bounds, and is never a moved pair.
+//! - A change of the clear colour (the window's background appearance)
+//!   draws the frame whole.
 //! - A rounded clip (a sprite standing for a scene drawn through its
 //!   rounded bounds) looks like that scene seen from the sprite: its
 //!   signature is the scene's, relative to it, so it stays or moves as one.
@@ -61,14 +65,14 @@ use std::hash::{Hash, Hasher};
 
 use anyhow::{Context as _, Result};
 use gpui::{
-    AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, ContentMask, Corners, Edges, Hsla, IsZero,
-    ScaledPixels, Scene,
+    AtlasTextureId, AtlasTextureKind, AtlasTile, Background, Bounds, ContentMask, Corners, Edges,
+    Hsla, IsZero, ScaledPixels, Scene, TransformationMatrix,
 };
 use windows::Win32::{
     Foundation::RECT,
     Graphics::{
         Direct3D11::{
-            D3D11_BIND_RENDER_TARGET, D3D11_BOX, D3D11_CULL_NONE, D3D11_FILL_SOLID,
+            D3D11_BIND_RENDER_TARGET, D3D11_BOX, D3D11_CULL_BACK, D3D11_FILL_SOLID,
             D3D11_RASTERIZER_DESC, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11Device,
             ID3D11DeviceContext, ID3D11DeviceContext1, ID3D11RasterizerState,
             ID3D11RenderTargetView, ID3D11Texture2D, ID3D11View,
@@ -85,6 +89,8 @@ use crate::directx_renderer::RENDER_TARGET_FORMAT;
 const MAX_DAMAGE: f32 = 0.6;
 /// More damage rectangles than this are merged into their box.
 const MAX_RECTS: usize = 8;
+/// More rectangles than this are first gathered into bands of the window.
+const MAX_MERGED: usize = 64;
 /// A scroll needs this many primitives moved alike.
 const MIN_MOVED: usize = 4;
 /// How far two coordinates computed apart may differ and be the same.
@@ -337,14 +343,74 @@ impl Key {
             .u(t.bounds.size.height.0 as u64)
     }
 
-    fn debug(mut self, value: &dyn std::fmt::Debug) -> Key {
-        format!("{value:?}").hash(&mut self.0);
-        self
+    /// A background: its colour, or for a gradient (rare) its description.
+    fn background(mut self, background: &Background) -> Key {
+        match background.as_solid() {
+            Some(color) => self.u(0).color(&color),
+            None => {
+                format!("{background:?}").hash(&mut self.0);
+                self
+            }
+        }
+    }
+
+    /// A sprite's transformation. A transformed sprite is drawn where its
+    /// matrix takes its bounds, so it is keyed with where they are: moved,
+    /// it is another sprite.
+    fn transformation(self, t: &TransformationMatrix, bounds: &Bounds<ScaledPixels>) -> Key {
+        let key = self
+            .f(t.rotation_scale[0][0])
+            .f(t.rotation_scale[0][1])
+            .f(t.rotation_scale[1][0])
+            .f(t.rotation_scale[1][1])
+            .f(t.translation[0])
+            .f(t.translation[1]);
+        if is_unit(t) {
+            key
+        } else {
+            key.f(bounds.origin.x.0).f(bounds.origin.y.0)
+        }
     }
 
     fn done(self) -> u64 {
         self.0.finish()
     }
+}
+
+fn is_unit(t: &TransformationMatrix) -> bool {
+    t.rotation_scale == [[1.0, 0.0], [0.0, 1.0]] && t.translation == [0.0, 0.0]
+}
+
+/// The box of where `t` takes `bounds`. The matrix is read both ways round
+/// (rows or columns first), so that the box holds whichever the shader does.
+fn transformed(bounds: &Bounds<ScaledPixels>, t: &TransformationMatrix) -> Area {
+    let area = Area::of(bounds);
+    if is_unit(t) {
+        return area;
+    }
+    let m = t.rotation_scale;
+    let mut out: Option<Area> = None;
+    for (x, y) in [
+        (area.x0, area.y0),
+        (area.x1, area.y0),
+        (area.x0, area.y1),
+        (area.x1, area.y1),
+    ] {
+        for (tx, ty) in [
+            (m[0][0] * x + m[0][1] * y, m[1][0] * x + m[1][1] * y),
+            (m[0][0] * x + m[1][0] * y, m[0][1] * x + m[1][1] * y),
+        ] {
+            let (tx, ty) = (tx + t.translation[0], ty + t.translation[1]);
+            let point = Area {
+                x0: tx,
+                y0: ty,
+                x1: tx,
+                y1: ty,
+            };
+            out = Some(out.map_or(point, |o| o.union(&point)));
+        }
+    }
+    out.unwrap_or(area)
 }
 
 fn sig(
@@ -385,12 +451,10 @@ pub(crate) fn signatures(
     let mut out = Vec::with_capacity(scene.len());
     for q in &scene.quads {
         let solid = q.background.as_solid();
-        let key = Key::new(1).size(&q.bounds).u(q.border_style as u64);
-        let key = match &solid {
-            Some(color) => key.color(color),
-            None => key.debug(&q.background),
-        };
-        let key = key
+        let key = Key::new(1)
+            .size(&q.bounds)
+            .u(q.border_style as u64)
+            .background(&q.background)
             .color(&q.border_color)
             .corners(&q.corner_radii)
             .edges(&q.border_widths)
@@ -429,7 +493,7 @@ pub(crate) fn signatures(
             .size(&u.bounds)
             .color(&u.color)
             .f(u.thickness.0)
-            .debug(&u.wavy)
+            .u((u.wavy == true.into()) as u64)
             .done();
         out.push(sig(key, u.order, &u.bounds, &u.content_mask, 1.0));
     }
@@ -439,14 +503,10 @@ pub(crate) fn signatures(
             .size(&g.bounds)
             .tile(&g.tile)
             .color(&g.color)
-            .f(t.rotation_scale[0][0])
-            .f(t.rotation_scale[0][1])
-            .f(t.rotation_scale[1][0])
-            .f(t.rotation_scale[1][1])
-            .f(t.translation[0])
-            .f(t.translation[1])
+            .transformation(t, &g.bounds)
             .done();
         let mut s = sig(key, g.order, &g.bounds, &g.content_mask, 1.0);
+        s.reach = transformed(&g.bounds, t).grown(1.0).and(&s.mask);
         s.fresh = fresh(&g.tile);
         out.push(s);
     }
@@ -456,14 +516,10 @@ pub(crate) fn signatures(
             .size(&g.bounds)
             .tile(&g.tile)
             .color(&g.color)
-            .f(t.rotation_scale[0][0])
-            .f(t.rotation_scale[0][1])
-            .f(t.rotation_scale[1][0])
-            .f(t.rotation_scale[1][1])
-            .f(t.translation[0])
-            .f(t.translation[1])
+            .transformation(t, &g.bounds)
             .done();
         let mut s = sig(key, g.order, &g.bounds, &g.content_mask, 1.0);
+        s.reach = transformed(&g.bounds, t).grown(1.0).and(&s.mask);
         s.fresh = fresh(&g.tile);
         out.push(s);
     }
@@ -505,7 +561,7 @@ pub(crate) fn signatures(
         let key = Key::new(6)
             .size(&p.bounds)
             .tile(&p.tile)
-            .debug(&p.grayscale)
+            .u((p.grayscale == true.into()) as u64)
             .f(p.opacity)
             .corners(&p.corner_radii)
             .done();
@@ -515,7 +571,7 @@ pub(crate) fn signatures(
     }
     for p in &scene.paths {
         // A path is its vertices where they are: one that moved is new.
-        let mut key = Key::new(7).debug(&p.color);
+        let mut key = Key::new(7).background(&p.color);
         for v in &p.vertices {
             key = key
                 .f(v.xy_position.x.0)
@@ -543,13 +599,21 @@ fn placed(s: &Sig) -> (u64, [u32; 4], [u32; 4]) {
     (s.key, s.bounds.bits(), s.mask.bits())
 }
 
+/// A coordinate to 1/64 of a pixel: what finds candidates for a pair. Two
+/// places computed apart (a scrolled place by layout, and the last one plus
+/// the scroll) can differ in their last bits; candidates are then compared
+/// within [`SAME`].
+fn coarse(v: f32) -> i64 {
+    (v * 64.0).round() as i64
+}
+
 /// A primitive apart from its vertical place.
-fn shape(s: &Sig) -> (u64, u32, u32, u32) {
+fn shape(s: &Sig) -> (u64, i64, i64, i64) {
     (
         s.key,
-        s.bounds.x0.to_bits(),
-        (s.bounds.x1 - s.bounds.x0).to_bits(),
-        (s.bounds.y1 - s.bounds.y0).to_bits(),
+        coarse(s.bounds.x0),
+        coarse(s.bounds.x1 - s.bounds.x0),
+        coarse(s.bounds.y1 - s.bounds.y0),
     )
 }
 
@@ -579,18 +643,34 @@ fn tidy(rects: Vec<Area>, view: &Area) -> Vec<Area> {
         .map(|r| r.pixels().and(view))
         .filter(|r| !r.is_empty())
         .collect();
+    if rects.len() > MAX_MERGED {
+        // Many (a page changed): their boxes by band of the window, so that
+        // what follows is quick. More damage than needed is still right.
+        let band = ((view.y1 - view.y0) / 16.0).max(1.0);
+        let mut bands: HashMap<i64, Area> = HashMap::new();
+        for r in &rects {
+            bands
+                .entry((r.y0 / band).floor() as i64)
+                .and_modify(|b| *b = b.union(r))
+                .or_insert(*r);
+        }
+        rects = bands.into_values().collect();
+    }
     loop {
         let mut merged = false;
-        'search: for i in 0..rects.len() {
-            for j in i + 1..rects.len() {
+        let mut i = 0;
+        while i < rects.len() {
+            let mut j = i + 1;
+            while j < rects.len() {
                 if rects[i].touches(&rects[j]) {
-                    let both = rects[i].union(&rects[j]);
+                    rects[i] = rects[i].union(&rects[j]);
                     rects.swap_remove(j);
-                    rects[i] = both;
                     merged = true;
-                    break 'search;
+                } else {
+                    j += 1;
                 }
             }
+            i += 1;
         }
         if !merged {
             break;
@@ -688,7 +768,7 @@ pub(crate) fn plan(old: &[Sig], new: &[Sig], view: Area) -> Option<Plan> {
     for &i in &changed_new {
         let moved = by_shape.get(&shape(&new[i])).is_some_and(|js| {
             js.iter()
-                .any(|&j| new[i].bounds.y0 - old[j].bounds.y0 == dy)
+                .any(|&j| (new[i].bounds.y0 - old[j].bounds.y0 - dy).abs() < SAME)
         });
         if moved && !new[i].fresh {
             region = Some(region.map_or(new[i].mask, |r| r.union(&new[i].mask)));
@@ -711,7 +791,7 @@ pub(crate) fn plan(old: &[Sig], new: &[Sig], view: Area) -> Option<Plan> {
     // clip, showing the same part of itself where the copy lands.
     let mut pool: HashMap<_, Vec<usize>> = HashMap::new();
     for &j in &changed_old {
-        pool.entry((shape(&old[j]), (old[j].bounds.y0 + dy).to_bits()))
+        pool.entry((shape(&old[j]), coarse(old[j].bounds.y0 + dy)))
             .or_default()
             .push(j);
     }
@@ -722,12 +802,14 @@ pub(crate) fn plan(old: &[Sig], new: &[Sig], view: Area) -> Option<Plan> {
         if s.fresh || !s.reach.within(&region) {
             continue;
         }
-        let Some(candidates) = pool.get_mut(&(shape(s), s.bounds.y0.to_bits())) else {
+        let Some(candidates) = pool.get_mut(&(shape(s), coarse(s.bounds.y0))) else {
             continue;
         };
         let fits = |j: &usize| {
             let o = &old[*j];
-            o.reach.within(&region) && o.reach.moved(dy).and(&to).same(&s.reach.and(&to))
+            o.bounds.moved(dy).same(&s.bounds)
+                && o.reach.within(&region)
+                && o.reach.moved(dy).and(&to).same(&s.reach.and(&to))
         };
         if let Some(k) = candidates.iter().position(fits) {
             let j = candidates.remove(k);
@@ -774,17 +856,24 @@ pub(crate) fn plan(old: &[Sig], new: &[Sig], view: Area) -> Option<Plan> {
         }
         let over = s.reach.and(&region);
         if s.plain {
-            // One colour: only the bands the copy moved its edges through.
+            // One colour: only the bands the copy moved its edges through,
+            // and only its edges inside the clip (past the clip's edge the
+            // copy brings nothing in from outside it).
             let reach = dy.abs();
-            let top = Area {
-                y1: (over.y0 + reach).min(over.y1),
-                ..over
-            };
-            let bottom = Area {
-                y0: (over.y1 - reach).max(over.y0),
-                ..over
-            };
-            damage.extend([top, bottom, copied(&top), copied(&bottom)]);
+            if s.reach.y0 > region.y0 + SAME {
+                let top = Area {
+                    y1: (over.y0 + reach).min(over.y1),
+                    ..over
+                };
+                damage.extend([top, copied(&top)]);
+            }
+            if s.reach.y1 < region.y1 - SAME {
+                let bottom = Area {
+                    y0: (over.y1 - reach).max(over.y0),
+                    ..over
+                };
+                damage.extend([bottom, copied(&bottom)]);
+            }
         } else {
             damage.push(over);
             damage.push(copied(&over));
@@ -802,10 +891,55 @@ pub(crate) fn plan(old: &[Sig], new: &[Sig], view: Area) -> Option<Plan> {
 
 /// What draws a scene for [`Partial::frame`].
 pub(crate) trait Drawer {
+    /// The colour a frame is cleared to.
+    fn clear(&self) -> [f32; 4];
+    /// What a frame needs before anything is drawn (the tile cache's and
+    /// the rounded clips' frame), drawn or not.
+    fn prepare(&mut self) -> Result<()>;
     /// Makes `target` the render target, cleared, with the frame's state bound.
-    fn begin(&mut self, target: &Option<ID3D11RenderTargetView>) -> Result<[f32; 4]>;
-    /// Draws the scene into it; `false` when it could not.
+    fn begin(&mut self, target: &Option<ID3D11RenderTargetView>) -> Result<()>;
+    /// Uploads the scene's primitives.
+    fn upload(&mut self) -> Result<()>;
+    /// Draws the uploaded scene into the target; `false` when it could not.
     fn draw(&mut self) -> Result<bool>;
+}
+
+/// The scissor test turned on in the rasterizer state that is bound, until
+/// dropped: whatever happens meanwhile, the state that was bound is back.
+struct Scissor<'a> {
+    context: &'a ID3D11DeviceContext,
+    bound: Option<ID3D11RasterizerState>,
+}
+
+impl<'a> Scissor<'a> {
+    fn on(device: &ID3D11Device, context: &'a ID3D11DeviceContext) -> Result<Scissor<'a>> {
+        // SAFETY: queries on the device's thread; out-pointers to locals.
+        unsafe {
+            let bound = context.RSGetState().ok();
+            // Direct3D's state when none is bound.
+            let mut desc = D3D11_RASTERIZER_DESC {
+                FillMode: D3D11_FILL_SOLID,
+                CullMode: D3D11_CULL_BACK,
+                DepthClipEnable: true.into(),
+                ..Default::default()
+            };
+            if let Some(bound) = &bound {
+                bound.GetDesc(&mut desc);
+            }
+            desc.ScissorEnable = true.into();
+            let mut scissored = None;
+            device.CreateRasterizerState(&desc, Some(&mut scissored))?;
+            context.RSSetState(scissored.as_ref());
+            Ok(Scissor { context, bound })
+        }
+    }
+}
+
+impl Drop for Scissor<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the state that was bound, on the device's thread.
+        unsafe { self.context.RSSetState(self.bound.as_ref()) };
+    }
 }
 
 struct Canvas {
@@ -814,8 +948,8 @@ struct Canvas {
     views: [Option<ID3D11RenderTargetView>; 2],
     current: usize,
     last: Vec<Sig>,
-    scissored: ID3D11RasterizerState,
-    unscissored: ID3D11RasterizerState,
+    /// What the last frame was cleared to.
+    clear: [f32; 4],
 }
 
 /// A window's partial redraw.
@@ -889,75 +1023,37 @@ impl Partial {
             x1: size.0 as f32,
             y1: size.1 as f32,
         };
-        let plan = if canvas.last.is_empty() {
+        let clear = drawer.clear();
+        // Another clear colour (the window's background appearance changed)
+        // shows wherever nothing is drawn: the frame is drawn whole.
+        let plan = if canvas.last.is_empty() || canvas.clear != clear {
             None
         } else {
             plan(&canvas.last, &sigs, view)
         };
-        let drawn = match &plan {
-            // Nothing changed: the last canvas again.
-            Some(plan) if plan.shift.is_none() && plan.damage.is_empty() => true,
-            Some(plan) => {
-                let next = 1 - canvas.current;
-                let clear = drawer.begin(&canvas.views[next])?;
-                // SAFETY: Direct3D calls on the device's thread with live
-                // objects; the boxes lie within the canvases.
-                unsafe {
-                    context.CopyResource(&canvas.textures[next], &canvas.textures[canvas.current]);
-                    if let Some((from, to)) = &plan.shift {
-                        let from_box = D3D11_BOX {
-                            left: from.x0 as u32,
-                            top: from.y0 as u32,
-                            front: 0,
-                            right: from.x1 as u32,
-                            bottom: from.y1 as u32,
-                            back: 1,
-                        };
-                        context.CopySubresourceRegion(
-                            &canvas.textures[next],
-                            0,
-                            to.x0 as u32,
-                            to.y0 as u32,
-                            0,
-                            &canvas.textures[canvas.current],
-                            0,
-                            Some(&from_box),
-                        );
-                    }
-                }
-                let rects: Vec<RECT> = plan.damage.iter().map(Area::rect).collect();
-                let mut drawn = true;
-                if !rects.is_empty() {
-                    // SAFETY: as above; the scissor state is put back.
-                    unsafe {
-                        if let Some(target) = canvas.views[next].as_ref() {
-                            context1.ClearView(&target.cast::<ID3D11View>()?, &clear, Some(&rects));
-                        }
-                        context.RSSetState(&canvas.scissored);
-                    }
-                    for rect in &rects {
-                        // SAFETY: as above.
-                        unsafe { context.RSSetScissorRects(Some(std::slice::from_ref(rect))) };
-                        drawn = drawn && drawer.draw()?;
-                    }
-                    // SAFETY: as above.
-                    unsafe { context.RSSetState(&canvas.unscissored) };
-                }
-                canvas.current = next;
-                drawn
+        let drawn = match canvas.make(
+            device,
+            context,
+            &context1,
+            scene,
+            plan.as_ref(),
+            clear,
+            drawer,
+        ) {
+            Ok(true) => true,
+            Ok(false) => {
+                self.canvas = None;
+                return Ok(None);
             }
-            None => {
-                let next = 1 - canvas.current;
-                drawer.begin(&canvas.views[next])?;
-                canvas.current = next;
-                drawer.draw()?
+            Err(error) => {
+                // The canvas is half drawn.
+                self.canvas = None;
+                return Err(error);
             }
         };
-        if !drawn {
-            self.canvas = None;
-            return Ok(None);
-        }
+        debug_assert!(drawn);
         canvas.last = sigs;
+        canvas.clear = clear;
         let texture = canvas.textures[canvas.current].clone();
         self.last_plan = plan;
         Ok(Some(texture))
@@ -965,6 +1061,81 @@ impl Partial {
 }
 
 impl Canvas {
+    /// Makes the next frame by `plan` (`None`: whole); `false` when the
+    /// scene could not be drawn.
+    #[allow(clippy::too_many_arguments)]
+    fn make(
+        &mut self,
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        context1: &ID3D11DeviceContext1,
+        scene: &Scene,
+        plan: Option<&Plan>,
+        clear: [f32; 4],
+        drawer: &mut dyn Drawer,
+    ) -> Result<bool> {
+        drawer.prepare()?;
+        let next = 1 - self.current;
+        let Some(plan) = plan else {
+            drawer.begin(&self.views[next])?;
+            drawer.upload()?;
+            self.current = next;
+            return drawer.draw();
+        };
+        // Nothing changed: the last canvas again.
+        if plan.shift.is_none() && plan.damage.is_empty() {
+            return Ok(true);
+        }
+        drawer.begin(&self.views[next])?;
+        // SAFETY: Direct3D calls on the device's thread with live objects;
+        // the boxes lie within the canvases.
+        unsafe {
+            context.CopyResource(&self.textures[next], &self.textures[self.current]);
+            if let Some((from, to)) = &plan.shift {
+                let from_box = D3D11_BOX {
+                    left: from.x0 as u32,
+                    top: from.y0 as u32,
+                    front: 0,
+                    right: from.x1 as u32,
+                    bottom: from.y1 as u32,
+                    back: 1,
+                };
+                context.CopySubresourceRegion(
+                    &self.textures[next],
+                    0,
+                    to.x0 as u32,
+                    to.y0 as u32,
+                    0,
+                    &self.textures[self.current],
+                    0,
+                    Some(&from_box),
+                );
+            }
+        }
+        let rects: Vec<RECT> = plan.damage.iter().map(Area::rect).collect();
+        let mut drawn = true;
+        if !rects.is_empty() {
+            if let Some(target) = self.views[next].as_ref() {
+                // SAFETY: as above.
+                unsafe { context1.ClearView(&target.cast::<ID3D11View>()?, &clear, Some(&rects)) };
+            }
+            let _scissor = Scissor::on(device, context)?;
+            // Drawing a rounded clip uploads its content over the scene's.
+            let upload_each = !scene.layers.frames.is_empty();
+            drawer.upload()?;
+            for (n, rect) in rects.iter().enumerate() {
+                if n > 0 && upload_each {
+                    drawer.upload()?;
+                }
+                // SAFETY: as above.
+                unsafe { context.RSSetScissorRects(Some(std::slice::from_ref(rect))) };
+                drawn = drawn && drawer.draw()?;
+            }
+        }
+        self.current = next;
+        Ok(drawn)
+    }
+
     fn new(device: &ID3D11Device, (width, height): (u32, u32)) -> Result<Canvas> {
         let make = || -> Result<(ID3D11Texture2D, Option<ID3D11RenderTargetView>)> {
             let desc = D3D11_TEXTURE2D_DESC {
@@ -992,25 +1163,6 @@ impl Canvas {
                 Ok((texture, view))
             }
         };
-        // The renderer's rasterizer state, with and without the scissor test.
-        let state = |scissor: bool| -> Result<ID3D11RasterizerState> {
-            let desc = D3D11_RASTERIZER_DESC {
-                FillMode: D3D11_FILL_SOLID,
-                CullMode: D3D11_CULL_NONE,
-                FrontCounterClockwise: false.into(),
-                DepthBias: 0,
-                DepthBiasClamp: 0.0,
-                SlopeScaledDepthBias: 0.0,
-                DepthClipEnable: true.into(),
-                ScissorEnable: scissor.into(),
-                MultisampleEnable: true.into(),
-                AntialiasedLineEnable: false.into(),
-            };
-            let mut state = None;
-            // SAFETY: a valid description; an out-pointer to a local.
-            unsafe { device.CreateRasterizerState(&desc, Some(&mut state))? };
-            state.context("rasterizer state")
-        };
         let (a, a_view) = make()?;
         let (b, b_view) = make()?;
         Ok(Canvas {
@@ -1019,8 +1171,7 @@ impl Canvas {
             views: [a_view, b_view],
             current: 0,
             last: Vec::new(),
-            scissored: state(true)?,
-            unscissored: state(false)?,
+            clear: [0.0; 4],
         })
     }
 }
@@ -1036,7 +1187,17 @@ struct RendererDrawer<'a> {
 }
 
 impl Drawer for RendererDrawer<'_> {
-    fn begin(&mut self, target: &Option<ID3D11RenderTargetView>) -> Result<[f32; 4]> {
+    fn clear(&self) -> [f32; 4] {
+        self.clear
+    }
+
+    fn prepare(&mut self) -> Result<()> {
+        // As `render` begins: the tile cache's frame (tiles of layers that
+        // are gone age out) and the rounded clips'.
+        crate::fast::layers::raster::rasterize_tiles(self.renderer, self.scene)
+    }
+
+    fn begin(&mut self, target: &Option<ID3D11RenderTargetView>) -> Result<()> {
         // The renderer draws into its resources' view (paths composite
         // through it): the canvas's takes its place for the frame.
         let resources = self
@@ -1046,12 +1207,14 @@ impl Drawer for RendererDrawer<'_> {
             .context("resources missing")?;
         let window = std::mem::replace(&mut resources.render_target_view, target.clone());
         self.window.get_or_insert(window);
-        self.renderer.pre_draw(&self.clear)?;
-        Ok(self.clear)
+        self.renderer.pre_draw(&self.clear)
+    }
+
+    fn upload(&mut self) -> Result<()> {
+        self.renderer.upload_scene_buffers(self.scene)
     }
 
     fn draw(&mut self) -> Result<bool> {
-        self.renderer.upload_scene_buffers(self.scene)?;
         crate::fast::frame::draw_batches(self.renderer, self.scene)
     }
 }
@@ -1197,6 +1360,9 @@ mod tests {
         let (from, to) = plan.shift.unwrap();
         assert_eq!(to, Area { y1: 752.0, ..CLIP });
         assert_eq!(from, Area { y0: 88.0, ..CLIP });
+        // The plain background runs past the clip: no bands of it, only
+        // the strip.
+        assert_eq!(plan.damage, vec![Area { y0: 752.0, ..CLIP }]);
         // The strip at the bottom, and the bands of the plain background at
         // the clip's top and bottom that the copy moved.
         assert!(plan.damage.iter().any(|r| r.y1 == 800.0 && r.y0 <= 752.0));
@@ -1285,6 +1451,58 @@ mod tests {
         let mut new = frame(-48.0);
         new.insert(1, Sig { order: 2, ..new[0] });
         assert!(plan(&old, &new, VIEW).unwrap().shift.is_some());
+    }
+
+    #[test]
+    fn a_scroll_between_pixels_is_a_scroll_whatever_the_last_bits() {
+        // Rows a quarter of a pixel off the grid (a 125 % display), their
+        // new places a bit of rounding off the old ones plus the scroll.
+        let rows = |offset: f32, noise: u32| -> Vec<Sig> {
+            let mut out = frame(0.0);
+            for (n, s) in out.iter_mut().enumerate().skip(2) {
+                let y = f32::from_bits(
+                    (s.bounds.y0 + 0.25 + offset).to_bits() + noise * (n as u32 % 2),
+                );
+                let bounds = Area {
+                    y0: y,
+                    y1: y + 80.0,
+                    ..s.bounds
+                };
+                *s = Sig {
+                    bounds,
+                    reach: bounds.and(&s.mask),
+                    ..*s
+                };
+            }
+            out
+        };
+        let plan = plan(&rows(0.0, 0), &rows(-48.0, 1), VIEW).unwrap();
+        assert!(plan.shift.is_some());
+        assert_eq!(plan.damage, vec![Area { y0: 752.0, ..CLIP }]);
+    }
+
+    #[test]
+    fn a_page_of_changes_is_planned_quickly() {
+        // Thousands of small changes: gathered into bands, not merged pair
+        // by pair.
+        let cells = |key: u64| -> Vec<Sig> {
+            (0..6000u64)
+                .map(|n| {
+                    at(
+                        key + n,
+                        1,
+                        (n % 100) as f32 * 10.0,
+                        (n / 100) as f32 * 13.0,
+                        6.0,
+                        6.0,
+                        VIEW,
+                    )
+                })
+                .collect()
+        };
+        let started = std::time::Instant::now();
+        assert_eq!(plan(&cells(0), &cells(100_000), VIEW), None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]
