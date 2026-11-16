@@ -2296,6 +2296,7 @@ impl Window {
                     .unwrap_or(None)
             })
         });
+        crate::fast::misc::reentrant_window::register(&*platform_window, handle, cx.to_async());
         platform_window.on_move_tab_to_new_window({
             let mut cx = cx.to_async();
             Box::new(move || {
@@ -3040,7 +3041,7 @@ impl Window {
             .retain(|callback| callback(self, cx));
     }
 
-    fn display_changed(handle: AnyWindowHandle, cx: &mut App) {
+    pub(crate) fn display_changed(handle: AnyWindowHandle, cx: &mut App) {
         let moved_to = handle
             .update(cx, |_, window, _| {
                 let display_id = window.platform_window.display().map(|display| display.id());
