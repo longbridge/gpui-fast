@@ -228,7 +228,11 @@ pub(crate) fn draw_scene_masked(
             }
             let start = quads.len();
             quads.extend(rects.iter().map(|rect| {
+                // A plain quad looks the same at any bounds: the piece is
+                // its bounds too, not only its mask. WARP's cost follows a
+                // primitive's bounds, clipped away or not.
                 let mut piece = *quad;
+                piece.bounds = rect.bounds();
                 piece.content_mask.bounds = rect.bounds();
                 piece
             }));

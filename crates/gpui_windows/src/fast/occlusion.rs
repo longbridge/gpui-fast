@@ -98,25 +98,28 @@ impl Rect {
     }
 
     /// What a primitive at `bounds` drawn through `mask` may cover. Where
-    /// the mask cuts it on the right or at the bottom, the clip keeps a
-    /// pixel whose centre lies exactly on the mask's edge, while the
-    /// rasterizer's top-left rule leaves a centre on an occluder's right or
-    /// bottom edge out of the occluder: such an edge reaches a hair further,
-    /// so that an occluder ending there neither hides nor cuts it there.
+    /// the mask cuts it on the right or at the bottom exactly on a pixel
+    /// centre, the clip keeps that pixel (a centre on the clip plane is
+    /// kept), while the rasterizer's top-left rule leaves a centre on an
+    /// occluder's right or bottom edge out of the occluder: such an edge
+    /// reaches a hair further, so that an occluder ending there neither
+    /// hides nor cuts it there. An edge anywhere else has no pixel centre on
+    /// it and is taken as it is: content clipped at a whole pixel where its
+    /// cover ends (a page under another, at the window's edge) is hidden.
     fn reached(bounds: &Bounds<ScaledPixels>, mask: &ContentMask<ScaledPixels>) -> Rect {
         let r = Rect::of(bounds, mask);
         let b = Rect::of(bounds, &ContentMask { bounds: *bounds });
+        let on_centre = |edge: f32| ((edge - edge.floor()) - 0.5).abs() < EDGE_EPSILON;
+        let reach = |clipped: f32, own: f32| {
+            if clipped < own && on_centre(clipped) {
+                clipped + EDGE_EPSILON
+            } else {
+                clipped
+            }
+        };
         Rect {
-            x1: if r.x1 < b.x1 {
-                r.x1 + EDGE_EPSILON
-            } else {
-                r.x1
-            },
-            y1: if r.y1 < b.y1 {
-                r.y1 + EDGE_EPSILON
-            } else {
-                r.y1
-            },
+            x1: reach(r.x1, b.x1),
+            y1: reach(r.y1, b.y1),
             ..r
         }
     }
@@ -622,6 +625,20 @@ mod tests {
         // Inset by a pixel like any bordered occluder: no longer covers `under`.
         assert!(!Occlusion::of_quads(&[under, bordered]).hides_quad(&under));
         assert!(!is_plain(&bordered));
+    }
+
+    #[test]
+    fn content_clipped_where_its_cover_ends_is_hidden_unless_on_a_pixel_centre() {
+        // A card cut by its scroll view's mask at the cover's bottom edge.
+        let cover = quad(2, 0.0, 40.0, 1000.0, 760.0, 1.0);
+        let mut card = quad(1, 100.0, 700.0, 140.0, 210.0, 1.0);
+        card.corner_radii.top_left = ScaledPixels(8.0);
+        card.content_mask.bounds.size.height = ScaledPixels(800.0);
+        assert!(Occlusion::of_quads(&[card, cover]).hides_quad(&card));
+        // The same at a half pixel: the clip keeps the row the cover leaves out.
+        let cover = quad(2, 0.0, 40.0, 1000.0, 760.5, 1.0);
+        card.content_mask.bounds.size.height = ScaledPixels(800.5);
+        assert!(!Occlusion::of_quads(&[card, cover]).hides_quad(&card));
     }
 
     #[test]
