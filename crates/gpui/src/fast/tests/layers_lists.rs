@@ -2000,7 +2000,7 @@ mod list {
         anchored: bool,
     ) -> (AnyWindowHandle, Entity<Ticker>) {
         let handle = cx.add_window(move |_, cx| TickerListPage {
-            state: ListState::new(300, ListAlignment::Top, px(0.)),
+            state: ListState::new(300, ListAlignment::Top, px(0.)).measure_all(),
             ticker: cx.new(|_| Ticker {
                 animate,
                 anchored,
