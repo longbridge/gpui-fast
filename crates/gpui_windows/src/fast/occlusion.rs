@@ -6,24 +6,23 @@
 //! under the one shown), so a frame can shade the window's area several
 //! times over. A GPU does not notice; the software rasterizer (WARP, on a
 //! machine without a GPU) shades every one of those pixels on the CPU, and
-//! that is most of its frame.
+//! that is most of its frame. Culling therefore runs on software adapters
+//! only ([`wanted`]); on a GPU the overdraw it saves was not measured.
 //!
 //! An *occluder* paints every pixel of its rectangle opaquely: a quad with
 //! a solid background at alpha 1, square corners, and either no border or
 //! an opaque one (a dashed border's gaps show the opaque background), or an
 //! image (polychrome sprite) drawn at opacity 1 with square corners whose
-//! every pixel is opaque (the atlas records that as it uploads the image).
+//! every pixel is opaque ([`crate::fast::opaque_tiles`]). Square means
+//! radii of exactly zero, as the quad shader's fast path tests them.
 //! Its rectangle is its bounds within its content mask; a bordered quad's
 //! is inset by the pixel its antialiased outer edge blends over, an image's
 //! by the band where bilinear sampling blends in the atlas around its tile.
 //!
-//! Culling runs on software adapters only ([`wanted`]): there, every shaded
-//! pixel is CPU time; on a GPU the overdraw it saves was not measured. The rasterizer
-//! covers a pixel when the pixel's centre is inside the primitive's
-//! rectangle (an unrounded quad or sprite has no antialiased edge), so a
-//! primitive whose whole extent lies inside an occluder's rectangle, and
-//! which is painted before it (a lower draw order), changes no pixel the
-//! frame shows: it is skipped.
+//! The rasterizer covers a pixel when the pixel's centre is inside the
+//! primitive's rectangle, so a primitive whose whole extent lies inside an
+//! occluder's rectangle, and which is painted before it (a lower draw
+//! order), changes no pixel the frame shows: it is skipped.
 //!
 //! A quad that is only partly covered is cut instead, when that cannot
 //! change a pixel: a *plain* quad (a solid background, square corners,
@@ -34,65 +33,50 @@
 //! shade each pixel once.
 //!
 //! Only the largest few occluders are kept ([`MAX_OCCLUDERS`]). Quads,
-//! shadows, images and untransformed glyphs are culled. A culled batch is drawn as the runs of primitives
-//! left in it. Nothing is culled while a mask is bound (rounded clip
-//! groups), where an occluder's own edge is antialiased by the mask.
+//! shadows, images and untransformed glyphs are culled; a culled batch is
+//! drawn as the runs of primitives left in it. Nothing is culled while a
+//! mask is bound (rounded clip groups), where an occluder's own edge is
+//! antialiased by the mask.
 
 use std::ops::Range;
 
-use gpui::{Bounds, ContentMask, PolychromeSprite, Quad, ScaledPixels, Scene};
+use gpui::{
+    Bounds, ContentMask, Corners, Edges, IsZero, PolychromeSprite, Quad, ScaledPixels, Scene,
+};
+use windows::Win32::Graphics::Dxgi::{
+    DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIAdapter1,
+};
 
-#[cfg(test)]
-thread_local! {
-    static DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Turns culling off on this thread (tests compare against drawing everything).
-#[cfg(test)]
-pub(crate) fn set_disabled(disabled: bool) {
-    DISABLED.with(|cell| cell.set(disabled));
-}
-
-/// Whether frames cull (always, outside tests).
-pub(crate) fn enabled() -> bool {
-    #[cfg(test)]
-    {
-        !DISABLED.with(std::cell::Cell::get)
-    }
-    #[cfg(not(test))]
-    {
-        true
-    }
-}
-
-/// How far past a clip edge on its right or bottom a hidden primitive is
-/// taken to reach (see [`Rect::reached`]).
+/// How far past a clip edge on its right or bottom a primitive is taken to
+/// reach (see [`Rect::reached`]).
 const EDGE_EPSILON: f32 = 1.0 / 64.0;
-
-/// Whether frames on `adapter` cull overdraw: on a software adapter (WARP,
-/// the Microsoft Basic Render Driver), where every pixel shaded costs CPU
-/// time. `GPUI_OVERDRAW_CULLING=1` turns it on everywhere, `=0` off.
-pub(crate) fn wanted(adapter: &windows::Win32::Graphics::Dxgi::IDXGIAdapter1) -> bool {
-    match std::env::var("GPUI_OVERDRAW_CULLING").as_deref() {
-        Ok("1") => return true,
-        Ok("0") => return false,
-        _ => {}
-    }
-    // SAFETY: a query on a live adapter.
-    unsafe { adapter.GetDesc1() }.is_ok_and(|desc| {
-        let software =
-            desc.Flags & windows::Win32::Graphics::Dxgi::DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0;
-        // The Basic Render Driver's PCI ids.
-        software || (desc.VendorId, desc.DeviceId) == (0x1414, 0x8c)
-    })
-}
-
 /// How many occluders a frame keeps (the largest).
 const MAX_OCCLUDERS: usize = 16;
 /// Smaller opaque quads hide too little to be worth testing against.
 const MIN_OCCLUDER_AREA: f32 = 64.0 * 64.0;
 /// A quad cut into more pieces than this is drawn whole.
 const MAX_PIECES: usize = 16;
+
+/// Whether `desc` is a software adapter: flagged as one, or the Microsoft
+/// Basic Render Driver (WARP behind DXGI), which is also enumerated without
+/// the flag. `DirectXRenderer::gpu_specs` reports the same answer.
+pub(crate) fn is_software_adapter(desc: &DXGI_ADAPTER_DESC1) -> bool {
+    desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0
+        || (desc.VendorId, desc.DeviceId) == (0x1414, 0x8c)
+}
+
+/// Whether frames on `adapter` cull overdraw: on a software adapter, where
+/// every pixel shaded costs CPU time. `GPUI_OVERDRAW_CULLING=1` turns it on
+/// everywhere, `=0` off.
+pub(crate) fn wanted(adapter: &IDXGIAdapter1) -> bool {
+    match std::env::var("GPUI_OVERDRAW_CULLING").as_deref() {
+        Ok("1") => return true,
+        Ok("0") => return false,
+        _ => {}
+    }
+    // SAFETY: a query on a live adapter.
+    unsafe { adapter.GetDesc1() }.is_ok_and(|desc| is_software_adapter(&desc))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Rect {
@@ -118,7 +102,7 @@ impl Rect {
     /// pixel whose centre lies exactly on the mask's edge, while the
     /// rasterizer's top-left rule leaves a centre on an occluder's right or
     /// bottom edge out of the occluder: such an edge reaches a hair further,
-    /// so that an occluder ending there does not hide it.
+    /// so that an occluder ending there neither hides nor cuts it there.
     fn reached(bounds: &Bounds<ScaledPixels>, mask: &ContentMask<ScaledPixels>) -> Rect {
         let r = Rect::of(bounds, mask);
         let b = Rect::of(bounds, &ContentMask { bounds: *bounds });
@@ -195,6 +179,16 @@ impl Rect {
         out.extend(bands.into_iter().filter(|r| !r.is_empty()));
     }
 
+    /// This rectangle within `other`.
+    fn within(&self, other: &Rect) -> Rect {
+        Rect {
+            x0: self.x0.max(other.x0),
+            y0: self.y0.max(other.y0),
+            x1: self.x1.min(other.x1),
+            y1: self.y1.min(other.y1),
+        }
+    }
+
     pub(crate) fn bounds(&self) -> Bounds<ScaledPixels> {
         Bounds {
             origin: gpui::point(ScaledPixels(self.x0), ScaledPixels(self.y0)),
@@ -223,32 +217,43 @@ pub(crate) struct Occlusion {
     occluders: Vec<Occluder>,
 }
 
-/// Whether `quad` paints every pixel of its rectangle opaquely.
+/// Whether every corner radius is exactly zero, as the quad shader's fast
+/// path tests (a negative radius takes its antialiased path).
+fn square(c: &Corners<ScaledPixels>) -> bool {
+    c.top_left.is_zero()
+        && c.top_right.is_zero()
+        && c.bottom_left.is_zero()
+        && c.bottom_right.is_zero()
+}
+
+/// Whether every border width is exactly zero, as the quad shader's fast
+/// path tests (a negative width takes its antialiased path).
+fn borderless(w: &Edges<ScaledPixels>) -> bool {
+    w.top.is_zero() && w.right.is_zero() && w.bottom.is_zero() && w.left.is_zero()
+}
+
 /// Whether `quad` looks the same through any content mask within its
 /// bounds: a solid background, square corners and no border.
 fn is_plain(quad: &Quad) -> bool {
-    let c = &quad.corner_radii;
-    let w = &quad.border_widths;
-    c.top_left.0 <= 0.0
-        && c.top_right.0 <= 0.0
-        && c.bottom_left.0 <= 0.0
-        && c.bottom_right.0 <= 0.0
-        && w.top.0 <= 0.0
-        && w.right.0 <= 0.0
-        && w.bottom.0 <= 0.0
-        && w.left.0 <= 0.0
+    square(&quad.corner_radii)
+        && borderless(&quad.border_widths)
         && quad.background.as_solid().is_some()
+}
+
+/// Whether `quad` paints every pixel of its rectangle opaquely.
+pub(crate) fn is_occluder(quad: &Quad) -> bool {
+    square(&quad.corner_radii)
+        && quad
+            .background
+            .as_solid()
+            .is_some_and(|color| color.a >= 1.0)
+        && (borderless(&quad.border_widths) || quad.border_color.a >= 1.0)
 }
 
 /// Whether `sprite` covers its rectangle as its pixels do: drawn at full
 /// opacity with square corners.
 fn is_image_occluder(sprite: &PolychromeSprite) -> bool {
-    let c = &sprite.corner_radii;
-    sprite.opacity >= 1.0
-        && c.top_left.0 <= 0.0
-        && c.top_right.0 <= 0.0
-        && c.bottom_left.0 <= 0.0
-        && c.bottom_right.0 <= 0.0
+    sprite.opacity >= 1.0 && square(&sprite.corner_radii)
 }
 
 /// `bounds` within `mask`, its own edges (not the mask's) moved in by
@@ -288,35 +293,18 @@ fn image_rect(sprite: &PolychromeSprite) -> Rect {
 /// (`saturate(0.5 - outer_sdf)`): at fractional bounds those pixels are
 /// translucent, so its own edges are moved in by a pixel.
 fn quad_rect(quad: &Quad) -> Rect {
-    let w = &quad.border_widths;
-    let bordered = w.top.0 > 0.0 || w.right.0 > 0.0 || w.bottom.0 > 0.0 || w.left.0 > 0.0;
-    let margin = if bordered { 1.0 } else { 0.0 };
+    let margin = if borderless(&quad.border_widths) {
+        0.0
+    } else {
+        1.0
+    };
     inset_own_edges(&quad.bounds, &quad.content_mask, margin, margin)
-}
-
-pub(crate) fn is_occluder(quad: &Quad) -> bool {
-    let c = &quad.corner_radii;
-    let square = c.top_left.0 <= 0.0
-        && c.top_right.0 <= 0.0
-        && c.bottom_left.0 <= 0.0
-        && c.bottom_right.0 <= 0.0;
-    let w = &quad.border_widths;
-    let bordered = w.top.0 > 0.0 || w.right.0 > 0.0 || w.bottom.0 > 0.0 || w.left.0 > 0.0;
-    square
-        && quad
-            .background
-            .as_solid()
-            .is_some_and(|color| color.a >= 1.0)
-        && (!bordered || quad.border_color.a >= 1.0)
 }
 
 impl Occlusion {
     /// The largest occluders among `scene`'s quads and images;
     /// `opaque_image` tells whether a sprite's pixels are all opaque.
     pub(crate) fn of(scene: &Scene, opaque_image: impl Fn(&PolychromeSprite) -> bool) -> Occlusion {
-        if !enabled() {
-            return Occlusion::default();
-        }
         Occlusion::collect(&scene.quads, &scene.polychrome_sprites, opaque_image)
     }
 
@@ -372,18 +360,25 @@ impl Occlusion {
 
     /// The pieces of a plain `quad` that no later occluder covers, when
     /// some occluder covers part of it; `None` when it is drawn whole.
+    ///
+    /// The quad is cut by what it reaches ([`Rect::reached`]), as
+    /// [`Self::hides_quad`] tests it: an occluder ending exactly on a clip
+    /// edge leaves a sliver thinner than a pixel, and a quad left with one is
+    /// drawn whole rather than masked to it. The pieces are then kept within
+    /// the quad's own clip.
     pub(crate) fn pieces(&self, quad: &Quad) -> Option<Vec<Rect>> {
         if !is_plain(quad) {
             return None;
         }
-        let rect = Rect::of(&quad.bounds, &quad.content_mask);
-        let mut pieces = vec![rect];
+        let clip = Rect::of(&quad.bounds, &quad.content_mask);
+        let reach = Rect::reached(&quad.bounds, &quad.content_mask);
+        let mut pieces = vec![reach];
         let mut cut = false;
         let mut next = Vec::new();
         for o in self
             .occluders
             .iter()
-            .filter(|o| o.order > quad.order && o.rect.intersects(&rect))
+            .filter(|o| o.order > quad.order && o.rect.intersects(&reach))
         {
             next.clear();
             for piece in &pieces {
@@ -395,7 +390,21 @@ impl Occlusion {
                 return None;
             }
         }
-        cut.then_some(pieces)
+        if !cut {
+            return None;
+        }
+        let sliver =
+            |p: &Rect| p.x1 - p.x0 <= 2.0 * EDGE_EPSILON || p.y1 - p.y0 <= 2.0 * EDGE_EPSILON;
+        if pieces.iter().any(sliver) {
+            return None;
+        }
+        Some(
+            pieces
+                .iter()
+                .map(|p| p.within(&clip))
+                .filter(|p| !p.is_empty())
+                .collect(),
+        )
     }
 
     pub(crate) fn hides_shadow(&self, shadow: &gpui::Shadow) -> bool {
@@ -593,6 +602,22 @@ mod tests {
                 .pieces(&bordered)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn negative_radii_or_borders_are_not_square_or_borderless() {
+        // The quad shader's fast path tests for exactly zero: anything else,
+        // negative included, is antialiased.
+        let under = quad(1, 100.0, 100.0, 100.0, 100.0, 1.0);
+        let mut rounded = quad(2, 0.0, 0.0, 1000.0, 800.0, 1.0);
+        rounded.corner_radii.top_left = ScaledPixels(-1.0);
+        assert!(!Occlusion::of_quads(&[under, rounded]).hides_quad(&under));
+        let mut bordered = quad(2, 99.5, 99.5, 101.0, 101.0, 1.0);
+        bordered.border_widths.left = ScaledPixels(-0.5);
+        bordered.border_color = hsla(0.0, 0.0, 1.0, 1.0);
+        // Inset by a pixel like any bordered occluder: no longer covers `under`.
+        assert!(!Occlusion::of_quads(&[under, bordered]).hides_quad(&under));
+        assert!(!is_plain(&bordered));
     }
 
     #[test]

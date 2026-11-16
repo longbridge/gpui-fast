@@ -165,8 +165,6 @@ impl DirectXRenderer {
 
         let devices = DirectXRendererDevices::new(directx_devices, disable_direct_composition)
             .context("Creating DirectX devices")?;
-        let mut fast_frame = crate::fast::frame::FrameState::default();
-        fast_frame.skip_occlusion = !crate::fast::occlusion::wanted(&devices.adapter);
         let atlas = Arc::new(DirectXAtlas::new(&devices.device, &devices.device_context));
         crate::fast::dynamic_textures::init(&devices.device, &devices.device_context);
 
@@ -176,6 +174,7 @@ impl DirectXRenderer {
             .context("Creating DirectX global elements")?;
         let pipelines = DirectXRenderPipelines::new(&devices.device)
             .context("Creating DirectX render pipelines")?;
+        let fast_frame = crate::fast::frame::FrameState::for_adapter(&atlas, &devices.adapter);
 
         let direct_composition = if disable_direct_composition {
             None
@@ -302,7 +301,11 @@ impl DirectXRenderer {
 
         let devices = DirectXRendererDevices::new(directx_devices, disable_direct_composition)
             .context("Recreating DirectX devices")?;
-        self.fast_frame.skip_occlusion = !crate::fast::occlusion::wanted(&devices.adapter);
+        crate::fast::frame::FrameState::adapter_changed(
+            &mut self.fast_frame,
+            &self.atlas,
+            &devices.adapter,
+        );
         let resources = DirectXResources::new(
             &devices,
             self.width,
@@ -845,7 +848,7 @@ impl DirectXRenderer {
     pub(crate) fn gpu_specs(&self) -> Result<GpuSpecs> {
         let devices = self.devices.as_ref().context("devices missing")?;
         let desc = unsafe { devices.adapter.GetDesc1() }?;
-        let is_software_emulated = (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0;
+        let is_software_emulated = crate::fast::occlusion::is_software_adapter(&desc);
         let device_name = String::from_utf16_lossy(&desc.Description)
             .trim_matches(char::from(0))
             .to_string();

@@ -1097,9 +1097,9 @@ fn composition_whole_scene_matches_replayed_surface_pixels(cx: &mut gpui::TestAp
 /// byte; returns whether culling hid or cut anything.
 fn culling_keeps_pixels(harness: &mut Harness, scene: &Scene) -> bool {
     let size = device_size(1024, 1024);
-    crate::fast::occlusion::set_disabled(true);
+    harness.frame.skip_occlusion = true;
     let everything = harness.render(scene, size, rgba(0xffffffff));
-    crate::fast::occlusion::set_disabled(false);
+    harness.frame.skip_occlusion = false;
     let culled = harness.render(scene, size, rgba(0xffffffff));
     assert_same_pixels(&culled, &everything, 1024);
     let occlusion = crate::fast::occlusion::Occlusion::of(scene, |sprite| {
@@ -1325,10 +1325,12 @@ fn culling_under_images_changes_no_pixel() {
     }
 }
 
-/// A primitive whose mask's right edge falls on a pixel centre exactly where
-/// a cover's right edge does: the clip keeps that column (a centre on the
-/// clip plane is kept), the cover does not (the rasterizer's top-left rule
-/// drops a centre on its right edge).
+/// A primitive whose mask's right (bottom) edge falls on a pixel centre
+/// exactly where a cover's right (bottom) edge does: the clip keeps that
+/// column (a centre on the clip plane is kept), the cover does not (the
+/// rasterizer's top-left rule drops a centre on its right edge). The hidden
+/// quad is plain (drawn through `Occlusion::pieces`) or bordered (tested by
+/// `Occlusion::hides_quad`); neither may be culled at that column.
 #[test]
 fn culling_at_a_shared_edge_on_a_pixel_centre_changes_no_pixel() {
     let Some(mut harness) = Harness::new() else {
@@ -1351,20 +1353,30 @@ fn culling_at_a_shared_edge_on_a_pixel_centre_changes_no_pixel() {
             sp(80., 80., 560., 480.5),
         ),
     ] {
-        eprintln!("shared edge: {name}");
-        let mut scene = Scene::default();
-        scene.insert_primitive(quad(sp(0., 0., 1024., 1024.), Hsla::from(rgba(0x101010ff))));
-        scene.insert_primitive(Quad {
-            content_mask: ContentMask {
-                bounds: hidden_mask,
-            },
-            ..quad(hidden_bounds, Hsla::from(rgba(0xcc3322ff)))
-        });
-        scene.insert_primitive(quad(cover_bounds, Hsla::from(rgba(0x445566ff))));
-        scene.finish();
-        culling_keeps_pixels(&mut harness, &scene);
-        // Its column on the shared edge shows: it is not taken as hidden.
-        let occlusion = crate::fast::occlusion::Occlusion::of(&scene, |_| false);
-        assert!(!occlusion.hides_quad(&scene.quads[1]), "{name}");
+        for bordered in [false, true] {
+            eprintln!("shared edge: {name}, bordered {bordered}");
+            let mut hidden = Quad {
+                content_mask: ContentMask {
+                    bounds: hidden_mask,
+                },
+                ..quad(hidden_bounds, Hsla::from(rgba(0xcc3322ff)))
+            };
+            if bordered {
+                hidden.border_widths = Edges::all(ScaledPixels(2.));
+                hidden.border_color = Hsla::from(rgba(0x22cc33ff));
+            }
+            let mut scene = Scene::default();
+            scene.insert_primitive(quad(sp(0., 0., 1024., 1024.), Hsla::from(rgba(0x101010ff))));
+            scene.insert_primitive(hidden);
+            scene.insert_primitive(quad(cover_bounds, Hsla::from(rgba(0x445566ff))));
+            scene.finish();
+            culling_keeps_pixels(&mut harness, &scene);
+            let occlusion = crate::fast::occlusion::Occlusion::of(&scene, |_| false);
+            assert!(!occlusion.hides_quad(&scene.quads[1]), "{name} {bordered}");
+            assert!(
+                occlusion.pieces(&scene.quads[1]).is_none(),
+                "{name} {bordered}"
+            );
+        }
     }
 }
