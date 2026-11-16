@@ -1698,10 +1698,9 @@ pub(crate) fn dispatch_native(
 #[cfg(test)]
 mod tests {
     use super::{
-        CompositionSurfaceId, CompositionSurfaceKind, CompositionTree, Host,
-        ManagedPlatformSurface, PlatformSurfaceAttachment, WindowComposition,
-        WindowCompositionHandle, composed_scene_layers, ordered_plain_scene,
-        restack_native_surfaces,
+        CompositionSurfaceId, CompositionSurfaceKind, CompositionTree, ManagedPlatformSurface,
+        PlatformSurfaceAttachment, WindowComposition, WindowCompositionHandle,
+        composed_scene_layers, ordered_plain_scene, restack_native_surfaces,
     };
     use crate::{
         AppContext as _, Bounds, ContentMask, Context, DevicePixels, Entity, IntoElement,
@@ -1843,17 +1842,10 @@ mod tests {
             bounds: Cell::new(Bounds::default()),
             parent_origin: Cell::new(Point::default()),
         });
-        let geometry_dirty = Rc::new(Cell::new(false));
-        let surface = ManagedPlatformSurface {
-            platform_surface: platform_surface.clone(),
-            bounds: Cell::new(Bounds::default()),
-            geometry_dirty: geometry_dirty.clone(),
-            visible: Rc::new(Cell::new(true)),
-            input_forwarding: Cell::new(false),
-            prepainting: Rc::new(Cell::new(None)),
-            host: Cell::new(Host::Base),
-            restack: Cell::new(false),
-        };
+        let composition = WindowCompositionHandle::default();
+        let state = composition.0.borrow();
+        let geometry_dirty = state.geometry_dirty.clone();
+        let surface = ManagedPlatformSurface::new(platform_surface.clone(), &state);
         let bounds = Bounds {
             origin: Point {
                 x: DevicePixels(25),
@@ -1884,17 +1876,10 @@ mod tests {
             bounds: Cell::new(Bounds::default()),
             parent_origin: Cell::new(Point::default()),
         });
-        let dirty = Rc::new(Cell::new(false));
-        let surface = ManagedPlatformSurface {
-            platform_surface: platform.clone(),
-            bounds: Cell::new(Bounds::default()),
-            geometry_dirty: dirty.clone(),
-            visible: Rc::new(Cell::new(true)),
-            input_forwarding: Cell::new(false),
-            prepainting: Rc::new(Cell::new(None)),
-            host: Cell::new(Host::Base),
-            restack: Cell::new(false),
-        };
+        let composition = WindowCompositionHandle::default();
+        let state = composition.0.borrow();
+        let dirty = state.geometry_dirty.clone();
+        let surface = ManagedPlatformSurface::new(platform.clone(), &state);
         surface.set_bounds(bounds)?;
         dirty.set(false);
         for _ in 0..10 {
@@ -1928,17 +1913,10 @@ mod tests {
             bounds: Cell::new(Bounds::default()),
             parent_origin: Cell::new(Point::default()),
         });
-        let dirty = Rc::new(Cell::new(false));
-        let surface = ManagedPlatformSurface {
-            platform_surface: platform.clone(),
-            bounds: Cell::new(Bounds::default()),
-            geometry_dirty: dirty.clone(),
-            visible: Rc::new(Cell::new(true)),
-            input_forwarding: Cell::new(false),
-            prepainting: Rc::new(Cell::new(None)),
-            host: Cell::new(Host::Base),
-            restack: Cell::new(false),
-        };
+        let composition = WindowCompositionHandle::default();
+        let state = composition.0.borrow();
+        let dirty = state.geometry_dirty.clone();
+        let surface = ManagedPlatformSurface::new(platform.clone(), &state);
         assert!(surface.set_bounds(bounds).is_err());
         assert_eq!(surface.bounds(), Bounds::default());
         assert!(!dirty.get());
