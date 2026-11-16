@@ -1198,8 +1198,7 @@ pub(crate) fn merge_sorted<T: Ord + Copy>(a: &Rc<[T]>, b: &Rc<[T]>) -> Rc<[T]> {
 /// `states` once each, at the earliest version read, so that a change in
 /// between still counts.
 ///
-/// A subtree reads a handful at most, so repeats are found by looking back
-/// rather than hashing; one that reads none shares `none`.
+/// A subtree that reads none shares `none`.
 fn dedup_states(
     states: &[(StateVersion, u64)],
     none: &Rc<[(StateVersion, u64)]>,
@@ -1210,18 +1209,17 @@ fn dedup_states(
     unique_states(states)
 }
 
-/// `states` once each, at the earliest version read.
+/// `states` once each, at the earliest version read, in the order first read.
+///
+/// Repeats are found by hashing: a subtree's reads include those of every
+/// subtree nested in it, and looking back over them is quadratic.
 fn unique_states(states: &[(StateVersion, u64)]) -> Rc<[(StateVersion, u64)]> {
-    let mut unique: Vec<(StateVersion, u64)> = Vec::with_capacity(states.len());
-    for state in states {
-        if !unique
-            .iter()
-            .any(|(version, _)| version.ptr() == state.0.ptr())
-        {
-            unique.push(state.clone());
-        }
-    }
-    unique.into()
+    let mut seen = FxHashSet::with_capacity_and_hasher(states.len(), Default::default());
+    states
+        .iter()
+        .filter(|(version, _)| seen.insert(version.id()))
+        .cloned()
+        .collect()
 }
 
 impl RenderDependencies {
@@ -1321,5 +1319,36 @@ impl RenderDependencies {
             updates: self.updates.min(other.updates),
             writes: self.writes.union(&other.writes),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StateVersion, unique_states};
+
+    #[test]
+    fn unique_states_keeps_each_state_once_at_its_first_read_in_order() {
+        let (a, b, c) = (
+            StateVersion::default(),
+            StateVersion::default(),
+            StateVersion::default(),
+        );
+        // First read in an order other than the one they were made in.
+        let mut log = vec![(c.clone(), c.get()), (a.clone(), a.get())];
+        a.bump();
+        c.bump();
+        log.extend([
+            (a.clone(), a.get()),
+            (b.clone(), b.get()),
+            (c.clone(), c.get()),
+            (a.clone(), a.get()),
+        ]);
+
+        let unique: Vec<(usize, u64)> = unique_states(&log)
+            .iter()
+            .map(|(version, read_at)| (version.id(), *read_at))
+            .collect();
+        assert_eq!(unique, vec![(c.id(), 0), (a.id(), 0), (b.id(), 0)]);
+        assert!(unique_states(&[]).is_empty());
     }
 }
