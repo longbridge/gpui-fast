@@ -38,6 +38,9 @@
 //!   slot, a glyph evicted and rasterized again) makes its sprites changed,
 //!   whatever their bytes say ([`Uploads`]); a dynamic texture's sprites
 //!   always are.
+//! - A rounded clip (a sprite standing for a scene drawn through its
+//!   rounded bounds) looks like that scene seen from the sprite: its
+//!   signature is the scene's, relative to it, so it stays or moves as one.
 //! - Nothing is copied for a fractional scroll offset or a clip off the
 //!   pixel grid: what moved is damage, or the frame is drawn whole. Frames
 //!   with scroll layers or surfaces, or with damage over [`MAX_DAMAGE`] of
@@ -370,9 +373,10 @@ fn sig(
 pub(crate) fn signatures(
     scene: &Scene,
     uploaded: &HashSet<(AtlasTextureId, u32)>,
-    dynamic: impl Fn(AtlasTextureId) -> bool,
+    dynamic: &dyn Fn(AtlasTextureId) -> bool,
 ) -> Option<Vec<Sig>> {
-    if !scene.layers.frames.is_empty() || !scene.surfaces.is_empty() {
+    // A scroll layer's tiles change under sprites that stay the same.
+    if scene.layers.frames.iter().any(|frame| frame.tile_size != 0) || !scene.surfaces.is_empty() {
         return None;
     }
     let fresh = |tile: &AtlasTile| {
@@ -464,6 +468,40 @@ pub(crate) fn signatures(
         out.push(s);
     }
     for p in &scene.polychrome_sprites {
+        // A rounded clip: a sprite standing for a scene drawn through its
+        // rounded bounds. It looks like that scene, seen from the sprite.
+        if let Some(group) = crate::fast::rounded_clip::group(scene, p.tile.texture_id) {
+            let child = group.content.scene()?;
+            let inner = signatures(child, uploaded, dynamic)?;
+            let (x, y) = (p.bounds.origin.x.0, p.bounds.origin.y.0);
+            let mut key = Key::new(8)
+                .size(&p.bounds)
+                .corners(&p.corner_radii)
+                .f(p.opacity);
+            // The clip's vertical radii travel in a frame of the child's.
+            for frame in &child.layers.frames {
+                if frame.key.0 == u32::MAX {
+                    let radii = frame.background;
+                    key = key.f(radii.r).f(radii.g).f(radii.b).f(radii.a);
+                }
+            }
+            let mut fresh_inside = false;
+            for s in &inner {
+                fresh_inside |= s.fresh;
+                key = key.u(s.key).u(s.order as u64);
+                for area in [&s.bounds, &s.mask] {
+                    key = key
+                        .f(area.x0 - x)
+                        .f(area.y0 - y)
+                        .f(area.x1 - x)
+                        .f(area.y1 - y);
+                }
+            }
+            let mut s = sig(key.done(), p.order, &p.bounds, &p.content_mask, 1.0);
+            s.fresh = fresh_inside;
+            out.push(s);
+            continue;
+        }
         let key = Key::new(6)
             .size(&p.bounds)
             .tile(&p.tile)
@@ -570,7 +608,9 @@ fn tidy(rects: Vec<Area>, view: &Area) -> Vec<Area> {
 pub(crate) fn plan(old: &[Sig], new: &[Sig], view: Area) -> Option<Plan> {
     // The primitives that stayed as they were, as a multiset.
     let mut left: HashMap<_, Vec<usize>> = HashMap::new();
-    for (i, s) in old.iter().enumerate() {
+    for (i, s) in old.iter().enumerate().rev() {
+        // Popped first to last: primitives alike at one place pair in the
+        // sequence they are painted in.
         left.entry(placed(s)).or_default().push(i);
     }
     let mut stayed: Vec<Option<usize>> = vec![None; new.len()];
@@ -690,7 +730,7 @@ pub(crate) fn plan(old: &[Sig], new: &[Sig], view: Area) -> Option<Plan> {
             o.reach.within(&region) && o.reach.moved(dy).and(&to).same(&s.reach.and(&to))
         };
         if let Some(k) = candidates.iter().position(fits) {
-            let j = candidates.swap_remove(k);
+            let j = candidates.remove(k);
             moved_new[i] = true;
             moved_old[j] = true;
             orders.push((old[j].order, s.order));
@@ -830,7 +870,7 @@ impl Partial {
             id.kind == AtlasTextureKind::Polychrome
                 && crate::fast::dynamic_textures::view(id).is_some()
         };
-        let Some(sigs) = signatures(scene, uploaded, dynamic) else {
+        let Some(sigs) = signatures(scene, uploaded, &dynamic) else {
             self.canvas = None;
             return Ok(None);
         };
@@ -1227,6 +1267,24 @@ mod tests {
         assert!(plan(&old, &renumbered, VIEW).is_some());
         assert!(orders_agree(&mut [(1, 1), (1, 2), (2, 2)]));
         assert!(!orders_agree(&mut [(1, 3), (2, 2)]));
+    }
+
+    #[test]
+    fn primitives_alike_at_one_place_keep_their_sequence() {
+        // Two backgrounds, one over the other, alike in everything but order.
+        let mut old = frame(0.0);
+        old.insert(1, Sig { order: 2, ..old[0] });
+        assert_eq!(
+            plan(&old, &old, VIEW),
+            Some(Plan {
+                shift: None,
+                damage: vec![]
+            })
+        );
+        // And when the content between them scrolls.
+        let mut new = frame(-48.0);
+        new.insert(1, Sig { order: 2, ..new[0] });
+        assert!(plan(&old, &new, VIEW).unwrap().shift.is_some());
     }
 
     #[test]
