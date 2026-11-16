@@ -1090,3 +1090,224 @@ fn composition_whole_scene_matches_replayed_surface_pixels(cx: &mut gpui::TestAp
         })
         .unwrap();
 }
+
+// --- Partial redraw (`fast::partial`) --- //
+
+/// Draws a scene for `fast::partial::Partial` as `Harness::draw` does, into
+/// the canvas it is given.
+struct PartialDrawer<'a> {
+    harness: &'a mut Harness,
+    scene: &'a Scene,
+    size: (u32, u32),
+    clear: Rgba,
+    target: Option<windows::Win32::Graphics::Direct3D11::ID3D11RenderTargetView>,
+}
+
+impl crate::fast::partial::Drawer for PartialDrawer<'_> {
+    fn begin(
+        &mut self,
+        target: &Option<windows::Win32::Graphics::Direct3D11::ID3D11RenderTargetView>,
+    ) -> Result<[f32; 4]> {
+        let (width, height) = self.size;
+        let clear = [self.clear.r, self.clear.g, self.clear.b, self.clear.a];
+        let globals = create_globals(&self.harness.device, width, height)?;
+        let context = &self.harness.context;
+        unsafe {
+            context.ClearRenderTargetView(target.as_ref().context("canvas view")?, &clear);
+            context.OMSetRenderTargets(Some(slice::from_ref(target)), None);
+            context.RSSetViewports(Some(&[D3D11_VIEWPORT {
+                TopLeftX: 0.,
+                TopLeftY: 0.,
+                Width: width as f32,
+                Height: height as f32,
+                MinDepth: 0.,
+                MaxDepth: 1.,
+            }]));
+            context.VSSetConstantBuffers(0, Some(slice::from_ref(&globals)));
+            context.VSSetConstantBuffers(
+                1,
+                Some(slice::from_ref(&self.harness.globals.batch_params_buffer)),
+            );
+            context.PSSetConstantBuffers(0, Some(slice::from_ref(&globals)));
+        }
+        self.target = target.clone();
+        Ok(clear)
+    }
+
+    fn draw(&mut self) -> Result<bool> {
+        let (width, height) = self.size;
+        let harness = &mut *self.harness;
+        let (intermediate_texture, intermediate_srv) =
+            create_path_intermediate_texture(&harness.device, width, height)?;
+        let (msaa_texture, msaa_view) =
+            create_path_intermediate_msaa_texture_and_view(&harness.device, width, height)?;
+        let target = Target {
+            device: &harness.device,
+            device_context: &harness.context,
+            atlas: &harness.atlas,
+            globals: &harness.globals,
+            paths: Some(PathTargets {
+                render_target_view: &self.target,
+                intermediate_texture: &intermediate_texture,
+                intermediate_srv: &intermediate_srv,
+                msaa_texture: &msaa_texture,
+                msaa_view: &msaa_view,
+            }),
+        };
+        upload(&target, &mut harness.pipelines, self.scene)?;
+        draw_scene(
+            &target,
+            &mut harness.pipelines,
+            &mut harness.frame,
+            self.scene,
+        )?;
+        Ok(true)
+    }
+}
+
+/// Draws `scene` as the next frame of `partial` and checks it against the
+/// scene drawn whole, byte for byte. Returns how the frame was made:
+/// whether pixels were copied moved, and how many rectangles were drawn
+/// again (`None`: drawn whole).
+fn partial_frame(
+    harness: &mut Harness,
+    partial: &mut crate::fast::partial::Partial,
+    scene: &Scene,
+    uploaded: &[AtlasTile],
+) -> Option<(bool, usize)> {
+    let size = (1024u32, 1024u32);
+    let clear = rgba(0xffffffff);
+    let uploaded = uploaded
+        .iter()
+        .map(|tile| (tile.texture_id, tile.tile_id.0))
+        .collect();
+    let (device, context) = (harness.device.clone(), harness.context.clone());
+    let canvas = {
+        let mut drawer = PartialDrawer {
+            harness,
+            scene,
+            size,
+            clear,
+            target: None,
+        };
+        partial
+            .frame(&device, &context, size, scene, &uploaded, &mut drawer)
+            .expect("frame drawn")
+            .expect("a canvas")
+    };
+    unsafe { context.OMSetRenderTargets(None, None) };
+    let made = read_back(&device, &context, &canvas).expect("canvas read");
+    let whole = harness.render(scene, device_size(1024, 1024), clear);
+    assert_same_pixels(&made, &whole, 1024);
+    partial
+        .last_plan
+        .as_ref()
+        .map(|plan| (plan.shift.is_some(), plan.damage.len()))
+}
+
+/// A window: a rounded header and two translucent bars that stay, the bars
+/// across the scrolled content; and in a clip below the header, scrolled by
+/// `offset`, every kind of primitive (`add_content`) and a column of
+/// rounded rows that runs past the clip's bottom. `backdrop`: over a plain
+/// background (else the cleared window shows).
+fn scrolled_scene(harness: &Harness, offset: f32, extra: Option<Quad>, backdrop: bool) -> Scene {
+    let clip = sp(32., 96., 960., 896.);
+    let mut scene = Scene::default();
+    if backdrop {
+        scene.insert_primitive(quad(sp(0., 0., 1024., 1024.), Hsla::from(rgba(0x101418ff))));
+    }
+    add_content(&mut scene, harness, (0., offset), clip);
+    for row in 0..14 {
+        scene.insert_primitive(Quad {
+            content_mask: ContentMask { bounds: clip },
+            corner_radii: Corners::all(ScaledPixels(8.)),
+            ..quad(
+                sp(820., 110. + 110. * row as f32 + offset, 150., 90.),
+                Hsla::from(rgba(0x2266aaff + 0x0c0700 * row)),
+            )
+        });
+    }
+    if let Some(extra) = extra {
+        scene.insert_primitive(extra);
+    }
+    scene.insert_primitive(Quad {
+        corner_radii: Corners::all(ScaledPixels(10.)),
+        ..quad(sp(16., 16., 992., 64.), Hsla::from(rgba(0x334455ff)))
+    });
+    // Two bars that stay over the scrolled content: a rounded one (drawn
+    // again wherever the copy moved pixels under it) and a plain one (the
+    // same colour over every pixel: only its edges are).
+    scene.insert_primitive(Quad {
+        corner_radii: Corners::all(ScaledPixels(6.)),
+        ..quad(sp(32., 400., 960., 40.), Hsla::from(rgba(0x00000080)))
+    });
+    scene.insert_primitive(quad(sp(32., 640., 960., 30.), Hsla::from(rgba(0x80000060))));
+    scene.finish();
+    scene
+}
+
+#[test]
+fn partial_redraw_of_a_scroll_equals_whole_drawing() {
+    let Some(mut harness) = Harness::new() else {
+        eprintln!("skipped: no Direct3D 11 device");
+        return;
+    };
+    for backdrop in [true, false] {
+        let mut partial = crate::fast::partial::Partial::enabled();
+        let frame = |harness: &mut Harness, partial: &mut _, offset: f32, extra: Option<Quad>| {
+            let scene = scrolled_scene(harness, offset, extra, backdrop);
+            partial_frame(harness, partial, &scene, &[])
+        };
+        // The first frame is drawn whole.
+        assert_eq!(frame(&mut harness, &mut partial, 0., None), None);
+        // Scrolled up, twice: moved pixels and damage.
+        for offset in [-48., -96.] {
+            let made =
+                frame(&mut harness, &mut partial, offset, None).expect("made from the last frame");
+            assert!(made.0, "pixels are copied moved at {offset}");
+        }
+        // Nothing changed: nothing drawn.
+        assert_eq!(
+            frame(&mut harness, &mut partial, -96., None),
+            Some((false, 0))
+        );
+        // Something new without a scroll: only that is drawn again.
+        let extra = Quad {
+            content_mask: ContentMask {
+                bounds: sp(32., 96., 960., 896.),
+            },
+            ..quad(sp(600., 500., 120., 80.), Hsla::from(rgba(0xffaa00ff)))
+        };
+        assert_eq!(
+            frame(&mut harness, &mut partial, -96., Some(extra)),
+            Some((false, 1))
+        );
+        // It goes while the content scrolls back down.
+        let made = frame(&mut harness, &mut partial, -80., None).expect("made from the last frame");
+        assert!(made.0);
+        // A fractional offset copies nothing (drawn whole, or what moved drawn
+        // again), and the next whole offset is made from it.
+        let made = frame(&mut harness, &mut partial, -80.5, None);
+        assert!(made.is_none_or(|(moved, _)| !moved));
+        frame(&mut harness, &mut partial, -64., None);
+        frame(&mut harness, &mut partial, 0., None);
+    }
+}
+
+#[test]
+fn partial_redraw_draws_a_tile_uploaded_again() {
+    let Some(mut harness) = Harness::new() else {
+        eprintln!("skipped: no Direct3D 11 device");
+        return;
+    };
+    let mut partial = crate::fast::partial::Partial::enabled();
+    let scene = scrolled_scene(&harness, 0., None, true);
+    assert_eq!(partial_frame(&mut harness, &mut partial, &scene, &[]), None);
+    // The same primitives, but the image's tile was uploaded since: its
+    // sprite is drawn again.
+    let image = image_tile(&harness);
+    assert_eq!(
+        partial_frame(&mut harness, &mut partial, &scene, &[image]),
+        Some((false, 1))
+    );
+}

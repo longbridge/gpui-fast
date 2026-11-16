@@ -57,6 +57,7 @@ pub(crate) struct DirectXRenderer {
     pub(crate) fast_frame: crate::fast::frame::FrameState,
     pub(crate) fast_composition: crate::fast::composition::DirectXComposition,
     pub(crate) fast_recovery: crate::fast::device_recovery::RecoveryState,
+    pub(crate) fast_partial: crate::fast::partial::Partial,
 }
 
 /// Direct3D objects
@@ -73,7 +74,7 @@ pub(crate) struct DirectXRendererDevices {
 pub(crate) struct DirectXResources {
     // Direct3D rendering objects
     swap_chain: IDXGISwapChain1,
-    render_target: Option<ID3D11Texture2D>,
+    pub(crate) render_target: Option<ID3D11Texture2D>,
     pub(crate) render_target_view: Option<ID3D11RenderTargetView>,
 
     // Path intermediate textures (with MSAA)
@@ -174,6 +175,7 @@ impl DirectXRenderer {
             .context("Creating DirectX global elements")?;
         let pipelines = DirectXRenderPipelines::new(&devices.device)
             .context("Creating DirectX render pipelines")?;
+        let fast_partial = crate::fast::partial::Partial::for_adapter(&devices.adapter);
 
         let direct_composition = if disable_direct_composition {
             None
@@ -201,6 +203,7 @@ impl DirectXRenderer {
             fast_frame: crate::fast::frame::FrameState::default(),
             fast_composition: crate::fast::composition::DirectXComposition::default(),
             fast_recovery: crate::fast::device_recovery::RecoveryState::default(),
+            fast_partial,
         })
     }
 
@@ -208,7 +211,7 @@ impl DirectXRenderer {
         self.atlas.clone()
     }
 
-    fn pre_draw(&self, clear_color: &[f32; 4]) -> Result<()> {
+    pub(crate) fn pre_draw(&self, clear_color: &[f32; 4]) -> Result<()> {
         let resources = self.resources.as_ref().expect("resources missing");
         let device_context = &self
             .devices
@@ -300,6 +303,7 @@ impl DirectXRenderer {
 
         let devices = DirectXRendererDevices::new(directx_devices, disable_direct_composition)
             .context("Recreating DirectX devices")?;
+        self.fast_partial = crate::fast::partial::Partial::for_adapter(&devices.adapter);
         let resources = DirectXResources::new(
             &devices,
             self.width,
@@ -350,7 +354,9 @@ impl DirectXRenderer {
             // and so likely do not have the textures anymore that are required for drawing
             return Ok(());
         }
-        self.render(scene, background_appearance)?;
+        if !crate::fast::partial::draw(self, scene, background_appearance)? {
+            self.render(scene, background_appearance)?;
+        }
         self.present()
     }
 
@@ -545,7 +551,7 @@ impl DirectXRenderer {
         Ok(())
     }
 
-    fn upload_scene_buffers(&mut self, scene: &Scene) -> Result<()> {
+    pub(crate) fn upload_scene_buffers(&mut self, scene: &Scene) -> Result<()> {
         let devices = self.devices.as_ref().context("devices missing")?;
 
         if !scene.shadows.is_empty() {
