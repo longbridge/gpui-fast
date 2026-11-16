@@ -310,14 +310,6 @@ impl<V: View> ViewElement<V> {
     }
 }
 
-impl<V: View> IntoElement for ViewElement<V> {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 #[cfg(not(gpui_hot_reload))]
 #[inline]
 pub(crate) fn render_view<V: View>(view: V, window: &mut Window, cx: &mut App) -> AnyElement {

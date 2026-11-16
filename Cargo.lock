@@ -3701,6 +3701,7 @@ dependencies = [
  "raw-window-handle",
  "scheduler",
  "semver",
+ "serde_json",
  "smallvec",
  "strum",
  "uuid",
