@@ -1197,6 +1197,14 @@ fn culling_under_covers_changes_no_pixel() {
             },
         ),
         // The shadow at (380, 420) 120x70 blurs 8 px: its tail reaches 24 px out.
+        (
+            "opaque border, fractional",
+            Quad {
+                border_widths: Edges::all(ScaledPixels(4.)),
+                border_color: Hsla::from(rgba(0xffffffff)),
+                ..cover(sp(80.5, 79.25, 560.25, 480.75))
+            },
+        ),
         ("shadow body only", cover(sp(380., 420., 120., 70.))),
         ("shadow and tail", cover(sp(350., 390., 180., 130.))),
         ("everything", cover(sp(0., 0., 1024., 1024.))),
@@ -1314,5 +1322,49 @@ fn culling_under_images_changes_no_pixel() {
         let mut under = quad(sp(400., 300., 20., 20.), Hsla::from(rgba(0x000000ff)));
         under.order = scene.quads[0].order;
         assert_eq!(occlusion.hides_quad(&under), hides, "{name}");
+    }
+}
+
+/// A primitive whose mask's right edge falls on a pixel centre exactly where
+/// a cover's right edge does: the clip keeps that column (a centre on the
+/// clip plane is kept), the cover does not (the rasterizer's top-left rule
+/// drops a centre on its right edge).
+#[test]
+fn culling_at_a_shared_edge_on_a_pixel_centre_changes_no_pixel() {
+    let Some(mut harness) = Harness::new() else {
+        eprintln!("skipped: no Direct3D 11 device");
+        return;
+    };
+    // The hidden quad's bounds reach past the cover only where its mask
+    // cuts them, at the cover's edge.
+    for (name, hidden_bounds, hidden_mask, cover_bounds) in [
+        (
+            "right",
+            sp(100., 100., 600., 400.),
+            sp(0., 0., 640.5, 1024.),
+            sp(80., 80., 560.5, 480.),
+        ),
+        (
+            "bottom",
+            sp(100., 100., 400., 600.),
+            sp(0., 0., 1024., 560.5),
+            sp(80., 80., 560., 480.5),
+        ),
+    ] {
+        eprintln!("shared edge: {name}");
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad(sp(0., 0., 1024., 1024.), Hsla::from(rgba(0x101010ff))));
+        scene.insert_primitive(Quad {
+            content_mask: ContentMask {
+                bounds: hidden_mask,
+            },
+            ..quad(hidden_bounds, Hsla::from(rgba(0xcc3322ff)))
+        });
+        scene.insert_primitive(quad(cover_bounds, Hsla::from(rgba(0x445566ff))));
+        scene.finish();
+        culling_keeps_pixels(&mut harness, &scene);
+        // Its column on the shared edge shows: it is not taken as hidden.
+        let occlusion = crate::fast::occlusion::Occlusion::of(&scene, |_| false);
+        assert!(!occlusion.hides_quad(&scene.quads[1]), "{name}");
     }
 }

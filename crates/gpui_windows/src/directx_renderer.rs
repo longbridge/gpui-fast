@@ -165,6 +165,8 @@ impl DirectXRenderer {
 
         let devices = DirectXRendererDevices::new(directx_devices, disable_direct_composition)
             .context("Creating DirectX devices")?;
+        let mut fast_frame = crate::fast::frame::FrameState::default();
+        fast_frame.skip_occlusion = !crate::fast::occlusion::wanted(&devices.adapter);
         let atlas = Arc::new(DirectXAtlas::new(&devices.device, &devices.device_context));
         crate::fast::dynamic_textures::init(&devices.device, &devices.device_context);
 
@@ -198,7 +200,7 @@ impl DirectXRenderer {
             width: 1,
             height: 1,
             skip_draws: false,
-            fast_frame: crate::fast::frame::FrameState::default(),
+            fast_frame,
             fast_composition: crate::fast::composition::DirectXComposition::default(),
             fast_recovery: crate::fast::device_recovery::RecoveryState::default(),
         })
@@ -300,6 +302,7 @@ impl DirectXRenderer {
 
         let devices = DirectXRendererDevices::new(directx_devices, disable_direct_composition)
             .context("Recreating DirectX devices")?;
+        self.fast_frame.skip_occlusion = !crate::fast::occlusion::wanted(&devices.adapter);
         let resources = DirectXResources::new(
             &devices,
             self.width,

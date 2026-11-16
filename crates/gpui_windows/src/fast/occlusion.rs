@@ -13,8 +13,12 @@
 //! an opaque one (a dashed border's gaps show the opaque background), or an
 //! image (polychrome sprite) drawn at opacity 1 with square corners whose
 //! every pixel is opaque (the atlas records that as it uploads the image).
-//! Its rectangle is its bounds within its content mask; an image's is inset
-//! by the band where bilinear sampling blends in the atlas around its tile. The rasterizer
+//! Its rectangle is its bounds within its content mask; a bordered quad's
+//! is inset by the pixel its antialiased outer edge blends over, an image's
+//! by the band where bilinear sampling blends in the atlas around its tile.
+//!
+//! Culling runs on software adapters only ([`wanted`]): there, every shaded
+//! pixel is CPU time; on a GPU the overdraw it saves was not measured. The rasterizer
 //! covers a pixel when the pixel's centre is inside the primitive's
 //! rectangle (an unrounded quad or sprite has no antialiased edge), so a
 //! primitive whose whole extent lies inside an occluder's rectangle, and
@@ -61,6 +65,28 @@ pub(crate) fn enabled() -> bool {
     }
 }
 
+/// How far past a clip edge on its right or bottom a hidden primitive is
+/// taken to reach (see [`Rect::reached`]).
+const EDGE_EPSILON: f32 = 1.0 / 64.0;
+
+/// Whether frames on `adapter` cull overdraw: on a software adapter (WARP,
+/// the Microsoft Basic Render Driver), where every pixel shaded costs CPU
+/// time. `GPUI_OVERDRAW_CULLING=1` turns it on everywhere, `=0` off.
+pub(crate) fn wanted(adapter: &windows::Win32::Graphics::Dxgi::IDXGIAdapter1) -> bool {
+    match std::env::var("GPUI_OVERDRAW_CULLING").as_deref() {
+        Ok("1") => return true,
+        Ok("0") => return false,
+        _ => {}
+    }
+    // SAFETY: a query on a live adapter.
+    unsafe { adapter.GetDesc1() }.is_ok_and(|desc| {
+        let software =
+            desc.Flags & windows::Win32::Graphics::Dxgi::DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0;
+        // The Basic Render Driver's PCI ids.
+        software || (desc.VendorId, desc.DeviceId) == (0x1414, 0x8c)
+    })
+}
+
 /// How many occluders a frame keeps (the largest).
 const MAX_OCCLUDERS: usize = 16;
 /// Smaller opaque quads hide too little to be worth testing against.
@@ -84,6 +110,30 @@ impl Rect {
             y0: bounds.origin.y.0.max(m.origin.y.0),
             x1: (bounds.origin.x.0 + bounds.size.width.0).min(m.origin.x.0 + m.size.width.0),
             y1: (bounds.origin.y.0 + bounds.size.height.0).min(m.origin.y.0 + m.size.height.0),
+        }
+    }
+
+    /// What a primitive at `bounds` drawn through `mask` may cover. Where
+    /// the mask cuts it on the right or at the bottom, the clip keeps a
+    /// pixel whose centre lies exactly on the mask's edge, while the
+    /// rasterizer's top-left rule leaves a centre on an occluder's right or
+    /// bottom edge out of the occluder: such an edge reaches a hair further,
+    /// so that an occluder ending there does not hide it.
+    fn reached(bounds: &Bounds<ScaledPixels>, mask: &ContentMask<ScaledPixels>) -> Rect {
+        let r = Rect::of(bounds, mask);
+        let b = Rect::of(bounds, &ContentMask { bounds: *bounds });
+        Rect {
+            x1: if r.x1 < b.x1 {
+                r.x1 + EDGE_EPSILON
+            } else {
+                r.x1
+            },
+            y1: if r.y1 < b.y1 {
+                r.y1 + EDGE_EPSILON
+            } else {
+                r.y1
+            },
+            ..r
         }
     }
 
@@ -201,6 +251,24 @@ fn is_image_occluder(sprite: &PolychromeSprite) -> bool {
         && c.bottom_right.0 <= 0.0
 }
 
+/// `bounds` within `mask`, its own edges (not the mask's) moved in by
+/// `margin_x` and `margin_y`.
+fn inset_own_edges(
+    bounds: &Bounds<ScaledPixels>,
+    mask: &ContentMask<ScaledPixels>,
+    margin_x: f32,
+    margin_y: f32,
+) -> Rect {
+    let r = Rect::of(bounds, mask);
+    let b = Rect::of(bounds, &ContentMask { bounds: *bounds });
+    Rect {
+        x0: r.x0.max(b.x0 + margin_x),
+        y0: r.y0.max(b.y0 + margin_y),
+        x1: r.x1.min(b.x1 - margin_x),
+        y1: r.y1.min(b.y1 - margin_y),
+    }
+}
+
 /// The rectangle an opaque image covers opaquely: its bounds within its
 /// mask, less the band along its edges where bilinear sampling reaches the
 /// atlas texels around its tile (half a texel at the scale it is drawn,
@@ -210,20 +278,20 @@ fn image_rect(sprite: &PolychromeSprite) -> Rect {
     let scale = |drawn: f32, texels: i32| drawn / texels.max(1) as f32;
     let margin_x = 0.5 * scale(sprite.bounds.size.width.0, texels.width.0) + 1.0;
     let margin_y = 0.5 * scale(sprite.bounds.size.height.0, texels.height.0) + 1.0;
-    let r = Rect::of(&sprite.bounds, &sprite.content_mask);
-    let b = Rect::of(
-        &sprite.bounds,
-        &ContentMask {
-            bounds: sprite.bounds,
-        },
-    );
-    // Only the image's own edges are inset; a mask edge inside it is not.
-    Rect {
-        x0: r.x0.max(b.x0 + margin_x),
-        y0: r.y0.max(b.y0 + margin_y),
-        x1: r.x1.min(b.x1 - margin_x),
-        y1: r.y1.min(b.y1 - margin_y),
-    }
+    inset_own_edges(&sprite.bounds, &sprite.content_mask, margin_x, margin_y)
+}
+
+/// The rectangle an occluding quad covers opaquely. A borderless one takes
+/// the quad shader's fast path: every pixel whose centre is inside is the
+/// background, unblended. A bordered one goes through the shader's distance
+/// field, which antialiases its outer edge over the half pixel inside it
+/// (`saturate(0.5 - outer_sdf)`): at fractional bounds those pixels are
+/// translucent, so its own edges are moved in by a pixel.
+fn quad_rect(quad: &Quad) -> Rect {
+    let w = &quad.border_widths;
+    let bordered = w.top.0 > 0.0 || w.right.0 > 0.0 || w.bottom.0 > 0.0 || w.left.0 > 0.0;
+    let margin = if bordered { 1.0 } else { 0.0 };
+    inset_own_edges(&quad.bounds, &quad.content_mask, margin, margin)
 }
 
 pub(crate) fn is_occluder(quad: &Quad) -> bool {
@@ -267,7 +335,7 @@ impl Occlusion {
             .filter(|quad| is_occluder(quad))
             .map(|quad| Occluder {
                 order: quad.order,
-                rect: Rect::of(&quad.bounds, &quad.content_mask),
+                rect: quad_rect(quad),
             });
         let images = sprites
             .iter()
@@ -299,7 +367,7 @@ impl Occlusion {
     }
 
     pub(crate) fn hides_quad(&self, quad: &Quad) -> bool {
-        self.hides(quad.order, &Rect::of(&quad.bounds, &quad.content_mask))
+        self.hides(quad.order, &Rect::reached(&quad.bounds, &quad.content_mask))
     }
 
     /// The pieces of a plain `quad` that no later occluder covers, when
@@ -334,9 +402,9 @@ impl Occlusion {
         // As the shadow vertex shader: an inset shadow stays in its
         // element; a drop shadow's tail reaches 3 blur radii out.
         let rect = if shadow.inset != 0 {
-            Rect::of(&shadow.element_bounds, &shadow.content_mask)
+            Rect::reached(&shadow.element_bounds, &shadow.content_mask)
         } else {
-            Rect::of(&shadow.bounds, &shadow.content_mask)
+            Rect::reached(&shadow.bounds, &shadow.content_mask)
                 .outset(3.0 * shadow.blur_radius.0.max(0.0))
         };
         self.hides(shadow.order, &rect)
@@ -354,13 +422,13 @@ impl Occlusion {
         let unit = gpui::TransformationMatrix::unit();
         transformation.rotation_scale == unit.rotation_scale
             && transformation.translation == unit.translation
-            && self.hides(order, &Rect::of(bounds, content_mask))
+            && self.hides(order, &Rect::reached(bounds, content_mask))
     }
 
     pub(crate) fn hides_sprite(&self, sprite: &gpui::PolychromeSprite) -> bool {
         self.hides(
             sprite.order,
-            &Rect::of(&sprite.bounds, &sprite.content_mask),
+            &Rect::reached(&sprite.bounds, &sprite.content_mask),
         )
     }
 }

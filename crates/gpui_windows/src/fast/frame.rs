@@ -42,6 +42,8 @@ pub(crate) struct FrameState {
     /// The scroll layer tiles the frames composite.
     pub(crate) layers: TileCache,
     pub(crate) rounded_masks: crate::fast::rounded_clip::Masks,
+    /// Set where overdraw culling is not wanted (`fast::occlusion::wanted`).
+    pub(crate) skip_occlusion: bool,
 }
 
 /// The Direct3D objects a scene is drawn with.
@@ -175,7 +177,7 @@ pub(crate) fn draw_scene_masked(
     let mut restore_upload = false;
     // Primitives a later opaque rectangle hides are not drawn (none under
     // a mask, whose antialiased edge would show them).
-    let occlusion = if mask.is_none() {
+    let occlusion = if mask.is_none() && !frame.skip_occlusion {
         crate::fast::occlusion::Occlusion::of(scene, |sprite| target.atlas.is_opaque(&sprite.tile))
     } else {
         crate::fast::occlusion::Occlusion::default()
