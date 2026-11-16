@@ -465,8 +465,12 @@ pub(crate) fn visible_runs(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use gpui::{Corners, Edges, hsla, point, size, solid_background};
+    use gpui::{
+        Bounds, ContentMask, Corners, Edges, Quad, ScaledPixels, hsla, point, size,
+        solid_background,
+    };
+
+    use super::{Occlusion, Rect, is_plain, visible_runs};
 
     fn quad(order: u32, x: f32, y: f32, w: f32, h: f32, alpha: f32) -> Quad {
         Quad {
