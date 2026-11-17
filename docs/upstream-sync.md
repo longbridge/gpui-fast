@@ -243,6 +243,15 @@ No application-specific timeline policy belongs here.
   are unchanged; CPU updates refuse GPU-written metadata. A native Metal
   producer interface is outside this extension.
 
+- `scheduler`'s `Clock::utc_now` and `TestClock::set_utc_now` use
+  `SystemTime` (exported next to `Instant`, both from `web_time`) instead of
+  `chrono::DateTime<Utc>`, which leaves `chrono` (RUSTSEC-2026-0543,
+  unmaintained) out of every GPUI application's dependencies. It lives in
+  `scheduler`'s `fast::clock` and `gpui`'s `fast::clock`. Upstream makes the
+  same change in [zed#67089](https://github.com/zed-industries/zed/pull/67089);
+  the sync that brings it keeps upstream's lines in `clock.rs` and
+  `platform_scheduler.rs` and deletes both `fast/clock.rs` files.
+
 When the check fails, move the change into a `fast/` module and leave a hook
 behind that names it; use `git diff <import_commit> -- <file>` to see what
 differs.
