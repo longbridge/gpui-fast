@@ -15,6 +15,7 @@ mod layout;
 mod list_measure;
 mod misc;
 mod number_shaping;
+mod observers;
 mod oracle;
 mod path_cache;
 mod pointer;

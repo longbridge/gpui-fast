@@ -7065,7 +7065,8 @@ impl Window {
         f: impl Fn(&mut Window, &mut App) + 'static,
     ) -> Subscription {
         let window_handle = self.handle;
-        let (subscription, activate) = cx.global_observers.insert_pending(
+        let subscription = crate::fast::observers::observe_global(
+            cx,
             TypeId::of::<G>(),
             Box::new(move |cx| {
                 window_handle
@@ -7073,7 +7074,6 @@ impl Window {
                     .is_ok()
             }),
         );
-        cx.defer(move |_| activate());
         subscription
     }
 
