@@ -14,7 +14,7 @@
 //! the wheel scrolled what it holds ([`OwnerWatch`]), and no container
 //! inside the layer's content scrolled, which the count cannot tell apart.
 
-use std::{cell::RefCell, ops::Range, rc::Rc};
+use std::{cell::RefCell, collections::hash_map::Entry, ops::Range, rc::Rc};
 
 use collections::{FxHashMap, FxHashSet};
 
@@ -326,7 +326,7 @@ pub(crate) struct OffsetRead {
 }
 
 /// What was read of an offset.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Read {
     /// The offset, or anything that moves with it.
     Offset,
@@ -542,15 +542,23 @@ impl OffsetReads {
         if reads.is_empty() {
             return OffsetReads(None);
         }
+        // Hashed: a subtree's reads include those of every subtree nested in
+        // it, and looking back over them is quadratic.
         let mut unique: Vec<OffsetRead> = Vec::with_capacity(reads.len());
+        let mut index: FxHashMap<usize, usize> =
+            FxHashMap::with_capacity_and_hasher(reads.len(), Default::default());
         for read in reads {
-            match unique
-                .iter_mut()
-                .find(|other| other.version.id() == read.version.id())
-            {
-                Some(other) if other.read != read.read => other.read = Read::Offset,
-                Some(_) => {}
-                None => unique.push(read.clone()),
+            match index.entry(read.version.id()) {
+                Entry::Occupied(at) => {
+                    let other = &mut unique[*at.get()];
+                    if other.read != read.read {
+                        other.read = Read::Offset;
+                    }
+                }
+                Entry::Vacant(at) => {
+                    at.insert(unique.len());
+                    unique.push(read.clone());
+                }
             }
         }
         OffsetReads(Some(unique.into()))
@@ -1135,4 +1143,60 @@ fn any_content_view(window: &Window, id: &GlobalElementId, f: impl Fn(EntityId) 
 pub(crate) fn changed_without_layer(window: &Window, cx: &App, id: &GlobalElementId) -> bool {
     let source = window.fast_layers.scrolls.source(id);
     nested_container_scrolled(window, id) || !owner_scrolled_only(window, cx, id, source.as_ref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OffsetRead, OffsetReads, Read};
+    use crate::fast::dependencies::StateVersion;
+
+    fn read(version: &StateVersion, read: Read) -> OffsetRead {
+        OffsetRead {
+            version: version.clone(),
+            read_at: version.get(),
+            read,
+        }
+    }
+
+    #[test]
+    fn offset_reads_keep_each_state_once_at_its_first_read_in_order() {
+        let (a, b, c, d) = (
+            StateVersion::default(),
+            StateVersion::default(),
+            StateVersion::default(),
+            StateVersion::default(),
+        );
+        // First read in an order other than the one they were made in.
+        let mut log = vec![
+            read(&c, Read::AtEnd(Some(true))),
+            read(&b, Read::Offset),
+            read(&a, Read::AtEnd(Some(true))),
+        ];
+        a.bump();
+        c.bump();
+        log.extend([
+            read(&d, Read::AtEnd(None)),
+            // The same answer again leaves it a read of only the end.
+            read(&a, Read::AtEnd(Some(true))),
+            // A different answer makes it a read of the offset.
+            read(&c, Read::AtEnd(Some(false))),
+            read(&b, Read::AtEnd(Some(true))),
+            read(&d, Read::AtEnd(None)),
+        ]);
+
+        let unique: Vec<(usize, u64, Read)> = OffsetReads::of(&log)
+            .iter()
+            .map(|read| (read.version.id(), read.read_at, read.read))
+            .collect();
+        assert_eq!(
+            unique,
+            vec![
+                (c.id(), 0, Read::Offset),
+                (b.id(), 0, Read::Offset),
+                (a.id(), 0, Read::AtEnd(Some(true))),
+                (d.id(), 0, Read::AtEnd(None)),
+            ]
+        );
+        assert_eq!(OffsetReads::of(&[]).iter().count(), 0);
+    }
 }
