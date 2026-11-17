@@ -88,3 +88,36 @@ fn an_observer_hears_a_change_made_after_it_was_made_behind_a_waiting_notice() {
         );
     }
 }
+
+/// An entity that observes another with `Context::observe`, made while a
+/// notice of that entity waits, hears a `Context::notify` made after it was
+/// made, and not one made only before.
+#[test]
+fn an_entity_observer_hears_a_notify_made_after_it_was_made_behind_a_waiting_notice() {
+    // (whether the observed entity notifies again after the observer is
+    // made, the calls the observer hears)
+    for (notify_after, heard) in [(true, 1), (false, 0)] {
+        let mut app = TestApp::new();
+        let watched = app.new_entity(|_| Watched);
+        let watcher = app.new_entity(|_| Watcher);
+
+        let calls = Rc::new(Cell::new(0));
+        app.update(|cx| {
+            watched.update(cx, |_, cx| cx.notify());
+            let counter = calls.clone();
+            watcher.update(cx, |_, cx| {
+                cx.observe(&watched, move |_, _, _| counter.set(counter.get() + 1))
+                    .detach()
+            });
+            if notify_after {
+                watched.update(cx, |_, cx| cx.notify());
+            }
+        });
+
+        assert_eq!(
+            calls.get(),
+            heard,
+            "notified again after the observer was made: {notify_after}"
+        );
+    }
+}
