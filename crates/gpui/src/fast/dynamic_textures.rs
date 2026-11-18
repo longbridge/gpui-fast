@@ -21,6 +21,7 @@
 
 use anyhow::{Context as _, Result};
 use std::{
+    borrow::Cow,
     collections::HashMap,
     sync::{
         Arc,
@@ -227,8 +228,9 @@ fn painted_version(id: DynamicTextureId) -> u32 {
 
 /// Allocates a mutable BGRA8 texture.
 ///
-/// `bytes` holds the initial contents in `bytes_per_row`-strided rows; it is
-/// repacked into tight rows before the upload. The payload must hold every
+/// `bytes` holds the initial contents in `bytes_per_row`-strided rows; padded
+/// multi-row inputs are repacked into tight rows before the upload, while
+/// tightly packed inputs are borrowed in place. The payload must hold every
 /// row's visible bytes; padding on the final row — what a native framebuffer
 /// allocation naturally has — is fine, and anything past the rows the
 /// texture needs is ignored.
@@ -298,8 +300,9 @@ fn allocate(
 /// Uploads a BGRA8 sub-region into a mutable texture.
 ///
 /// The region is relative to the texture's own origin and must lie inside it,
-/// so a stale texture size cannot scribble over other content. The rows are
-/// repacked before the upload, and the texture's version advances so cached
+/// so a stale texture size cannot scribble over other content. Padded rows are
+/// repacked before the upload while tight rows are borrowed in place, and the
+/// texture's version advances so cached
 /// frames learn about the new contents.
 pub(crate) fn update(
     texture: DynamicTexture,
@@ -476,12 +479,12 @@ fn live_size(id: DynamicTextureId) -> Result<crate::Size<DevicePixels>> {
 
 /// Validates a sub-region against the texture's size and returns its rows
 /// tightly packed.
-fn validate_region(
+fn validate_region<'a>(
     texture_size: crate::Size<DevicePixels>,
     bounds: Bounds<DevicePixels>,
-    bytes: &[u8],
+    bytes: &'a [u8],
     bytes_per_row: u32,
-) -> Result<Vec<u8>> {
+) -> Result<Cow<'a, [u8]>> {
     // i64 arithmetic: the caller's bounds are untrusted, and the i32 sums of
     // origin and size must not wrap before they are compared.
     let (origin_x, origin_y) = (bounds.origin.x.0 as i64, bounds.origin.y.0 as i64);
@@ -526,31 +529,38 @@ fn checked_payload_len(height: usize, stride: usize, row_bytes: usize) -> Result
         .context("dynamic texture payload size overflow")
 }
 
-/// Repacks strided rows into tightly packed rows.
-fn pack_rows(bytes: &[u8], stride: usize, row_bytes: usize, height: usize) -> Vec<u8> {
+/// Borrows already-tight rows in place, or repacks padded multi-row inputs
+/// into tightly packed rows.
+fn pack_rows(bytes: &[u8], stride: usize, row_bytes: usize, height: usize) -> Cow<'_, [u8]> {
+    if stride == row_bytes || height <= 1 {
+        return Cow::Borrowed(&bytes[..row_bytes * height]);
+    }
     let mut packed = Vec::with_capacity(row_bytes * height);
     for row in 0..height {
         let start = row * stride;
         packed.extend_from_slice(&bytes[start..start + row_bytes]);
     }
-    packed
+    Cow::Owned(packed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         BYTES_PER_PIXEL, DYNAMIC_INDEX_BASE, DynamicTexture, DynamicTextureId,
-        DynamicTexturePlatform, create, live_size, mark_written, painted_version, remove,
-        set_dynamic_texture_platform, update, validate_region,
+        DynamicTexturePlatform, create, live_size, mark_written, pack_rows, painted_version,
+        remove, set_dynamic_texture_platform, update, validate_region,
     };
     use crate::{
         AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, ContentMask, DevicePixels,
         PolychromeSprite, ScaledPixels, Scene, TileId, point, size,
     };
     use anyhow::Result;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+    use std::{
+        borrow::Cow,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
     };
 
     /// Records the platform calls a test makes, standing in for a GPU.
@@ -561,6 +571,7 @@ mod tests {
         created: parking_lot::Mutex<Vec<(DynamicTextureId, crate::Size<DevicePixels>, usize)>>,
         updated: parking_lot::Mutex<Vec<(DynamicTextureId, Bounds<DevicePixels>, usize)>>,
         removed: parking_lot::Mutex<Vec<DynamicTextureId>>,
+        last_bytes_ptr: AtomicUsize,
         fail_updates: AtomicBool,
     }
 
@@ -571,6 +582,8 @@ mod tests {
             size: crate::Size<DevicePixels>,
             bytes: &[u8],
         ) -> Result<()> {
+            self.last_bytes_ptr
+                .store(bytes.as_ptr() as usize, Ordering::SeqCst);
             self.created.lock().push((id, size, bytes.len()));
             Ok(())
         }
@@ -584,6 +597,8 @@ mod tests {
             if self.fail_updates.load(Ordering::SeqCst) {
                 anyhow::bail!("backend refused the update");
             }
+            self.last_bytes_ptr
+                .store(bytes.as_ptr() as usize, Ordering::SeqCst);
             self.updated.lock().push((id, bounds, bytes.len()));
             Ok(())
         }
@@ -604,6 +619,7 @@ mod tests {
                 created: parking_lot::Mutex::new(Vec::new()),
                 updated: parking_lot::Mutex::new(Vec::new()),
                 removed: parking_lot::Mutex::new(Vec::new()),
+                last_bytes_ptr: AtomicUsize::new(0),
                 fail_updates: AtomicBool::new(false),
             });
             set_dynamic_texture_platform(mock.clone());
@@ -618,6 +634,7 @@ mod tests {
         mock.created.lock().clear();
         mock.updated.lock().clear();
         mock.removed.lock().clear();
+        mock.last_bytes_ptr.store(0, Ordering::SeqCst);
         mock.fail_updates.store(false, Ordering::SeqCst);
         (lock, mock.clone())
     }
@@ -727,7 +744,8 @@ mod tests {
         let texture = create(texture_size, &packed_bytes(8, 8), 32).expect("created");
 
         let inside = bounds_at((0, 0), 4, 4);
-        let packed = validate_region(texture_size, inside, &packed_bytes(4, 4), 16)
+        let inside_bytes = packed_bytes(4, 4);
+        let packed = validate_region(texture_size, inside, &inside_bytes, 16)
             .expect("a region inside the texture is accepted");
         assert_eq!(packed.len(), 4 * 4 * BYTES_PER_PIXEL);
 
@@ -935,5 +953,42 @@ mod tests {
         assert!(mock.updated.lock().is_empty());
         assert!(mock.removed.lock().is_empty());
         assert!(mark_written(texture).is_err());
+    }
+
+    #[test]
+    fn tight_and_single_row_uploads_borrow_caller_slice_without_repacking() {
+        let (_lock, mock) = fresh_mock();
+
+        // Tightly packed multi-row buffer (plus trailing slack) borrows in place.
+        let mut tight = vec![0xAB; 4 * 4 * BYTES_PER_PIXEL + 12];
+        tight[0] = 0x11;
+        let texture = create(size_of(4, 4), &tight, 16).expect("created");
+        assert_eq!(
+            mock.last_bytes_ptr.load(Ordering::SeqCst),
+            tight.as_ptr() as usize,
+            "tightly packed create must forward the caller slice without copying"
+        );
+        assert_eq!(
+            mock.created.lock().last().unwrap().2,
+            4 * 4 * BYTES_PER_PIXEL
+        );
+
+        // Single-row upload with row padding also borrows the visible prefix.
+        let single_row_padded = [0xCDu8; 24];
+        update(texture, bounds_at((0, 0), 4, 1), &single_row_padded, 24).expect("updated");
+        assert_eq!(
+            mock.last_bytes_ptr.load(Ordering::SeqCst),
+            single_row_padded.as_ptr() as usize,
+            "single-row update must borrow the visible prefix without copying"
+        );
+        assert_eq!(mock.updated.lock().last().unwrap().2, 4 * BYTES_PER_PIXEL);
+
+        // Multi-row padded input still repacks into an owned tight buffer.
+        let strided = [1, 2, 3, 4, 0xEE, 0xEE, 5, 6, 7, 8];
+        let repacked = pack_rows(&strided, 6, 4, 2);
+        assert!(matches!(repacked, Cow::Owned(_)));
+        assert_eq!(&*repacked, &[1, 2, 3, 4, 5, 6, 7, 8]);
+
+        remove(texture);
     }
 }
