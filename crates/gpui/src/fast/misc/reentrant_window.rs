@@ -12,6 +12,10 @@
 //! The frame request already skips re-entrant draws (`draw_in_progress`);
 //! this covers the other callbacks, each the way its work allows:
 //!
+//! - a frame request outside a draw (`ShowWindow` called from a window
+//!   update sends `WM_SHOWWINDOW`, whose handler draws at once) is skipped,
+//!   and the window is refreshed once the app is free, so the frame it
+//!   asked for is drawn ([`defer_frame_request`]);
 //! - resize, move and display change are coalesced: only the latest state
 //!   matters, and `bounds_changed` / `display_changed` read it from the
 //!   platform window when they run, so one deferred run replaces any number;
@@ -32,6 +36,69 @@ use crate::{
     AnyWindowHandle, App, AppContext as _, AsyncApp, DispatchEventResult, PlatformInput,
     PlatformWindow, Window, WindowControlArea,
 };
+
+thread_local! {
+    /// The windows whose skipped frame request waits for the app to be free.
+    static FRAMES_WAITING: RefCell<Vec<AnyWindowHandle>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Whether the frame request of window `handle` must be skipped: a draw is
+/// on the stack (upstream's check: the platform asks again once it unwinds),
+/// or the app is borrowed outside a draw, and the window is then refreshed
+/// on a later main-thread turn, once the app is free. A released app counts
+/// as free, so the request runs and reports that the app is gone, as
+/// upstream does.
+pub(crate) fn defer_frame_request(handle: AnyWindowHandle, cx: &AsyncApp) -> bool {
+    if crate::window::draw_in_progress() {
+        return true;
+    }
+    if app_is_free(cx) {
+        return false;
+    }
+    log::debug!(
+        "deferring frame request for window {:?} made while the app is borrowed",
+        handle.window_id()
+    );
+    let waiting = FRAMES_WAITING.with_borrow_mut(|frames| {
+        let waiting = frames.contains(&handle);
+        if !waiting {
+            frames.push(handle);
+        }
+        waiting
+    });
+    if !waiting {
+        refresh_when_free(handle, cx.clone());
+    }
+    true
+}
+
+/// Refreshes window `handle` on the next main-thread turn, retrying each
+/// turn while a nested message loop keeps the outer borrow alive.
+fn refresh_when_free(handle: AnyWindowHandle, cx: AsyncApp) {
+    cx.foreground_executor()
+        .clone()
+        .spawn(async move {
+            if cx.app.strong_count() != 0 && !app_is_free(&cx) {
+                refresh_when_free(handle, cx);
+                return;
+            }
+            FRAMES_WAITING.with_borrow_mut(|frames| frames.retain(|waiting| *waiting != handle));
+            if cx.app.strong_count() != 0 {
+                // A window closed meanwhile has no frame to draw.
+                let _ = cx
+                    .clone()
+                    .update_window(handle, |_, window, _| window.refresh());
+            }
+        })
+        .detach();
+}
+
+/// Whether the app can be borrowed now. A released app counts as free.
+fn app_is_free(cx: &AsyncApp) -> bool {
+    cx.app
+        .upgrade()
+        .is_none_or(|app| app.try_borrow_mut().is_ok())
+}
 
 #[derive(Default)]
 struct Pending {
@@ -93,10 +160,7 @@ impl ReentrantWindowCallbacks {
     /// Whether the app can be borrowed now. A released app counts as free so
     /// the callback runs and reports that the app is gone, as upstream does.
     fn app_is_free(&self) -> bool {
-        self.cx
-            .app
-            .upgrade()
-            .is_none_or(|app| app.try_borrow_mut().is_ok())
+        app_is_free(&self.cx)
     }
 
     /// The `on_resize` and `on_moved` callbacks.
