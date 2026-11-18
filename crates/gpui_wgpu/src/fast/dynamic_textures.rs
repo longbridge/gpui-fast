@@ -51,7 +51,7 @@ const MIN_STAGING_BYTES: u64 = 6 << 20;
 #[cfg(not(target_family = "wasm"))]
 const MIN_WARM_STAGING_BYTES: u64 = 256 << 10;
 #[cfg(not(target_family = "wasm"))]
-const MAX_STAGING_BYTES: u64 = 128 << 20;
+const MAX_STAGING_BYTES: u64 = 64 << 20;
 #[cfg(not(target_family = "wasm"))]
 const STAGING_IDLE_UPLOADS: u8 = 4;
 
