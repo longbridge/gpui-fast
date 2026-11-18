@@ -553,3 +553,69 @@ fn a11y_dump_counts_the_tab_stops_of_its_frame(cx: &mut TestAppContext) {
         "the captured tree is older than the frame on screen"
     );
 }
+
+/// The dump's `rendered_at` is RFC 3339 in local time with milliseconds and a
+/// `+hh:mm` offset, as it was when it was formatted with chrono's
+/// `to_rfc3339_opts(SecondsFormat::Millis, false)`.
+#[crate::test]
+fn a11y_dump_rendered_at_is_rfc3339_local_time_with_milliseconds(cx: &mut TestAppContext) {
+    let window = cx.add_window(|_, cx| TabStops {
+        handles: vec![cx.focus_handle().tab_stop(true)],
+        shown: 1,
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        crate::fast::a11y::set_active_flag(&window.a11y, true);
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+    let json = cx
+        .update_window(window.into(), |_, window, _| {
+            window.debug_a11y_tree_json().expect("a tree was captured")
+        })
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let rendered_at = json["frame"]["rendered_at"]
+        .as_str()
+        .expect("the frame has a rendered_at string");
+
+    // `YYYY-MM-DDTHH:MM:SS.mmm+HH:MM`
+    assert_eq!(rendered_at.len(), 29, "{rendered_at}");
+    assert_eq!(&rendered_at[19..20], ".", "{rendered_at}");
+    assert!(matches!(&rendered_at[23..24], "+" | "-"), "{rendered_at}");
+
+    let rendered_at: jiff::Timestamp = rendered_at.parse().expect("rendered_at is RFC 3339");
+    let age = jiff::Timestamp::now().duration_since(rendered_at);
+    assert!(
+        age >= jiff::SignedDuration::ZERO && age < jiff::SignedDuration::from_secs(60),
+        "{age:?}"
+    );
+}
+
+/// The capture time prints the offset of the time zone it is formatted in,
+/// and keeps milliseconds even when they are zero.
+#[test]
+fn a11y_captured_at_formats_in_its_time_zone() {
+    let captured_at = |millis| {
+        crate::fast::a11y::CapturedAt::from_timestamp(
+            jiff::Timestamp::from_millisecond(millis).unwrap(),
+        )
+    };
+    let utc = jiff::tz::TimeZone::UTC;
+    let india =
+        jiff::tz::TimeZone::fixed(jiff::tz::Offset::from_seconds(5 * 3600 + 30 * 60).unwrap());
+    let newfoundland =
+        jiff::tz::TimeZone::fixed(jiff::tz::Offset::from_seconds(-(3 * 3600 + 30 * 60)).unwrap());
+    // 2025-07-01T23:59:58.123Z
+    assert_eq!(
+        captured_at(1_751_414_398_123).to_rfc3339_in(utc),
+        "2025-07-01T23:59:58.123+00:00"
+    );
+    assert_eq!(
+        captured_at(1_751_414_398_123).to_rfc3339_in(india),
+        "2025-07-02T05:29:58.123+05:30"
+    );
+    assert_eq!(
+        captured_at(1_751_414_398_000).to_rfc3339_in(newfoundland),
+        "2025-07-01T20:29:58.000-03:30"
+    );
+}

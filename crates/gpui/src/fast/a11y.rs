@@ -588,15 +588,28 @@ pub(crate) fn debug_tree_json(window: &Window) -> Option<String> {
 /// When a frame's tree was captured for the debug dump. A frame is captured on
 /// every draw while accessibility is active, so the time is formatted only
 /// when dumped.
-pub(crate) struct CapturedAt(std::time::SystemTime);
+pub(crate) struct CapturedAt(jiff::Timestamp);
 
 impl CapturedAt {
     pub(crate) fn now() -> Self {
-        Self(std::time::SystemTime::now())
+        Self(jiff::Timestamp::now())
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_timestamp(timestamp: jiff::Timestamp) -> Self {
+        Self(timestamp)
+    }
+
+    /// RFC 3339 in local time with milliseconds and a `+hh:mm` offset:
+    /// `2025-07-01T23:59:58.123+05:30`.
     pub(crate) fn to_rfc3339(&self) -> String {
-        chrono::DateTime::<chrono::Local>::from(self.0)
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, false)
+        self.to_rfc3339_in(jiff::tz::TimeZone::system())
+    }
+
+    pub(crate) fn to_rfc3339_in(&self, time_zone: jiff::tz::TimeZone) -> String {
+        self.0
+            .to_zoned_datetime(time_zone)
+            .strftime("%Y-%m-%dT%H:%M:%S%.3f%:z")
+            .to_string()
     }
 }
