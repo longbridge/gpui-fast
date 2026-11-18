@@ -329,6 +329,7 @@ impl WgpuRenderer {
                 .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))?
         };
 
+        crate::fast::wgpu_context::note_gpu_context(&gpu_context);
         let mut ctx_ref = gpu_context.borrow_mut();
         let surface_configured = ctx_ref.is_none();
         let context = match ctx_ref.as_mut() {

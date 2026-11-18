@@ -78,6 +78,17 @@ only hold the hooks that call into it.
    the platform.
    The addition is one accessor returning a clone of the `Rc` it already
    holds, and nothing else about the web platform becomes public.
+   A third exception is `gpui_wgpu::wgpu_context()` (in
+   `gpui_wgpu::fast::wgpu_context`): the same reach for the platforms that draw
+   their windows with wgpu (Linux: Wayland and X11), whose context lives in a
+   slot the platform keeps private. An application that renders on GPUI's
+   device, such as a map engine, draws during `paint` into a
+   `WgpuDynamicTexture`, so its content and GPUI's overlays show in one frame;
+   on a native surface (window composition) it would reach the compositor
+   apart from GPUI's frame.
+   The addition is one public function returning a clone of the context in
+   the slot, read from a thread-local the one hook in `WgpuRenderer::new`
+   (`note_gpu_context`) fills; the slot itself stays private.
 6. **New files only inside `fast/`, or in our own crates** such as
    `crates/gpui_perf` (benchmarks, examples and the frame-measuring app) and
    `compat/` (the `gpui-pre-*` stand-ins GPUI Kit applications patch in).
