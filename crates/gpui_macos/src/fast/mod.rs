@@ -9,4 +9,5 @@
 
 pub(crate) mod composition;
 pub(crate) mod display_link_lifecycle;
+pub(crate) mod frame_demand;
 pub(crate) mod menu;

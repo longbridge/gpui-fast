@@ -303,7 +303,7 @@ fn unsubscribe(display_id: CGDirectDisplayID, subscriber_id: SubscriberId) {
 /// input); this only stops the link between those decisions.
 #[derive(Default)]
 pub struct MetalFrames {
-    source: RefCell<Option<MetalFrameSource>>,
+    pub(crate) source: RefCell<Option<MetalFrameSource>>,
     /// Whether GPUI asked for a frame since the current update began.
     woken: Cell<bool>,
 }
