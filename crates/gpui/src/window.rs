@@ -1957,7 +1957,7 @@ impl Window {
                 // but calling it would hit the App borrow panic above, and this
                 // branch is unreachable there in practice: only Windows pumps
                 // platform events (and thus requests frames) mid-draw.
-                if draw_in_progress() {
+                if crate::fast::misc::reentrant_window::defer_frame_request(handle, &cx) {
                     log::debug!("deferring re-entrant window draw request");
                     deferred_force_render |= request_frame_options.force_render;
                     #[cfg(feature = "profiler")]

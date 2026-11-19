@@ -646,7 +646,7 @@ unsafe fn apply_simple_fullscreen_plan(
 
 /// What paces a window's frames. The choice depends only on the OS version,
 /// so it is made once per window.
-enum FrameSource {
+pub(crate) enum FrameSource {
     /// macOS 14+: a `CAMetalDisplayLink` that hands out each frame's drawable.
     Metal(Rc<MetalFrames>),
     /// Earlier systems: the shared `CVDisplayLink` registry, joined on first start.
@@ -664,7 +664,7 @@ pub(crate) struct MacWindowState {
     background_appearance: WindowBackgroundAppearance,
     cursor_style: CursorStyle,
     cursor_visible: Arc<AtomicBool>,
-    frame_source: FrameSource,
+    pub(crate) frame_source: FrameSource,
     pub(crate) renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     pub(crate) event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -878,7 +878,7 @@ impl MacWindowState {
 
     /// `window_state` is the handle this state lives in; a Metal link holds it
     /// weakly to deliver frames.
-    fn start_display_link(&mut self, window_state: &Rc<Mutex<MacWindowState>>) {
+    pub(crate) fn start_display_link(&mut self, window_state: &Rc<Mutex<MacWindowState>>) {
         self.stop_display_link();
         if !self
             .native_window()
@@ -920,7 +920,7 @@ impl MacWindowState {
         }
     }
 
-    fn stop_display_link(&mut self) {
+    pub(crate) fn stop_display_link(&mut self) {
         match &mut self.frame_source {
             FrameSource::Metal(metal_frames) => {
                 if metal_frames.is_attached() {
@@ -3197,9 +3197,9 @@ extern "C" fn window_did_change_occlusion_state(this: &AnyObject, _: Sel, _: *mu
         .contains(NSWindowOcclusionState::Visible)
     {
         lock.move_traffic_light();
-        lock.start_display_link(&window_state);
+        crate::fast::display_link_lifecycle::visibility_changed(&mut lock, &window_state, true);
     } else {
-        lock.stop_display_link();
+        crate::fast::display_link_lifecycle::visibility_changed(&mut lock, &window_state, false);
     }
     drop(lock);
     // The only visibility source: AppKit posts this for covering, minimizing,

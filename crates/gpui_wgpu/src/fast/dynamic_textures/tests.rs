@@ -1,12 +1,21 @@
 use std::sync::{Arc, Weak};
 
 use gpui::{
-    AppContext as _, Context, DevicePixels, IntoElement, ParentElement as _,
-    PlatformHeadlessRenderer as _, Render, Styled as _, Window, canvas, div, px, size,
+    AppContext as _, Bounds, Context, DevicePixels, DynamicTexture, IntoElement,
+    ParentElement as _, PlatformHeadlessRenderer as _, Render, Styled as _, Window, canvas, div,
+    point, px, size,
 };
 
+use super::{
+    DirtySet, GLOBAL_EPOCH, MAX_DIRTY_RECTS, MAX_STAGING_BYTES, MIN_STAGING_BYTES, PLATFORM,
+    STAGING_IDLE_UPLOADS, TextureStaging, bounds_area, create_upload_texture, handle_device_lost,
+    init, release_lost_device, swizzle_subregion_bgra_to_rgba,
+};
 use crate::wgpu_renderer::WgpuRendererCore;
 use crate::{WgpuAtlas, WgpuContext, WgpuDynamicTexture, WgpuHeadlessRenderer};
+
+/// Serializes tests that exercise the process-wide CPU-upload `PLATFORM`.
+static UPLOAD_PLATFORM_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 struct Showcase(Weak<WgpuDynamicTexture>);
 
@@ -231,4 +240,392 @@ fn gpu_written_textures_are_owned_clipped_and_context_local(cx: &mut gpui::TestA
             pixel(&image, scale, 24., 40., [0, 0, 255, 255]);
         })
         .unwrap();
+}
+
+struct UploadedShowcase(Option<DynamicTexture>);
+
+impl Render for UploadedShowcase {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let texture = self.0;
+        div().size(px(64.)).bg(gpui::white()).child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, (), window, _| {
+                    if let Some(texture) = texture {
+                        window.paint_dynamic_texture(bounds, texture).unwrap();
+                    }
+                },
+            )
+            .size(px(64.)),
+        )
+    }
+}
+
+fn strided_bgra(width: usize, height: usize, pad_bytes: usize, bgra: [u8; 4]) -> (Vec<u8>, u32) {
+    let stride = width * 4 + pad_bytes;
+    let mut bytes = vec![0xAA; stride * height];
+    for row in 0..height {
+        let start = row * stride;
+        for px_chunk in bytes[start..start + width * 4].as_chunks_mut::<4>().0 {
+            *px_chunk = bgra;
+        }
+    }
+    (bytes, stride as u32)
+}
+
+#[gpui::test]
+fn uploaded_textures_update_subregions_and_stay_context_local(cx: &mut gpui::TestAppContext) {
+    let _guard = UPLOAD_PLATFORM_LOCK.lock();
+    let (headless_ctx, _) = WgpuContext::new_headless().expect("GPU required");
+    let mut renderer = WgpuHeadlessRenderer::new().expect("GPU required");
+    handle_device_lost(&headless_ctx);
+    let (other, other_format) = WgpuContext::create_headless().expect("second GPU device");
+    assert!(!Arc::ptr_eq(&other.device, &renderer.core.resources.device));
+
+    let window = cx.update(|cx| {
+        cx.open_window(Default::default(), |_, cx| {
+            cx.new(|_| UploadedShowcase(None))
+        })
+        .unwrap()
+    });
+
+    // BGRA [255, 0, 0, 255] -> rendered RGBA [0, 0, 255, 255] (blue), with
+    // non-zero row padding to exercise stride stripping end-to-end.
+    let (initial_blue, initial_stride) = strided_bgra(16, 16, 12, [255, 0, 0, 255]);
+    let texture = window
+        .update(cx, |showcase, window, cx| {
+            let texture = window
+                .create_dynamic_texture(
+                    size(DevicePixels(16), DevicePixels(16)),
+                    &initial_blue,
+                    initial_stride,
+                )
+                .expect("create uploaded dynamic texture");
+            showcase.0 = Some(texture);
+            cx.notify();
+            texture
+        })
+        .unwrap();
+
+    cx.update_window(window.into(), |_, window, cx| {
+        let mut primary_epoch = headless_ctx.errors().current_generation();
+        let mut other_epoch = other.errors().current_generation();
+
+        window.draw(cx).clear(cx);
+        let scale = window.scale_factor();
+        let side = DevicePixels((64. * scale) as i32);
+        let image = renderer
+            .render_scene_to_image(window.painted_scene(), size(side, side))
+            .unwrap();
+        pixel(&image, scale, 24., 20., [0, 0, 255, 255]);
+
+        // Sub-region update on the bottom half + interior 4x4 patch.
+        let (bottom_red, bottom_stride) = strided_bgra(16, 8, 8, [0, 0, 255, 255]);
+        window
+            .update_dynamic_texture(
+                texture,
+                Bounds {
+                    origin: point(DevicePixels(0), DevicePixels(8)),
+                    size: size(DevicePixels(16), DevicePixels(8)),
+                },
+                &bottom_red,
+                bottom_stride,
+            )
+            .expect("update bottom half");
+
+        let (patch_green, patch_stride) = strided_bgra(4, 4, 4, [0, 255, 0, 255]);
+        window
+            .update_dynamic_texture(
+                texture,
+                Bounds {
+                    origin: point(DevicePixels(4), DevicePixels(4)),
+                    size: size(DevicePixels(4), DevicePixels(4)),
+                },
+                &patch_green,
+                patch_stride,
+            )
+            .expect("update interior patch");
+
+        window.draw(cx).clear(cx);
+        let updated = renderer
+            .render_scene_to_image(window.painted_scene(), size(side, side))
+            .unwrap();
+        pixel(&updated, scale, 6., 22., [0, 0, 255, 255]);
+        pixel(&updated, scale, 24., 24., [0, 255, 0, 255]);
+        pixel(&updated, scale, 24., 48., [255, 0, 0, 255]);
+        assert!(
+            headless_ctx
+                .errors()
+                .observe_error(&mut primary_epoch)
+                .is_none()
+        );
+
+        // An independent foreign context skips the uploaded sprite cleanly
+        // without validation errors, matching `frame.rs`.
+        let foreign = draw_other(&other, other_format, window.painted_scene(), side.0 as u32);
+        pixel(&foreign, scale, 24., 24., [255, 255, 255, 255]);
+        assert!(other.errors().observe_error(&mut other_epoch).is_none());
+
+        // Removing the texture retires it even if a cached scene replays without redrawing,
+        // and advances `synced_epoch` so the next `before_frame` stays on the lock-free fast path.
+        window.remove_dynamic_texture(texture);
+        assert_eq!(
+            headless_ctx
+                .fast_dynamic_textures
+                .0
+                .synced_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            GLOBAL_EPOCH.load(std::sync::atomic::Ordering::Acquire),
+        );
+        let removed = renderer
+            .render_scene_to_image(window.painted_scene(), size(side, side))
+            .unwrap();
+        pixel(&removed, scale, 24., 24., [255, 255, 255, 255]);
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn uploaded_textures_preserve_paused_and_partial_post_recovery_pixels(
+    cx: &mut gpui::TestAppContext,
+) {
+    let _guard = UPLOAD_PLATFORM_LOCK.lock();
+    let (old, old_format) = WgpuContext::create_headless().unwrap();
+    init(&old);
+    handle_device_lost(&old);
+
+    let window = cx.update(|cx| {
+        cx.open_window(Default::default(), |_, cx| {
+            cx.new(|_| UploadedShowcase(None))
+        })
+        .unwrap()
+    });
+    let dimensions = size(DevicePixels(1536), DevicePixels(1024));
+    let full = Bounds {
+        origin: point(DevicePixels(0), DevicePixels(0)),
+        size: dimensions,
+    };
+    let (initial, stride) = strided_bgra(1536, 1024, 0, [0, 255, 0, 255]);
+    let (blue, _) = strided_bgra(1536, 1024, 0, [255, 0, 0, 255]);
+    let (yellow, _) = strided_bgra(1536, 1024, 0, [0, 255, 255, 255]);
+    let texture = window
+        .update(cx, |showcase, window, cx| {
+            let texture = window
+                .create_dynamic_texture(dimensions, &initial, stride)
+                .unwrap();
+            showcase.0 = Some(texture);
+            cx.notify();
+            texture
+        })
+        .unwrap();
+    old.fast_dynamic_textures.before_frame();
+    cx.update_window(window.into(), |_, window, cx| {
+        window
+            .update_dynamic_texture(texture, full, &blue, stride)
+            .unwrap();
+        window.draw(cx).clear(cx);
+        let scale = window.scale_factor();
+        let before = draw_other(
+            &old,
+            old_format,
+            window.painted_scene(),
+            (64. * scale) as u32,
+        );
+        pixel(&before, scale, 24., 20., [0, 0, 255, 255]);
+        window
+            .update_dynamic_texture(texture, full, &yellow, stride)
+            .unwrap();
+    })
+    .unwrap();
+    let old_buffers = {
+        let state = PLATFORM.get().unwrap().state.lock();
+        let buffers = &state.gpu.as_ref().unwrap().staging.buffers;
+        assert_eq!(buffers.lock().ready.len(), 1);
+        Arc::downgrade(buffers)
+    };
+    old.fast_dynamic_textures.before_frame();
+    assert_eq!(
+        old_buffers.upgrade().unwrap().lock().allocated,
+        MIN_STAGING_BYTES
+    );
+
+    old.device.destroy();
+    release_lost_device();
+    assert!(old_buffers.upgrade().is_none());
+    let (replacement, format) = WgpuContext::create_headless().unwrap();
+    handle_device_lost(&replacement);
+    assert!(old.fast_dynamic_textures.view(texture.id()).is_none());
+    cx.update_window(window.into(), |_, window, _| {
+        let scale = window.scale_factor();
+        let side = (64. * scale) as u32;
+        let mut epoch = replacement.errors().current_generation();
+        let paused = draw_other(&replacement, format, window.painted_scene(), side);
+        pixel(&paused, scale, 24., 20., [255, 255, 0, 255]);
+        pixel(&paused, scale, 24., 48., [255, 255, 0, 255]);
+        assert!(replacement.errors().observe_error(&mut epoch).is_none());
+    })
+    .unwrap();
+
+    release_lost_device();
+    let (headless_ctx, _) = WgpuContext::new_headless().unwrap();
+    handle_device_lost(&headless_ctx);
+    let mut renderer = WgpuHeadlessRenderer::new().unwrap();
+    let (bottom_red, stride) = strided_bgra(1536, 512, 0, [0, 0, 255, 255]);
+    window
+        .update(cx, |_, window, _| {
+            window
+                .update_dynamic_texture(
+                    texture,
+                    Bounds {
+                        origin: point(DevicePixels(0), DevicePixels(512)),
+                        size: size(DevicePixels(1536), DevicePixels(512)),
+                    },
+                    &bottom_red,
+                    stride,
+                )
+                .unwrap();
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        let scale = window.scale_factor();
+        let side = DevicePixels((64. * scale) as i32);
+        let partial = renderer
+            .render_scene_to_image(window.painted_scene(), size(side, side))
+            .unwrap();
+        pixel(&partial, scale, 24., 20., [255, 255, 0, 255]);
+        pixel(&partial, scale, 24., 48., [255, 0, 0, 255]);
+
+        window
+            .update_dynamic_texture(texture, full, &blue, stride)
+            .unwrap();
+        window.draw(cx).clear(cx);
+        let resumed = renderer
+            .render_scene_to_image(window.painted_scene(), size(side, side))
+            .unwrap();
+        pixel(&resumed, scale, 24., 48., [0, 0, 255, 255]);
+        {
+            let state = PLATFORM.get().unwrap().state.lock();
+            let buffers = &state.gpu.as_ref().unwrap().staging.buffers;
+            assert_eq!(buffers.lock().allocated, MIN_STAGING_BYTES);
+        }
+        window.remove_dynamic_texture(texture);
+    })
+    .unwrap();
+}
+
+#[test]
+fn staging_buffers_are_bounded_reused_and_released() {
+    let (context, _) = WgpuContext::new_headless().unwrap();
+    let extent = wgpu::Extent3d {
+        width: 1536,
+        height: 1024,
+        depth_or_array_layers: 1,
+    };
+    let texture = create_upload_texture(
+        &context.device,
+        context.color_texture_format(),
+        size(
+            DevicePixels(extent.width as i32),
+            DevicePixels(extent.height as i32),
+        ),
+    );
+    let pixels = [65, 80, 95, 255].repeat((extent.width * extent.height) as usize);
+    let mut staging = TextureStaging::default();
+    let upload = |staging: &mut TextureStaging| {
+        assert!(staging.upload(
+            &context.device,
+            texture.as_image_copy(),
+            extent,
+            &pixels,
+            extent.width * 4,
+            context.device.limits().max_buffer_size,
+        ));
+        let mut buffers = staging.buffers.lock();
+        assert_eq!(buffers.allocated, MIN_STAGING_BYTES);
+        assert!(buffers.reserve(MAX_STAGING_BYTES).is_none());
+    };
+
+    upload(&mut staging);
+    context.queue.submit([staging.finish_uploads().unwrap()]);
+    context
+        .device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .unwrap();
+    assert_eq!(staging.buffers.lock().ready.len(), 1);
+
+    upload(&mut staging);
+    context.queue.submit([staging.finish_uploads().unwrap()]);
+    for _ in 0..STAGING_IDLE_UPLOADS {
+        assert!(staging.finish_uploads().is_none());
+    }
+    context
+        .device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .unwrap();
+    let buffers = staging.buffers.lock();
+    assert!(buffers.ready.is_empty());
+    assert_eq!(buffers.allocated, 0);
+}
+
+#[test]
+fn dirty_set_coalesces_repeated_and_overflowing_updates_without_fullscreen_fallback() {
+    let quarter = Bounds {
+        origin: point(DevicePixels(0), DevicePixels(0)),
+        size: size(DevicePixels(960), DevicePixels(540)),
+    };
+    let mut repeated = DirtySet::new();
+    for _ in 0..20 {
+        repeated.push(quarter);
+    }
+    let (regions, count) = repeated.take();
+    assert_eq!(&regions[..count], &[quarter]);
+    assert_eq!(repeated.take().1, 0);
+
+    let updates = (0..10).flat_map(|column| {
+        [0, 1000].map(move |row| Bounds {
+            origin: point(DevicePixels(column * 20), DevicePixels(row)),
+            size: size(DevicePixels(8), DevicePixels(16)),
+        })
+    });
+    let mut dirty = DirtySet::new();
+    for update in updates.clone() {
+        dirty.push(update);
+    }
+    let (regions, count) = dirty.take();
+    let regions = &regions[..count];
+    assert!((2..=MAX_DIRTY_RECTS).contains(&count));
+    assert!(regions.iter().copied().map(bounds_area).sum::<u64>() <= 2 * 188 * 16);
+    for update in updates {
+        assert!(
+            regions
+                .iter()
+                .any(|region| region.intersect(&update) == update)
+        );
+    }
+}
+
+#[test]
+fn swizzle_subregion_bgra_to_rgba_converts_subrects_and_reuses_scratch_buffer() {
+    let mut scratch = Vec::new();
+    let cpu_pixels = [
+        0x10, 0x20, 0x30, 0x40, 0x11, 0x22, 0x33, 0x44, //
+        0x50, 0x60, 0x70, 0x80, 0xAA, 0xBB, 0xCC, 0xDD,
+    ];
+    assert_eq!(
+        swizzle_subregion_bgra_to_rgba(&cpu_pixels, 8, 0, 0, 8, 2, &mut scratch),
+        &[
+            0x30, 0x20, 0x10, 0x40, 0x33, 0x22, 0x11, 0x44, //
+            0x70, 0x60, 0x50, 0x80, 0xCC, 0xBB, 0xAA, 0xDD,
+        ]
+    );
+    let ptr = scratch.as_ptr();
+    let capacity = scratch.capacity();
+
+    assert_eq!(
+        swizzle_subregion_bgra_to_rgba(&cpu_pixels, 8, 1, 1, 4, 1, &mut scratch),
+        &[0xCC, 0xBB, 0xAA, 0xDD]
+    );
+    assert_eq!(scratch.as_ptr(), ptr);
+    assert_eq!(scratch.capacity(), capacity);
 }

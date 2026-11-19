@@ -1,11 +1,10 @@
-use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use std::time::Duration;
 
-pub use web_time::Instant;
+pub use web_time::{Instant, SystemTime};
 
 pub trait Clock {
-    fn utc_now(&self) -> DateTime<Utc>;
+    fn utc_now(&self) -> crate::fast::clock::UtcTime;
     fn now(&self) -> Instant;
 }
 
@@ -13,20 +12,19 @@ pub struct TestClock(Mutex<TestClockState>);
 
 struct TestClockState {
     now: Instant,
-    utc_now: DateTime<Utc>,
+    utc_now: crate::fast::clock::UtcTime,
 }
 
 impl TestClock {
     pub fn new() -> Self {
-        const START_TIME: &str = "2025-07-01T23:59:58-00:00";
-        let utc_now = DateTime::parse_from_rfc3339(START_TIME).unwrap().to_utc();
+        let utc_now = crate::fast::clock::test_clock_start();
         Self(Mutex::new(TestClockState {
             now: Instant::now(),
             utc_now,
         }))
     }
 
-    pub fn set_utc_now(&self, now: DateTime<Utc>) {
+    pub fn set_utc_now(&self, now: crate::fast::clock::UtcTime) {
         let mut state = self.0.lock();
         state.utc_now = now;
     }
@@ -39,7 +37,7 @@ impl TestClock {
 }
 
 impl Clock for TestClock {
-    fn utc_now(&self) -> DateTime<Utc> {
+    fn utc_now(&self) -> crate::fast::clock::UtcTime {
         self.0.lock().utc_now
     }
 

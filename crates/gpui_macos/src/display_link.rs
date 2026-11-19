@@ -313,6 +313,10 @@ impl MetalFrames {
         *self.source.borrow_mut() = source;
     }
 
+    pub(crate) fn set_paused(&self, paused: bool) {
+        crate::fast::display_link_lifecycle::set_metal_frames_paused(&self.source, paused);
+    }
+
     pub fn is_attached(&self) -> bool {
         self.source.borrow().is_some()
     }

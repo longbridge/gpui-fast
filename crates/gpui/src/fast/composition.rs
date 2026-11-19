@@ -611,6 +611,16 @@ pub(crate) fn input_surface(window: &Window) -> Option<CompositionSurfaceId> {
     window.next_frame.fast_composition_input.scope
 }
 
+/// How many times an element placed a native or external GPU surface while
+/// `window` prepainted, as a web view does from its prepaint: content that
+/// placed one between two counts must be prepainted for it to stay in place.
+/// An element hosting a surface sets its bounds each time it is prepainted,
+/// as it inserts its hitbox, and not from paint, where its surface would not
+/// be stacked with its host either.
+pub(crate) fn surfaces_placed(window: &Window) -> u64 {
+    window.fast_composition.0.borrow().placements.get()
+}
+
 pub(crate) fn record_input(window: &mut Window, id: HitboxId) {
     let input = &mut window.next_frame.fast_composition_input;
     if let (Some(base), Some(surface)) = (input.base, input.scope) {
@@ -744,6 +754,9 @@ pub(crate) struct WindowCompositionState {
     geometry_dirty: Rc<Cell<bool>>,
     /// What the window is prepainting, while it prepaints a frame.
     prepainting: Rc<Cell<Option<Host>>>,
+    /// How many times a platform surface was placed while the window
+    /// prepainted. See [`surfaces_placed`].
+    placements: Rc<Cell<u64>>,
     /// Whether [`Window::enable_window_composition`] was called; the window
     /// presents through its composition only while it also
     /// [`splits`](Self::splits).
@@ -789,6 +802,7 @@ impl Default for WindowCompositionHandle {
             overlay_surface,
             geometry_dirty: Rc::new(Cell::new(false)),
             prepainting: Rc::new(Cell::new(None)),
+            placements: Rc::new(Cell::new(0)),
             enabled: false,
             input_order: Vec::new(),
             visible: FxHashMap::default(),
@@ -809,6 +823,7 @@ struct ManagedPlatformSurface {
     visible: Rc<Cell<bool>>,
     input_forwarding: Cell<bool>,
     prepainting: Rc<Cell<Option<Host>>>,
+    placements: Rc<Cell<u64>>,
     /// The surface its host was last prepainted on.
     host: Cell<Host>,
     /// Whether `host` changed since the surface was last restacked.
@@ -827,6 +842,7 @@ impl ManagedPlatformSurface {
             visible: Rc::new(Cell::new(true)),
             input_forwarding: Cell::new(false),
             prepainting: state.prepainting.clone(),
+            placements: state.placements.clone(),
             host: Cell::new(Host::Base),
             restack: Cell::new(false),
         }
@@ -835,11 +851,14 @@ impl ManagedPlatformSurface {
 
 impl PlatformSurfaceAttachment for ManagedPlatformSurface {
     fn set_bounds(&self, bounds: Bounds<DevicePixels>) -> Result<()> {
-        if let Some(host) = self.prepainting.get()
-            && self.host.replace(host) != host
-        {
-            self.restack.set(true);
-            self.geometry_dirty.set(true);
+        if let Some(host) = self.prepainting.get() {
+            // Counted before the early return below: an element placing its
+            // surface where it already is was placed all the same.
+            self.placements.set(self.placements.get() + 1);
+            if self.host.replace(host) != host {
+                self.restack.set(true);
+                self.geometry_dirty.set(true);
+            }
         }
         if self.bounds.get() == bounds {
             return Ok(());
@@ -1696,12 +1715,11 @@ pub(crate) fn dispatch_native(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
-        CompositionSurfaceId, CompositionSurfaceKind, CompositionTree, Host,
-        ManagedPlatformSurface, PlatformSurfaceAttachment, WindowComposition,
-        WindowCompositionHandle, composed_scene_layers, ordered_plain_scene,
-        restack_native_surfaces,
+        CompositionSurfaceId, CompositionSurfaceKind, CompositionTree, ManagedPlatformSurface,
+        PlatformSurfaceAttachment, WindowComposition, WindowCompositionHandle,
+        composed_scene_layers, ordered_plain_scene, restack_native_surfaces,
     };
     use crate::{
         AppContext as _, Bounds, ContentMask, Context, DevicePixels, Entity, IntoElement,
@@ -1843,17 +1861,10 @@ mod tests {
             bounds: Cell::new(Bounds::default()),
             parent_origin: Cell::new(Point::default()),
         });
-        let geometry_dirty = Rc::new(Cell::new(false));
-        let surface = ManagedPlatformSurface {
-            platform_surface: platform_surface.clone(),
-            bounds: Cell::new(Bounds::default()),
-            geometry_dirty: geometry_dirty.clone(),
-            visible: Rc::new(Cell::new(true)),
-            input_forwarding: Cell::new(false),
-            prepainting: Rc::new(Cell::new(None)),
-            host: Cell::new(Host::Base),
-            restack: Cell::new(false),
-        };
+        let composition = WindowCompositionHandle::default();
+        let state = composition.0.borrow();
+        let geometry_dirty = state.geometry_dirty.clone();
+        let surface = ManagedPlatformSurface::new(platform_surface.clone(), &state);
         let bounds = Bounds {
             origin: Point {
                 x: DevicePixels(25),
@@ -1884,17 +1895,10 @@ mod tests {
             bounds: Cell::new(Bounds::default()),
             parent_origin: Cell::new(Point::default()),
         });
-        let dirty = Rc::new(Cell::new(false));
-        let surface = ManagedPlatformSurface {
-            platform_surface: platform.clone(),
-            bounds: Cell::new(Bounds::default()),
-            geometry_dirty: dirty.clone(),
-            visible: Rc::new(Cell::new(true)),
-            input_forwarding: Cell::new(false),
-            prepainting: Rc::new(Cell::new(None)),
-            host: Cell::new(Host::Base),
-            restack: Cell::new(false),
-        };
+        let composition = WindowCompositionHandle::default();
+        let state = composition.0.borrow();
+        let dirty = state.geometry_dirty.clone();
+        let surface = ManagedPlatformSurface::new(platform.clone(), &state);
         surface.set_bounds(bounds)?;
         dirty.set(false);
         for _ in 0..10 {
@@ -1928,17 +1932,10 @@ mod tests {
             bounds: Cell::new(Bounds::default()),
             parent_origin: Cell::new(Point::default()),
         });
-        let dirty = Rc::new(Cell::new(false));
-        let surface = ManagedPlatformSurface {
-            platform_surface: platform.clone(),
-            bounds: Cell::new(Bounds::default()),
-            geometry_dirty: dirty.clone(),
-            visible: Rc::new(Cell::new(true)),
-            input_forwarding: Cell::new(false),
-            prepainting: Rc::new(Cell::new(None)),
-            host: Cell::new(Host::Base),
-            restack: Cell::new(false),
-        };
+        let composition = WindowCompositionHandle::default();
+        let state = composition.0.borrow();
+        let dirty = state.geometry_dirty.clone();
+        let surface = ManagedPlatformSurface::new(platform.clone(), &state);
         assert!(surface.set_bounds(bounds).is_err());
         assert_eq!(surface.bounds(), Bounds::default());
         assert!(!dirty.get());
@@ -2194,6 +2191,14 @@ mod tests {
         })
     }
 
+    /// What [`WindowComposition::create_native_surface`] hands the element
+    /// hosting a native surface in `window`, without the platform view the
+    /// test platform cannot create.
+    pub(crate) fn native_surface(window: &Window) -> Rc<dyn PlatformSurfaceAttachment> {
+        let state = window.fast_composition.0.borrow();
+        Rc::new(ManagedPlatformSurface::new(test_platform_surface(), &state))
+    }
+
     /// Positions one native surface from the root view and another from a
     /// deferred draw, or both from the root view.
     struct Hosts {
@@ -2202,7 +2207,8 @@ mod tests {
         dialog_open: bool,
     }
 
-    fn native_host(surface: Rc<ManagedPlatformSurface>) -> impl IntoElement {
+    /// Places `surface` over itself as it is prepainted, as a web view does.
+    pub(crate) fn native_host(surface: Rc<dyn PlatformSurfaceAttachment>) -> impl IntoElement {
         canvas(
             move |bounds, window, _| {
                 surface

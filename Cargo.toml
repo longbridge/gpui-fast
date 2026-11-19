@@ -153,6 +153,7 @@ image = { version = "0.25.1", default-features = false, features = [
 indexmap = { version = "2.7.0", features = ["serde"] }
 inventory = "0.3.19"
 itertools = "0.14.0"
+jiff = "1.0"
 js-sys = "0.3"
 libc = "0.2"
 log = { version = "0.4", default-features = false, features = ["std"] }
