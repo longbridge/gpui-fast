@@ -1,5 +1,6 @@
 mod clock;
 mod executor;
+mod fast;
 mod test_scheduler;
 #[cfg(test)]
 mod tests;

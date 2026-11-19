@@ -6,6 +6,8 @@ mod wgpu_renderer;
 
 pub use cosmic_text_system::*;
 pub use fast::dynamic_textures::WgpuDynamicTexture;
+#[cfg(not(target_family = "wasm"))]
+pub use fast::wgpu_context::wgpu_context;
 pub use wgpu;
 pub use wgpu_atlas::*;
 pub use wgpu_context::*;

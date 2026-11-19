@@ -920,7 +920,7 @@ impl MacWindowState {
         }
     }
 
-    fn stop_display_link(&mut self) {
+    pub(crate) fn stop_display_link(&mut self) {
         match &mut self.frame_source {
             FrameSource::Metal(metal_frames) => {
                 if metal_frames.is_attached() {
@@ -3197,9 +3197,9 @@ extern "C" fn window_did_change_occlusion_state(this: &AnyObject, _: Sel, _: *mu
         .contains(NSWindowOcclusionState::Visible)
     {
         lock.move_traffic_light();
-        lock.start_display_link(&window_state);
+        crate::fast::display_link_lifecycle::visibility_changed(&mut lock, &window_state, true);
     } else {
-        lock.stop_display_link();
+        crate::fast::display_link_lifecycle::visibility_changed(&mut lock, &window_state, false);
     }
     drop(lock);
     // The only visibility source: AppKit posts this for covering, minimizing,
