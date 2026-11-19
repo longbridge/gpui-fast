@@ -16,6 +16,7 @@
 
 pub(crate) mod a11y;
 pub(crate) mod app_borrow;
+pub(crate) mod clock;
 pub(crate) mod composition;
 pub(crate) mod dependencies;
 pub(crate) mod dispatch;

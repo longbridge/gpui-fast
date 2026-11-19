@@ -103,6 +103,10 @@ pub(crate) struct LayerPolicy {
     /// Whether the content, as last painted into the layer, prepainted an
     /// anchored element.
     content_anchored: bool,
+    /// How many surfaces the window had placed when the container was last
+    /// looked at, before its content was prepainted. See
+    /// [`note_surfaces_placed`].
+    surfaces_placed: u64,
     /// Recent rebuilding work, relative to drawing the visible content.
     work: WorkBudget,
     /// Backoff survives dropping the record and its cached rows.
@@ -321,6 +325,7 @@ pub(crate) fn decide(
 
     let starting_cache = decision == Decision::Repaint && layer.record.is_none();
     let owner = invalidate::owner_view(window);
+    let surfaces_placed = crate::fast::composition::surfaces_placed(window);
     let layer = window.fast_layers.layers.get_mut(id).unwrap();
     layer.rows.rerendered = rerendered && decision == Decision::Composite;
     let policy = &mut layer.policy;
@@ -333,6 +338,7 @@ pub(crate) fn decide(
         policy.last_scrolled_frame = Some(frame);
     }
     policy.last_seen_frame = frame;
+    policy.surfaces_placed = surfaces_placed;
     policy.last_offset = Some(scroll_offset);
     policy.last_decision = Some(decision);
     policy.change_history = history;
@@ -429,6 +435,23 @@ pub(crate) fn note_unchanged_repaint(window: &mut Window, id: &GlobalElementId) 
     }
 }
 
+/// Notes that the content of the container `id`, prepainted into its layer
+/// since the container was looked at, placed a native or external GPU
+/// surface (a web view), if it did. A composited frame does not prepaint the
+/// content and would leave the surface where it was, so the container is
+/// kept off its layer as for an anchored element.
+pub(crate) fn note_surfaces_placed(window: &mut Window, id: &GlobalElementId) {
+    let placed = crate::fast::composition::surfaces_placed(window);
+    let layers = &mut window.fast_layers;
+    if layers
+        .layers
+        .get(id)
+        .is_some_and(|layer| layer.policy.surfaces_placed != placed)
+    {
+        layers.scrolls.anchored.push(id.clone());
+    }
+}
+
 /// Records work completed for the layer in this frame. One unit is the
 /// work of drawing its visible content directly; overscan and rows rebuilt
 /// for hover count too. The next prepaint can fall back before doing more.
@@ -461,9 +484,9 @@ fn fits(window: &Window, record: &LayerRecord) -> bool {
 
 /// Whether the content `record` holds of the scroll container `id` can be
 /// composited from a layer this frame (spec §5.6, §6.5): it deferred no
-/// draws (anchored popovers), placed no anchored element, handles no text
-/// input (a focused input is inside), and nothing in it asked for an
-/// animation frame.
+/// draws (anchored popovers), placed no anchored element or native surface,
+/// handles no text input (a focused input is inside), and nothing in it
+/// asked for an animation frame.
 fn eligible(
     window: &Window,
     id: &GlobalElementId,

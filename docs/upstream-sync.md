@@ -78,6 +78,17 @@ only hold the hooks that call into it.
    the platform.
    The addition is one accessor returning a clone of the `Rc` it already
    holds, and nothing else about the web platform becomes public.
+   A third exception is `gpui_wgpu::wgpu_context()` (in
+   `gpui_wgpu::fast::wgpu_context`): the same reach for the platforms that draw
+   their windows with wgpu (Linux: Wayland and X11), whose context lives in a
+   slot the platform keeps private. An application that renders on GPUI's
+   device, such as a map engine, draws during `paint` into a
+   `WgpuDynamicTexture`, so its content and GPUI's overlays show in one frame;
+   on a native surface (window composition) it would reach the compositor
+   apart from GPUI's frame.
+   The addition is one public function returning a clone of the context in
+   the slot, read from a thread-local the one hook in `WgpuRenderer::new`
+   (`note_gpu_context`) fills; the slot itself stays private.
 6. **New files only inside `fast/`, or in our own crates** such as
    `crates/gpui_perf` (benchmarks, examples and the frame-measuring app) and
    `compat/` (the `gpui-pre-*` stand-ins GPUI Kit applications patch in).
@@ -253,6 +264,15 @@ No application-specific timeline policy belongs here.
   well as native wgpu. The existing Metal upload backend and its installer
   are unchanged; CPU updates refuse GPU-written metadata. A native Metal
   producer interface is outside this extension.
+
+- `scheduler`'s `Clock::utc_now` and `TestClock::set_utc_now` use
+  `SystemTime` (exported next to `Instant`, both from `web_time`) instead of
+  `chrono::DateTime<Utc>`, which leaves `chrono` (RUSTSEC-2026-0543,
+  unmaintained) out of every GPUI application's dependencies. It lives in
+  `scheduler`'s `fast::clock` and `gpui`'s `fast::clock`. Upstream makes the
+  same change in [zed#67089](https://github.com/zed-industries/zed/pull/67089);
+  the sync that brings it keeps upstream's lines in `clock.rs` and
+  `platform_scheduler.rs` and deletes both `fast/clock.rs` files.
 
 When the check fails, move the change into a `fast/` module and leave a hook
 behind that names it; use `git diff <import_commit> -- <file>` to see what
