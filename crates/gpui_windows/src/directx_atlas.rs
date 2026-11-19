@@ -22,6 +22,7 @@ pub(crate) struct DirectXAtlasTextures {
     polychrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     subpixel_textures: AtlasTextureList<DirectXAtlasTexture>,
     pub(crate) fast_opaque_tiles: crate::fast::opaque_tiles::OpaqueTiles,
+    pub(crate) fast_partial_uploads: crate::fast::partial::Uploads,
 }
 
 struct DirectXAtlasTexture {
@@ -42,6 +43,7 @@ impl DirectXAtlas {
             polychrome_textures: Default::default(),
             subpixel_textures: Default::default(),
             fast_opaque_tiles: Default::default(),
+            fast_partial_uploads: Default::default(),
         })))
     }
 
@@ -77,6 +79,7 @@ impl DirectXAtlas {
             textures.polychrome_textures = AtlasTextureList::default();
             textures.subpixel_textures = AtlasTextureList::default();
             crate::fast::opaque_tiles::OpaqueTiles::clear(&mut textures.fast_opaque_tiles);
+            crate::fast::partial::Uploads::clear(&mut textures.fast_partial_uploads);
         });
     }
 }
@@ -117,6 +120,7 @@ impl AtlasBackend for DirectXAtlasTextures {
             &tile,
             bytes,
         );
+        crate::fast::partial::Uploads::record(&mut self.fast_partial_uploads, &tile);
         Ok(tile)
     }
 

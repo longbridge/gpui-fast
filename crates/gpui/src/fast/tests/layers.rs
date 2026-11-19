@@ -2698,9 +2698,9 @@ mod policies {
     use super::invalidation::{draw, with_window};
     use crate::fast::layers::policy::Decision;
     use crate::{
-        AnyElement, AnyWindowHandle, GlobalElementId, InteractiveElement as _, IntoElement,
-        ParentElement as _, Path, Styled as _, TestAppContext, WindowHandle, anchored, canvas,
-        deferred, div, point, px, size,
+        AnyElement, AnyWindowHandle, DevicePixels, GlobalElementId, InteractiveElement as _,
+        IntoElement, ParentElement as _, Path, Styled as _, TestAppContext, WindowHandle, anchored,
+        canvas, deferred, div, point, px, size,
     };
     use std::{ops::Range, rc::Rc};
 
@@ -2803,6 +2803,43 @@ mod policies {
         assert_eq!(layers_demoted(cx, window), 0);
         assert!(!has_record(cx, window));
         assert_eq!(scroll(cx, window, -20.), Some(Decision::Bypass));
+    }
+
+    #[crate::test]
+    fn a_native_surface_placed_inside_keeps_it_off_its_layer(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let handle = page(cx, false);
+        let window = handle.into();
+        // A web view: placed where its element is prepainted, which a
+        // composited frame skips, leaving it where the content was.
+        let surface = with_window(cx, window, |window, _| {
+            crate::fast::composition::tests::native_surface(window)
+        });
+        let host = surface.clone();
+        with_extra(cx, handle, move || {
+            crate::fast::composition::tests::native_host(host.clone()).into_any_element()
+        });
+        promote(cx, window);
+        for step in 0..4 {
+            let decision = scroll(cx, window, -20.);
+            let offset = handle
+                .update(cx, |page, _, _| page.handle.offset())
+                .unwrap();
+            let scale = with_window(cx, window, |window, _| window.scale_factor());
+            assert_eq!(
+                surface.bounds().origin.y,
+                DevicePixels((offset.y.0 * scale).round() as i32),
+                "step {step}: the surface moves with the content"
+            );
+            assert_eq!(decision, Some(Decision::Bypass), "step {step}");
+        }
+        // Once the web view leaves the content, the layer is painted again
+        // when the wait for it is over, and composited.
+        with_extra(cx, handle, || div().into_any_element());
+        let composited = (0..12).any(|_| scroll(cx, window, -20.) == Some(Decision::Composite));
+        assert!(composited, "the layer is composited again");
     }
 
     #[crate::test]

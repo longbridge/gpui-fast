@@ -2,12 +2,15 @@
 //! platform delivers while the app is borrowed, as the Windows window
 //! procedure does when it is re-entered during a draw.
 
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use crate::{
     Context, DisplayId, InteractiveElement as _, IntoElement, Modifiers, MouseButton,
-    MouseDownEvent, PlatformInput, Render, Styled as _, Subscription, TestAppContext, Window,
-    WindowHandle, div, point, px, size,
+    MouseDownEvent, PlatformInput, Render, RequestFrameOptions, Styled as _, Subscription,
+    TestAppContext, Window, WindowHandle, div, point, px, size,
 };
 
 struct Recorder {
@@ -128,4 +131,43 @@ fn display_change_during_a_borrow_does_not_panic(cx: &mut TestAppContext) {
         })
         .unwrap();
     assert_eq!(display, Some(DisplayId(7)));
+}
+
+struct Counter(Rc<Cell<usize>>);
+
+impl Render for Counter {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.0.set(self.0.get() + 1);
+        div()
+    }
+}
+
+#[crate::test]
+fn a_frame_request_during_a_borrow_is_skipped_and_drawn_after_it(cx: &mut TestAppContext) {
+    let renders = Rc::new(Cell::new(0));
+    let window = cx.add_window({
+        let renders = renders.clone();
+        move |_, _| Counter(renders)
+    });
+    cx.run_until_parked();
+    let platform = cx.test_window(window.into());
+    let drawn = renders.get();
+    {
+        // As `ShowWindow` called from a window update: its handler draws at
+        // once, with the app borrowed and no draw on the stack.
+        let _held = cx.app.borrow_mut();
+        platform.simulate_frame_request(RequestFrameOptions::default());
+        platform.simulate_frame_request(RequestFrameOptions::default());
+    }
+    assert_eq!(
+        renders.get(),
+        drawn,
+        "nothing runs while the app is borrowed"
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        renders.get(),
+        drawn + 1,
+        "the frame asked for is drawn once"
+    );
 }
