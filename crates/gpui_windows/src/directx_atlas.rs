@@ -13,14 +13,15 @@ use gpui::{
     AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
 };
 
-pub(crate) struct DirectXAtlas(Mutex<AtlasState<DirectXAtlasTextures>>);
+pub(crate) struct DirectXAtlas(pub(crate) Mutex<AtlasState<DirectXAtlasTextures>>);
 
-struct DirectXAtlasTextures {
+pub(crate) struct DirectXAtlasTextures {
     device: ID3D11Device,
     device_context: ID3D11DeviceContext,
     monochrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     polychrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     subpixel_textures: AtlasTextureList<DirectXAtlasTexture>,
+    pub(crate) fast_partial_uploads: crate::fast::partial::Uploads,
 }
 
 struct DirectXAtlasTexture {
@@ -40,6 +41,7 @@ impl DirectXAtlas {
             monochrome_textures: Default::default(),
             polychrome_textures: Default::default(),
             subpixel_textures: Default::default(),
+            fast_partial_uploads: Default::default(),
         })))
     }
 
@@ -74,6 +76,7 @@ impl DirectXAtlas {
             textures.monochrome_textures = AtlasTextureList::default();
             textures.polychrome_textures = AtlasTextureList::default();
             textures.subpixel_textures = AtlasTextureList::default();
+            crate::fast::partial::Uploads::clear(&mut textures.fast_partial_uploads);
         });
     }
 }
@@ -108,6 +111,7 @@ impl AtlasBackend for DirectXAtlasTextures {
             .texture(tile.texture_id)
             .ok_or_else(|| anyhow::anyhow!("allocated tile refers to a missing texture"))?;
         texture.upload(&self.device_context, tile.bounds, bytes);
+        crate::fast::partial::Uploads::record(&mut self.fast_partial_uploads, &tile);
         Ok(tile)
     }
 

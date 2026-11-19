@@ -611,14 +611,6 @@ impl crate::Element for Detached {
     }
 }
 
-impl IntoElement for Detached {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 struct DetachedView {
     layout: std::rc::Rc<std::cell::RefCell<Option<crate::TextLayout>>>,
 }
