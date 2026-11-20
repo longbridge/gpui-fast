@@ -89,6 +89,15 @@ only hold the hooks that call into it.
    The addition is one public function returning a clone of the context in
    the slot, read from a thread-local the one hook in `WgpuRenderer::new`
    (`note_gpu_context`) fills; the slot itself stays private.
+   A fourth exception is `Window::surface_clip` (in `fast::layers::paint`):
+   while a scroll layer's content is painted, the content mask also covers
+   the overscan around the viewport, which only gpui-fast paints. An element
+   placing a native or external GPU surface, such as gpui-webview's, clips it
+   to what shows instead, or the surface shows outside its scroll container
+   for that frame (longbridge/gpui-kit#4057). The addition is one method: the
+   content mask within the viewport of the layer being painted, as hitboxes
+   are clipped (`fast::layers::input::hitbox_mask`), and the content mask
+   outside one. Only elements that call it are clipped.
 6. **New files only inside `fast/`, or in our own crates** such as
    `crates/gpui_perf` (benchmarks, examples and the frame-measuring app) and
    `compat/` (the `gpui-pre-*` stand-ins GPUI Kit applications patch in).
