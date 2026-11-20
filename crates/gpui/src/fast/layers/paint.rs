@@ -89,6 +89,9 @@ pub(crate) enum Prepainted {
 pub(crate) struct Children {
     decision: Decision,
     scroll_offset: Point<Pixels>,
+    /// Whether the container has a layer entry and bypasses it this frame:
+    /// its prepaint ends noting whether its content placed a surface.
+    without_layer: bool,
 }
 
 /// Whether the content of a layer is being prepainted or painted: nested
@@ -120,6 +123,7 @@ pub(crate) fn begin_children(
         return Children {
             decision: Decision::Bypass,
             scroll_offset,
+            without_layer: false,
         };
     }
     begin_scrolling_children(
@@ -150,6 +154,7 @@ fn begin_scrolling_children(
     let bypass = Children {
         decision: Decision::Bypass,
         scroll_offset,
+        without_layer: false,
     };
     if !COMPILED {
         return bypass;
@@ -173,7 +178,12 @@ fn begin_scrolling_children(
         decision = Decision::Repaint;
     }
     match decision {
-        Decision::Bypass => return bypass,
+        Decision::Bypass => {
+            return Children {
+                without_layer: true,
+                ..bypass
+            };
+        }
         Decision::Composite => {
             layer_mut(window, id).prepainted = Some(Prepainted::Composite {
                 viewport,
@@ -217,6 +227,7 @@ fn begin_scrolling_children(
     Children {
         decision,
         scroll_offset,
+        without_layer: false,
     }
 }
 
@@ -236,7 +247,17 @@ pub(crate) fn prepaint_children(
 
 /// Ends what [`begin_children`] began, once the children are prepainted.
 #[inline(always)]
-pub(crate) fn end_children(window: &mut Window, cx: &mut App, children: Children) {
+pub(crate) fn end_children(
+    window: &mut Window,
+    cx: &mut App,
+    id: Option<&GlobalElementId>,
+    children: Children,
+) {
+    if children.without_layer
+        && let Some(id) = id
+    {
+        policy::note_surfaces_without_layer(window, id);
+    }
     if children.decision != Decision::Repaint {
         return;
     }

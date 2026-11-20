@@ -549,7 +549,7 @@ impl Element for UniformList {
                             );
                             frame_state.items.push(item);
                         }
-                        crate::fast::layers::lists::end_rows(window, cx, fast_rows);
+                        crate::fast::layers::lists::end_rows(window, cx, global_id, fast_rows);
 
                         let bounds =
                             Bounds::new(padded_bounds.origin + scroll_offset, padded_bounds.size);
