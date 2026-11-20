@@ -853,6 +853,42 @@ mod uniform {
         assert_eq!(measured(&log), 2, "a frame that changed measures again");
     }
 
+    /// A list whose content changes on every frame, as one following its tail
+    /// or moving its selection does, composites none of them, and painting
+    /// its rows afresh costs more than drawing them without the layer: it is
+    /// demoted, as a div is.
+    #[crate::test]
+    fn a_list_whose_content_changes_on_every_frame_is_demoted(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let (handle, _log) = page(cx, 1000);
+        let window: AnyWindowHandle = handle.into();
+        let demoted = |cx: &mut TestAppContext| {
+            with_window(cx, window, |window, _| window.layout_stats().layers_demoted)
+        };
+        promote(cx, window);
+        let before = demoted(cx);
+        for _ in 0..16 {
+            let frame = with_window(cx, window, |window, _| window.fast_layers.frame);
+            handle
+                .update(cx, |page, _, cx| {
+                    page.row_height = if page.row_height == ROW_HEIGHT {
+                        ROW_HEIGHT + 1.
+                    } else {
+                        ROW_HEIGHT
+                    };
+                    cx.notify();
+                })
+                .unwrap();
+            if with_window(cx, window, |window, _| window.fast_layers.frame) == frame {
+                draw(cx, window);
+            }
+        }
+        assert_eq!(decision(cx, window), Some(Decision::Bypass));
+        assert_eq!(demoted(cx), before + 1);
+    }
+
     /// The second scrolled frame, which promotes the list.
     fn promote_from_second_frame(cx: &mut TestAppContext, window: AnyWindowHandle) {
         wheel(cx, window, -ROW_HEIGHT);
