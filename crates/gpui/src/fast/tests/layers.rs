@@ -2821,9 +2821,12 @@ mod policies {
         with_extra(cx, handle, move || {
             crate::fast::composition::tests::native_host(host.clone()).into_any_element()
         });
-        promote(cx, window);
-        for step in 0..4 {
-            let decision = scroll(cx, window, -20.);
+        // The layer is never tried while the content holds the surface: the
+        // frame trying it would prepaint the content under the layer's wider
+        // mask, which a web view takes for its clip (gpui-kit#4057).
+        for step in 0..40 {
+            let delta = if step % 20 < 10 { -20. } else { 20. };
+            let decision = scroll(cx, window, delta);
             let offset = handle
                 .update(cx, |page, _, _| page.handle.offset())
                 .unwrap();
@@ -2834,6 +2837,7 @@ mod policies {
                 "step {step}: the surface moves with the content"
             );
             assert_eq!(decision, Some(Decision::Bypass), "step {step}");
+            assert!(!has_record(cx, window), "step {step}");
         }
         // Once the web view leaves the content, the layer is painted again
         // when the wait for it is over, and composited.

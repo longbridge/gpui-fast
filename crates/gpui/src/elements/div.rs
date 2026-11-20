@@ -2158,7 +2158,7 @@ impl Element for Div {
                             }
                         }
                     });
-                    crate::fast::layers::paint::end_children(window, cx, fast_layer);
+                    crate::fast::layers::paint::end_children(window, cx, global_id, fast_layer);
 
                     if let Some(listener) = self.prepaint_listener.as_ref() {
                         crate::fast::layers::invalidate::note_uncarried(window);

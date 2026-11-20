@@ -319,6 +319,66 @@ mod uniform {
         assert_eq!(decision(cx, window), Some(Decision::Repaint));
     }
 
+    /// A uniform list whose row 1 hosts a native surface, as a web view in a
+    /// row does.
+    struct SurfacePage {
+        surface: Rc<dyn crate::PlatformSurfaceAttachment>,
+    }
+
+    impl Render for SurfacePage {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let surface = self.surface.clone();
+            div().size_full().bg(rgb(0xffffff)).child(
+                crate::uniform_list("list", 1000, move |range: Range<usize>, _, _| {
+                    range
+                        .map(|row| {
+                            let cell = div()
+                                .w(px(VIEWPORT_WIDTH))
+                                .h(px(ROW_HEIGHT))
+                                .bg(row_color(row));
+                            if row == 1 {
+                                cell.child(crate::fast::composition::tests::native_host(
+                                    surface.clone(),
+                                ))
+                            } else {
+                                cell
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .w(px(VIEWPORT_WIDTH))
+                .h(px(VIEWPORT_HEIGHT)),
+            )
+        }
+    }
+
+    /// A shown row holding a web view keeps the list from trying its layer,
+    /// retries included: the frame trying it would prepaint the row under the
+    /// layer's wider mask, the web view's clip (gpui-kit#4057). Once the row
+    /// scrolls out of view the layer is tried and composited.
+    #[crate::test]
+    fn a_native_surface_in_a_shown_row_keeps_the_list_from_trying_its_layer(
+        cx: &mut TestAppContext,
+    ) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let window = cx.add_window(|window, _| SurfacePage {
+            surface: crate::fast::composition::tests::native_surface(window),
+        });
+        let window: AnyWindowHandle = window.into();
+        open_at(cx, window, 1.);
+        for step in 0..40 {
+            wheel(cx, window, if step % 2 == 0 { -1. } else { 1. });
+            assert_eq!(decision(cx, window), Some(Decision::Bypass), "step {step}");
+        }
+        let composited = (0..40).any(|_| {
+            wheel(cx, window, -ROW_HEIGHT);
+            decision(cx, window) == Some(Decision::Composite)
+        });
+        assert!(composited, "the layer is composited once the row is gone");
+    }
+
     /// A list whose rows are coloured by state outside entities, which only
     /// `window.refresh()` tells the framework changed.
     struct UntrackedPage {
@@ -2112,8 +2172,10 @@ mod list {
             cx.notify();
         });
         let page = window.downcast::<TickerListPage>().unwrap();
-        for step in 0..4 {
-            wheel(cx, window, -2.);
+        // Nor is the layer tried again while the row holds it, its retries
+        // included (gpui-kit#4057).
+        for step in 0..40 {
+            wheel(cx, window, if step % 2 == 0 { -2. } else { 2. });
             assert_eq!(decision(cx, window), Some(Decision::Bypass), "step {step}");
             let top = page
                 .update(cx, |page, _, _| page.state.logical_scroll_top())
