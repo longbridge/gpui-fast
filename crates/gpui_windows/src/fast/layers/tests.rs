@@ -1058,7 +1058,7 @@ fn composition_whole_scene_matches_replayed_surface_pixels(cx: &mut gpui::TestAp
             };
             let empty = gpui::ComposedSceneLayer {
                 ranges: vec![],
-                ..full.clone()
+                ..full
             };
             for (layers, expected_target) in [
                 (vec![full.clone(), empty.clone()], 0),
@@ -1089,6 +1089,296 @@ fn composition_whole_scene_matches_replayed_surface_pixels(cx: &mut gpui::TestAp
             }
         })
         .unwrap();
+}
+
+// --- Overdraw culling (`fast::occlusion`) --- //
+
+/// Draws `scene` with culling off and on and checks that culling changed no
+/// byte; returns whether culling hid or cut anything.
+fn culling_keeps_pixels(harness: &mut Harness, scene: &Scene) -> bool {
+    let size = device_size(1024, 1024);
+    harness.frame.skip_occlusion = true;
+    let everything = harness.render(scene, size, rgba(0xffffffff));
+    harness.frame.skip_occlusion = false;
+    let culled = harness.render(scene, size, rgba(0xffffffff));
+    assert_same_pixels(&culled, &everything, 1024);
+    let occlusion = crate::fast::occlusion::Occlusion::of(scene, |sprite| {
+        harness.atlas.is_opaque(&sprite.tile)
+    });
+    scene
+        .quads
+        .iter()
+        .any(|q| occlusion.hides_quad(q) || occlusion.pieces(q).is_some())
+        || scene.shadows.iter().any(|s| occlusion.hides_shadow(s))
+        || scene
+            .polychrome_sprites
+            .iter()
+            .any(|s| occlusion.hides_sprite(s))
+}
+
+/// Every kind of primitive (`add_content`) over nested plain backgrounds
+/// (a window, a content area under a top bar, a translucent page), then
+/// `cover` over them.
+fn covered_scene(harness: &Harness, cover: Option<Quad>) -> Scene {
+    let mut scene = Scene::default();
+    scene.insert_primitive(quad(sp(0., 0., 1024., 1024.), Hsla::from(rgba(0x101010ff))));
+    scene.insert_primitive(quad(
+        sp(0., 40.5, 1024., 983.5),
+        Hsla::from(rgba(0x202830ff)),
+    ));
+    scene.insert_primitive(quad(
+        sp(176., 40.5, 848., 983.5),
+        Hsla::from(rgba(0x30405080)),
+    ));
+    add_content(&mut scene, harness, (0., 0.), sp(0., 0., 1024., 1024.));
+    if let Some(cover) = cover {
+        scene.insert_primitive(cover);
+    }
+    scene.finish();
+    scene
+}
+
+#[test]
+fn culling_nested_backgrounds_changes_no_pixel() {
+    let Some(mut harness) = Harness::new() else {
+        eprintln!("skipped: no Direct3D 11 device");
+        return;
+    };
+    let scene = covered_scene(&harness, None);
+    // The window's background is cut around the content area.
+    assert!(culling_keeps_pixels(&mut harness, &scene));
+}
+
+#[test]
+fn culling_under_covers_changes_no_pixel() {
+    let Some(mut harness) = Harness::new() else {
+        eprintln!("skipped: no Direct3D 11 device");
+        return;
+    };
+    let opaque = Hsla::from(rgba(0x445566ff));
+    let cover = |bounds| quad(bounds, opaque);
+    let cases: Vec<(&str, Quad)> = vec![
+        ("opaque", cover(sp(80., 80., 560., 480.))),
+        ("fractional", cover(sp(80.5, 79.25, 560.25, 480.75))),
+        (
+            "translucent",
+            quad(sp(80., 80., 560., 480.), Hsla::from(rgba(0x44556680))),
+        ),
+        (
+            "rounded",
+            Quad {
+                corner_radii: Corners::all(ScaledPixels(16.)),
+                ..cover(sp(80., 80., 560., 480.))
+            },
+        ),
+        (
+            "masked",
+            Quad {
+                content_mask: ContentMask {
+                    bounds: sp(80., 80., 300., 200.),
+                },
+                ..cover(sp(0., 0., 1024., 1024.))
+            },
+        ),
+        (
+            "translucent border",
+            Quad {
+                border_widths: Edges::all(ScaledPixels(4.)),
+                border_color: Hsla::from(rgba(0xffffff80)),
+                ..cover(sp(80., 80., 560., 480.))
+            },
+        ),
+        (
+            "opaque border",
+            Quad {
+                border_widths: Edges::all(ScaledPixels(4.)),
+                border_color: Hsla::from(rgba(0xffffffff)),
+                ..cover(sp(80., 80., 560., 480.))
+            },
+        ),
+        // The shadow at (380, 420) 120x70 blurs 8 px: its tail reaches 24 px out.
+        (
+            "opaque border, fractional",
+            Quad {
+                border_widths: Edges::all(ScaledPixels(4.)),
+                border_color: Hsla::from(rgba(0xffffffff)),
+                ..cover(sp(80.5, 79.25, 560.25, 480.75))
+            },
+        ),
+        ("shadow body only", cover(sp(380., 420., 120., 70.))),
+        ("shadow and tail", cover(sp(350., 390., 180., 130.))),
+        ("everything", cover(sp(0., 0., 1024., 1024.))),
+    ];
+    for (name, cover) in cases {
+        let scene = covered_scene(&harness, Some(cover));
+        eprintln!("cover: {name}");
+        culling_keeps_pixels(&mut harness, &scene);
+    }
+    // A full cover hides everything under it.
+    let scene = covered_scene(&harness, Some(cover(sp(0., 0., 1024., 1024.))));
+    let occlusion = crate::fast::occlusion::Occlusion::of(&scene, |sprite| {
+        harness.atlas.is_opaque(&sprite.tile)
+    });
+    let last = scene.quads.iter().map(|q| q.order).max().unwrap();
+    assert!(
+        scene
+            .quads
+            .iter()
+            .filter(|q| q.order < last)
+            .all(|q| occlusion.hides_quad(q))
+    );
+    assert!(scene.shadows.iter().all(|s| occlusion.hides_shadow(s)));
+    assert!(!scene.monochrome_sprites.is_empty() && !scene.subpixel_sprites.is_empty());
+    assert!(
+        scene
+            .monochrome_sprites
+            .iter()
+            .all(|s| occlusion.hides_glyph(s.order, &s.bounds, &s.content_mask, &s.transformation))
+    );
+    assert!(scene.subpixel_sprites.iter().all(|s| occlusion.hides_glyph(
+        s.order,
+        &s.bounds,
+        &s.content_mask,
+        &s.transformation
+    )));
+}
+
+/// A 20x20 image, opaque or with one translucent pixel.
+fn image_cover_tile(harness: &Harness, id: usize, opaque: bool) -> AtlasTile {
+    let key = AtlasKey::Image(RenderImageParams {
+        image_id: ImageId(id),
+        frame_index: 0,
+    });
+    let bytes: Vec<u8> = (0..20 * 20)
+        .flat_map(|i: u32| {
+            let alpha = if !opaque && i == 210 { 254 } else { 255 };
+            [
+                (i * 5 % 256) as u8,
+                (i * 11 % 256) as u8,
+                (i * 17 % 256) as u8,
+                alpha,
+            ]
+        })
+        .collect();
+    harness
+        .atlas
+        .get_or_insert_with(key, &mut || {
+            Ok(Some((device_size(20, 20), Cow::Owned(bytes.clone()))))
+        })
+        .expect("image uploaded")
+        .expect("image tile")
+}
+
+fn image_cover(tile: AtlasTile, bounds: Bounds<ScaledPixels>, opacity: f32) -> PolychromeSprite {
+    PolychromeSprite {
+        order: 0,
+        pad: 0,
+        grayscale: false.into(),
+        opacity,
+        bounds,
+        content_mask: no_mask(),
+        corner_radii: Corners::default(),
+        tile,
+    }
+}
+
+#[test]
+fn culling_under_images_changes_no_pixel() {
+    let Some(mut harness) = Harness::new() else {
+        eprintln!("skipped: no Direct3D 11 device");
+        return;
+    };
+    assert!(
+        harness
+            .atlas
+            .is_opaque(&image_cover_tile(&harness, 9_001, true))
+    );
+    assert!(
+        !harness
+            .atlas
+            .is_opaque(&image_cover_tile(&harness, 9_002, false))
+    );
+    // A video frame over the player's background: magnified, at fractional
+    // bounds, so that bilinear sampling reaches the image's edges.
+    let bounds = sp(60.5, 70.25, 700.75, 520.5);
+    for (name, id, opaque, opacity, hides) in [
+        ("opaque image", 9_001, true, 1.0, true),
+        ("translucent pixel", 9_002, false, 1.0, false),
+        ("drawn translucent", 9_001, true, 0.99, false),
+    ] {
+        eprintln!("image cover: {name}");
+        let tile = image_cover_tile(&harness, id, opaque);
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad(sp(0., 0., 1024., 1024.), Hsla::from(rgba(0x000000ff))));
+        add_content(&mut scene, &harness, (0., 0.), sp(0., 0., 1024., 1024.));
+        scene.insert_primitive(image_cover(tile, bounds, opacity));
+        scene.finish();
+        culling_keeps_pixels(&mut harness, &scene);
+        let occlusion = crate::fast::occlusion::Occlusion::of(&scene, |sprite| {
+            harness.atlas.is_opaque(&sprite.tile)
+        });
+        // What is under the image's middle, away from the content's own
+        // covers, is hidden only when the image hides.
+        let mut under = quad(sp(400., 300., 20., 20.), Hsla::from(rgba(0x000000ff)));
+        under.order = scene.quads[0].order;
+        assert_eq!(occlusion.hides_quad(&under), hides, "{name}");
+    }
+}
+
+/// A primitive whose mask's right (bottom) edge falls on a pixel centre
+/// exactly where a cover's right (bottom) edge does: the clip keeps that
+/// column (a centre on the clip plane is kept), the cover does not (the
+/// rasterizer's top-left rule drops a centre on its right edge). The hidden
+/// quad is plain (drawn through `Occlusion::pieces`) or bordered (tested by
+/// `Occlusion::hides_quad`); neither may be culled at that column.
+#[test]
+fn culling_at_a_shared_edge_on_a_pixel_centre_changes_no_pixel() {
+    let Some(mut harness) = Harness::new() else {
+        eprintln!("skipped: no Direct3D 11 device");
+        return;
+    };
+    // The hidden quad's bounds reach past the cover only where its mask
+    // cuts them, at the cover's edge.
+    for (name, hidden_bounds, hidden_mask, cover_bounds) in [
+        (
+            "right",
+            sp(100., 100., 600., 400.),
+            sp(0., 0., 640.5, 1024.),
+            sp(80., 80., 560.5, 480.),
+        ),
+        (
+            "bottom",
+            sp(100., 100., 400., 600.),
+            sp(0., 0., 1024., 560.5),
+            sp(80., 80., 560., 480.5),
+        ),
+    ] {
+        for bordered in [false, true] {
+            eprintln!("shared edge: {name}, bordered {bordered}");
+            let mut hidden = Quad {
+                content_mask: ContentMask {
+                    bounds: hidden_mask,
+                },
+                ..quad(hidden_bounds, Hsla::from(rgba(0xcc3322ff)))
+            };
+            if bordered {
+                hidden.border_widths = Edges::all(ScaledPixels(2.));
+                hidden.border_color = Hsla::from(rgba(0x22cc33ff));
+            }
+            let mut scene = Scene::default();
+            scene.insert_primitive(quad(sp(0., 0., 1024., 1024.), Hsla::from(rgba(0x101010ff))));
+            scene.insert_primitive(hidden);
+            scene.insert_primitive(quad(cover_bounds, Hsla::from(rgba(0x445566ff))));
+            scene.finish();
+            culling_keeps_pixels(&mut harness, &scene);
+            let occlusion = crate::fast::occlusion::Occlusion::of(&scene, |_| false);
+            assert!(!occlusion.hides_quad(&scene.quads[1]), "{name} {bordered}");
+            assert!(
+                occlusion.pieces(&scene.quads[1]).is_none(),
+                "{name} {bordered}"
+            );
+        }
+    }
 }
 
 // --- Partial redraw (`fast::partial`) --- //
