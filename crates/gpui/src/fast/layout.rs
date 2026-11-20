@@ -97,6 +97,40 @@ pub(crate) struct LayoutRetention {
 /// released. See [`RetainedNode::lingers`].
 const LIST_ROW_NODE_LINGER_FRAMES: u64 = 240;
 
+/// How many nodes of unclaimed list rows are kept at most, the youngest
+/// first. The age limit alone lets a list that shows new rows on every frame,
+/// as one following its tail or flung by a wheel does, keep the nodes of 240
+/// frames of rows: tens of thousands, a hundred megabytes or more, which the
+/// tree's storage grows to hold, each doubling a reallocation inside one
+/// frame's layout. The rows last laid out, those a layer shows and those
+/// around them, are the ones a repaint or a scroll back asks for again.
+pub(crate) const LIST_ROW_NODE_LINGER_MAX: usize = 8192;
+
+/// The age below which unclaimed row nodes are kept in `frame`: at most
+/// [`LIST_ROW_NODE_LINGER_FRAMES`], and less while keeping every node that
+/// young would keep more than [`LIST_ROW_NODE_LINGER_MAX`] of them.
+fn row_node_linger_frames(retained: &FxHashMap<u64, RetainedNode>, frame: u64) -> u64 {
+    let mut by_age = [0_usize; LIST_ROW_NODE_LINGER_FRAMES as usize];
+    for node in retained.values().filter(|node| node.lingers) {
+        let age = frame - node.claimed_in_frame;
+        if age > 0
+            && let Some(count) = by_age.get_mut(age as usize)
+        {
+            *count += 1;
+        }
+    }
+    let mut kept = 0_usize;
+    let mut limit = 1;
+    for (age, count) in by_age.iter().enumerate().skip(1) {
+        kept += count;
+        if kept > LIST_ROW_NODE_LINGER_MAX {
+            return limit;
+        }
+        limit = age as u64 + 1;
+    }
+    LIST_ROW_NODE_LINGER_FRAMES
+}
+
 /// The leaves a layout computation measured, each with the width it was last
 /// measured at: the width it was given, or the definite width it was offered,
 /// or none when it was asked for its content size.
@@ -942,13 +976,14 @@ pub(crate) fn release_unclaimed_nodes(engine: &mut TaffyLayoutEngine) {
     // nothing to sweep.
     if retention.retained.len() != retention.claimed_this_frame {
         let frame = retention.frame;
+        let linger_frames = row_node_linger_frames(&retention.retained, frame);
         let taffy = &mut engine.taffy;
         let unstretched_styles = &mut retention.unstretched_styles;
         let robbed_parents = &mut retention.robbed_parents;
         let freed = &mut retention.stats.nodes_freed;
         retention.retained.retain(|_, node| {
             if node.claimed_in_frame == frame
-                || node.lingers && frame - node.claimed_in_frame < LIST_ROW_NODE_LINGER_FRAMES
+                || node.lingers && frame - node.claimed_in_frame < linger_frames
             {
                 return true;
             }

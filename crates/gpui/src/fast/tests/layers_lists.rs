@@ -853,6 +853,26 @@ mod uniform {
         assert_eq!(measured(&log), 2, "a frame that changed measures again");
     }
 
+    /// A list flung a viewport a frame shows new rows on every frame. The
+    /// layout nodes of the rows it passed are kept, to be found again if it
+    /// scrolls back, but not those of all 240 frames.
+    #[crate::test]
+    fn a_flung_list_keeps_a_bounded_number_of_row_nodes(cx: &mut TestAppContext) {
+        // Rows one pixel tall: a hundred to the viewport.
+        let (handle, _log) = page_with_rows_of(cx, 100_000, 1., 1.);
+        let window: AnyWindowHandle = handle.into();
+        for _ in 0..240 {
+            wheel(cx, window, -VIEWPORT_HEIGHT);
+        }
+        let held = with_window(cx, window, |window, _| window.layout_node_count());
+        let most = crate::fast::layout::LIST_ROW_NODE_LINGER_MAX;
+        assert!(held <= most + 500, "{held} nodes held");
+        assert!(
+            held > most / 2,
+            "{held} nodes held: the rows last passed are kept"
+        );
+    }
+
     /// The second scrolled frame, which promotes the list.
     fn promote_from_second_frame(cx: &mut TestAppContext, window: AnyWindowHandle) {
         wheel(cx, window, -ROW_HEIGHT);
