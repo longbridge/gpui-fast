@@ -43,9 +43,10 @@ mod capture;
 use capture::{PointerCapture, PointerOwner, PointerPhase, PointerRoute, route_pointer_event};
 
 use crate::{
-    renderer,
+    MetalFrames, renderer,
     window::{
-        MacWindowState, WINDOW_STATE_IVAR, drop_window_state, get_window_state, handle_view_event,
+        FrameSource, MacWindowState, WINDOW_STATE_IVAR, drop_window_state, get_window_state,
+        handle_view_event,
     },
 };
 
@@ -81,6 +82,12 @@ pub(crate) struct MacComposition {
     input_forwarders: FxHashSet<usize>,
     event_result: gpui::DispatchEventResult,
     forwarding_scroll: bool,
+    /// The window's Metal display link, set aside while it holds native
+    /// views (see [`follow_native_views`]).
+    metal_frames: Option<Rc<MetalFrames>>,
+    /// Whether the window's renderers present in the Core Animation
+    /// transaction (see [`set_presents_with_transaction`]).
+    presents_with_transaction: bool,
 }
 
 impl MacComposition {
@@ -91,6 +98,8 @@ impl MacComposition {
             renderer_context,
             view_order: Vec::new(),
             native_views: Rc::new(Vec::new()),
+            metal_frames: None,
+            presents_with_transaction: false,
             input_order: Rc::new(Vec::new()),
             native_event: 0,
             pointer_capture: PointerCapture::default(),
@@ -833,6 +842,7 @@ pub(crate) fn set_composition_order(
             if lock.fast_composition.native_views.is_empty() {
                 lock.fast_composition.pointer_capture.clear();
             }
+            follow_native_views(&mut lock, window_state);
             lock.fast_composition.view_order = view_order;
         }
         lock.fast_composition.input_forwarders.clear();
@@ -886,6 +896,7 @@ unsafe fn create_gpui_surface(
         state.fast_composition.renderer_context.clone(),
         &state.renderer,
     )?;
+    renderer.set_presents_with_transaction(state.fast_composition.presents_with_transaction);
     let input_regions = Rc::new(RefCell::new(Vec::<gpui::Hitbox>::new()));
     let native_view = state.native_view.as_ptr();
     let class = OVERLAY_VIEW_CLASS.load(Ordering::Acquire).cast_const();
@@ -929,10 +940,78 @@ unsafe fn create_gpui_surface(
     })
 }
 
+/// Paces the window's frames to fit its native views. A `CAMetalDisplayLink`
+/// presents each drawable a refresh after the Core Animation transaction
+/// that moves the window's native views, so they would lead the GPUI content
+/// around them by a frame while it scrolls. While the window holds native
+/// views it draws from the `CVDisplayLink` instead, presenting in that
+/// transaction (see [`present_for_native_views`]), and gets its Metal link
+/// back once they are gone. The switch waits for the frame being drawn to
+/// end: a Metal link attached during a frame would skip that frame.
+fn follow_native_views(state: &MacWindowState, window_state: &Rc<Mutex<MacWindowState>>) {
+    if !needs_other_frame_source(state) {
+        return;
+    }
+    let window_state = Rc::downgrade(window_state);
+    state
+        .foreground_executor
+        .spawn(async move {
+            if let Some(window_state) = window_state.upgrade() {
+                switch_frame_source(&mut window_state.lock(), &window_state);
+            }
+        })
+        .detach();
+}
+
+fn needs_other_frame_source(state: &MacWindowState) -> bool {
+    let native = !state.fast_composition.native_views.is_empty();
+    match &state.frame_source {
+        FrameSource::Metal(_) => native,
+        FrameSource::DisplayLink(_) => !native && state.fast_composition.metal_frames.is_some(),
+    }
+}
+
+fn switch_frame_source(state: &mut MacWindowState, window_state: &Rc<Mutex<MacWindowState>>) {
+    if !needs_other_frame_source(state) {
+        return;
+    }
+    let frame_source = match &state.frame_source {
+        FrameSource::Metal(metal_frames) => {
+            // Detached rather than paused, as `stop_display_link` does, so
+            // that the renderer takes the layer's own drawables again.
+            metal_frames.replace(None);
+            state.renderer.set_display_link_attached(false);
+            state.fast_composition.metal_frames = Some(metal_frames.clone());
+            FrameSource::DisplayLink(None)
+        }
+        FrameSource::DisplayLink(_) => {
+            let Some(metal_frames) = state.fast_composition.metal_frames.take() else {
+                return;
+            };
+            set_presents_with_transaction(state, false);
+            FrameSource::Metal(metal_frames)
+        }
+    };
+    // Replacing a `CVDisplayLink` source drops it, which leaves the registry.
+    state.frame_source = frame_source;
+    state.start_display_link(window_state);
+}
+
+/// Before a frame drawn from the `CVDisplayLink`: while the window holds
+/// native views, its drawables reach the screen in the Core Animation
+/// transaction that moves them.
+pub(crate) fn present_for_native_views(state: &mut MacWindowState) {
+    let native = !state.fast_composition.native_views.is_empty();
+    if state.fast_composition.presents_with_transaction != native {
+        set_presents_with_transaction(state, native);
+    }
+}
+
 /// Sets whether the window's renderer and every surface's present their
 /// drawables in a Core Animation transaction, as they do while AppKit waits
 /// for the window to draw.
 pub(crate) fn set_presents_with_transaction(state: &mut MacWindowState, enabled: bool) {
+    state.fast_composition.presents_with_transaction = enabled;
     state.renderer.set_presents_with_transaction(enabled);
     for surface in state.fast_composition.gpui_surfaces.values_mut() {
         surface.renderer.set_presents_with_transaction(enabled);
