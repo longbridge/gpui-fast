@@ -124,6 +124,8 @@ pub use color::*;
 pub use element::*;
 pub use elements::*;
 pub use executor::*;
+#[doc(hidden)]
+pub use fast::app_borrow::app_is_borrowed;
 pub use fast::composition::{
     ComposedScene, ComposedSceneLayer, CompositionSurfaceId, CompositionSurfaceKind,
     PlatformCompositionSurface, PlatformCompositionSurfaceContent, PlatformSurfaceAttachment,

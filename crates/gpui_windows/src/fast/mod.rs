@@ -7,6 +7,7 @@
 //! forwarding a call to it. The logic itself is written here, one file per
 //! topic.
 
+pub(crate) mod app_borrow;
 pub(crate) mod backdrop;
 pub(crate) mod class_names;
 pub(crate) mod composition;

@@ -159,6 +159,17 @@ few places where gpui-fast's differs from upstream's are listed here. Each is
 forced by what `fast/` keeps; anything not listed here is upstream's API
 unchanged, and a new entry needs as good a reason.
 
+- `gpui` exports `app_is_borrowed` (`#[doc(hidden)]`), for `gpui_windows`:
+  synchronous OS calls that pump the message queue while the app is
+  borrowed (WebView2 creation, `Command::spawn`) can dispatch `WM_GPUI_*`
+  messages re-entrantly, and handling them panics on a second
+  `AppCell::borrow_mut`. `gpui_windows` instead queues the ones whose
+  handlers call into the app and handles them, oldest first, once the
+  borrow is released: from its own message loop, before the next
+  `WM_GPUI_*` message, and from a timer on the platform window, which
+  also fires inside OS modal loops. `app_is_borrowed` lives in `fast::app_borrow`, which also records the running app's
+  `AppCell` per thread from `Application::run`/`run_embedded`.
+
 - `ViewElement`'s `Element::RequestLayoutState` and `PrepaintState` are
   `fast::retained::ViewLayoutState` and `ViewPrepaintState`, opaque types, in
   place of `Option<AnyElement>`. `ViewElement` is `#[doc(hidden)]`, and the
