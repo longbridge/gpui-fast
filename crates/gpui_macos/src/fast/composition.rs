@@ -88,9 +88,26 @@ pub(crate) struct MacComposition {
     /// Whether the window's renderers present in the Core Animation
     /// transaction (see [`set_presents_with_transaction`]).
     presents_with_transaction: bool,
+    /// The native views that set their own cursor: those of `Native`
+    /// surfaces that do not forward their input to GPUI.
+    cursor_views: FxHashSet<usize>,
+    /// Whether the pointer was last over one of `cursor_views`, which then
+    /// sets the cursor (see [`follow_native_cursor`]).
+    native_cursor: bool,
+    /// Whether a native view or an overlay's input regions moved since the
+    /// last frame drawn, which may change what lies under a still pointer.
+    cursor_views_moved: bool,
 }
 
 impl MacComposition {
+    /// The native views to look for under the pointer after a frame, if it
+    /// moved a native view or an overlay's input regions and no press keeps
+    /// the cursor until its release.
+    fn take_cursor_check(&mut self) -> Option<Rc<Vec<usize>>> {
+        let moved = std::mem::take(&mut self.cursor_views_moved);
+        (moved && self.pointer_capture.owner().is_none()).then(|| self.native_views.clone())
+    }
+
     pub(crate) fn new(renderer_context: renderer::Context) -> Self {
         Self {
             base_surface: None,
@@ -100,6 +117,9 @@ impl MacComposition {
             native_views: Rc::new(Vec::new()),
             metal_frames: None,
             presents_with_transaction: false,
+            cursor_views: FxHashSet::default(),
+            native_cursor: false,
+            cursor_views_moved: false,
             input_order: Rc::new(Vec::new()),
             native_event: 0,
             pointer_capture: PointerCapture::default(),
@@ -265,7 +285,7 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
         NSEventType::LeftMouseUp | NSEventType::RightMouseUp | NSEventType::OtherMouseUp
     );
     let state = unsafe { get_window_state(this) };
-    let (root, native_views, captured, has_forwarders) = {
+    let (root, native_views, captured, has_forwarders, follows_cursor) = {
         let mut state = state.lock();
         if observe && !up {
             state
@@ -273,13 +293,22 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
                 .pointer_capture
                 .reconcile_down(button);
         }
+        let composition = &state.fast_composition;
         (
             state.native_view,
-            state.fast_composition.native_views.clone(),
-            state.fast_composition.pointer_capture.owner(),
-            !state.fast_composition.input_forwarders.is_empty(),
+            composition.native_views.clone(),
+            composition.pointer_capture.owner(),
+            !composition.input_forwarders.is_empty(),
+            !composition.cursor_views.is_empty() || composition.native_cursor,
         )
     };
+    // A release ends a drag that may have crossed into or out of a native
+    // view without a mouse move.
+    let under = (follows_cursor && (kind == NSEventType::MouseMoved || up))
+        .then(|| unsafe { native_under(root.as_ptr(), event, &native_views) });
+    if let Some(native) = under {
+        follow_native_cursor(&state, native);
+    }
     if kind == NSEventType::MouseMoved && !has_forwarders {
         unsafe {
             let _: () = msg_send![super(this, superclass), sendEvent: event];
@@ -328,13 +357,7 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
         captured,
         phase,
         || handle_view_event(unsafe { root.as_ref() }, sel!(sendEvent:), event),
-        || unsafe {
-            let parent: Id = msg_send![root.as_ptr(), superview];
-            let location: NSPoint = msg_send![event, locationInWindow];
-            let point: NSPoint = msg_send![parent, convertPoint: location, fromView: NIL];
-            let target: Id = msg_send![root.as_ptr(), hitTest: point];
-            native_for_target(target, &native_views)
-        },
+        || under.unwrap_or_else(|| unsafe { native_under(root.as_ptr(), event, &native_views) }),
     ) {
         PointerRoute::Delivered => return,
         PointerRoute::AppKit(native) => native,
@@ -453,6 +476,102 @@ unsafe fn native_for_target(mut view: Id, native: &[usize]) -> Option<usize> {
         view = unsafe { msg_send![view, superview] };
     }
     None
+}
+
+/// The native view at `location`, in window coordinates, unless GPUI content
+/// of an overlay covers it there.
+unsafe fn native_at(root: Id, location: NSPoint, native: &[usize]) -> Option<usize> {
+    if native.is_empty() {
+        return None;
+    }
+    unsafe {
+        let parent: Id = msg_send![root, superview];
+        let point: NSPoint = msg_send![parent, convertPoint: location, fromView: NIL];
+        let target: Id = msg_send![root, hitTest: point];
+        native_for_target(target, native)
+    }
+}
+
+/// The native view under `event`'s pointer, as [`native_at`].
+unsafe fn native_under(root: Id, event: Id, native: &[usize]) -> Option<usize> {
+    unsafe { native_at(root, msg_send![event, locationInWindow], native) }
+}
+
+/// Leaves the cursor to `native`, the native view under the pointer, if it
+/// sets its own cursor, as a web view does: a pointing hand over a link, an
+/// I-beam over text. GPUIView covers the window with one cursor rect, which
+/// AppKit applies again as the pointer moves, so the view drops it while the
+/// pointer is over such a view ([`cursor_rect`]). The window's cursor rects
+/// stay enabled: WebKit sets no cursor in a window whose cursor rects are
+/// disabled. This runs on mouse moves and releases, and on the frames that
+/// move a native view or an overlay's input regions under a still pointer.
+fn follow_native_cursor(window_state: &Mutex<MacWindowState>, native: Option<usize>) {
+    let (window, root) = {
+        let mut state = window_state.lock();
+        let composition = &mut state.fast_composition;
+        let over = native.is_some_and(|view| composition.cursor_views.contains(&view));
+        if composition.native_cursor == over {
+            return;
+        }
+        composition.native_cursor = over;
+        (state.native_window, state.native_view)
+    };
+    unsafe {
+        let _: () = msg_send![window, invalidateCursorRectsForView: root.as_ptr()];
+    }
+}
+
+/// [`follow_native_cursor`] for where the pointer is now, once a frame moved
+/// a native view or an overlay's input regions.
+unsafe fn follow_native_cursor_now(window_state: &Mutex<MacWindowState>) {
+    if let Some(native) = unsafe { native_under_still_pointer(window_state) } {
+        follow_native_cursor(window_state, native);
+    }
+}
+
+/// The native view under the pointer, or `None` when there is nothing to
+/// follow (see [`MacComposition::take_cursor_check`]) or another window under
+/// the pointer sets its own cursor.
+unsafe fn native_under_still_pointer(
+    window_state: &Mutex<MacWindowState>,
+) -> Option<Option<usize>> {
+    let checked = {
+        let mut state = window_state.lock();
+        let (window, root) = (state.native_window, state.native_view);
+        state
+            .fast_composition
+            .take_cursor_check()
+            .map(|native_views| (window, root, native_views))
+    };
+    checked.and_then(|(window, root, native_views)| {
+        unsafe { pointer_location(window) }
+            .map(|location| unsafe { native_at(root.as_ptr(), location, &native_views) })
+    })
+}
+
+/// Where the pointer is in `window`, if no other window is above it there.
+unsafe fn pointer_location(window: *mut AnyObject) -> Option<NSPoint> {
+    unsafe {
+        let screen: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+        let under: NSInteger = msg_send![
+            class!(NSWindow),
+            windowNumberAtPoint: screen,
+            belowWindowWithWindowNumber: 0 as NSInteger
+        ];
+        let own: NSInteger = msg_send![window, windowNumber];
+        (under == own).then(|| msg_send![window, mouseLocationOutsideOfEventStream])
+    }
+}
+
+/// The rect the window's view adds its cursor rect over: its `bounds`, or none
+/// while it leaves the cursor to the native view under the pointer (see
+/// [`follow_native_cursor`]).
+pub(crate) fn cursor_rect(state: &Mutex<MacWindowState>, bounds: NSRect) -> NSRect {
+    if state.lock().fast_composition.native_cursor {
+        NSRect::new(NSPoint::new(0., 0.), NSSize::new(0., 0.))
+    } else {
+        bounds
+    }
 }
 
 /// AppKit may consume releases during deactivation or a native tracking loop.
@@ -608,6 +727,13 @@ extern "C" fn dealloc_overlay_view(this: &AnyObject, _: Sel) {
 /// scene with that surface's renderer, or the whole scene on the window's
 /// view until the window composes.
 pub(crate) fn draw_composed(window_state: &Rc<Mutex<MacWindowState>>, scene: ComposedScene<'_>) {
+    draw_surfaces(window_state, scene);
+    // After the overlays' input regions are written: a GPUI overlay opened
+    // under a still pointer takes the cursor back from the view below.
+    unsafe { follow_native_cursor_now(window_state) };
+}
+
+fn draw_surfaces(window_state: &Rc<Mutex<MacWindowState>>, scene: ComposedScene<'_>) {
     let mut lock = window_state.lock();
     let state = &mut *lock;
     let Some(base_surface) = state.fast_composition.base_surface else {
@@ -633,12 +759,21 @@ pub(crate) fn draw_composed(window_state: &Rc<Mutex<MacWindowState>>, scene: Com
         if layer.surface == base_surface {
             state.renderer.draw(surface_scene);
         } else if let Some(surface) = state.fast_composition.gpui_surfaces.get_mut(&layer.surface) {
-            {
+            let moved = {
+                let hitboxes = scene.layer_hitboxes(layer);
                 let mut regions = surface.input_regions.borrow_mut();
+                let moved = regions.len() != hitboxes.len()
+                    || regions
+                        .iter()
+                        .zip(hitboxes)
+                        .any(|(old, new)| old.bounds != new.bounds);
                 regions.clear();
-                regions.extend(scene.layer_hitboxes(layer).iter().cloned());
-            }
+                regions.extend(hitboxes.iter().cloned());
+                moved
+            };
             surface.renderer.draw(surface_scene);
+            let composition = &mut state.fast_composition;
+            composition.cursor_views_moved |= moved && !composition.cursor_views.is_empty();
         } else {
             log::error!(
                 "missing AppKit GPUI composition surface {:?}",
@@ -713,6 +848,19 @@ pub(crate) fn create_native_surface(
 /// GPUI surfaces, then puts every surface's view under its parent's, in
 /// order, at its bounds.
 pub(crate) fn set_composition_order(
+    window_state: &Rc<Mutex<MacWindowState>>,
+    surfaces: &[PlatformCompositionSurface],
+) -> Result<()> {
+    let ordered = order_surfaces(window_state, surfaces);
+    // Once the last cursor view goes, the window draws without
+    // `draw_composed`, so GPUIView takes the cursor back here.
+    if window_state.lock().fast_composition.cursor_views.is_empty() {
+        follow_native_cursor(window_state, None);
+    }
+    ordered
+}
+
+fn order_surfaces(
     window_state: &Rc<Mutex<MacWindowState>>,
     surfaces: &[PlatformCompositionSurface],
 ) -> Result<()> {
@@ -845,20 +993,27 @@ pub(crate) fn set_composition_order(
             follow_native_views(&mut lock, window_state);
             lock.fast_composition.view_order = view_order;
         }
-        lock.fast_composition.input_forwarders.clear();
-        for surface in surfaces.iter().filter(|surface| match &surface.content {
-            PlatformCompositionSurfaceContent::Native(attachment)
-            | PlatformCompositionSurfaceContent::ExternalGpu(attachment) => {
-                attachment.input_forwarding()
-            }
-            PlatformCompositionSurfaceContent::Gpui => false,
-        }) {
-            if let Some(view) = views_by_id.get(&surface.id) {
-                lock.fast_composition
-                    .input_forwarders
-                    .insert(*view as usize);
+        let composition = &mut lock.fast_composition;
+        composition.input_forwarders.clear();
+        composition.cursor_views.clear();
+        for surface in surfaces {
+            let (attachment, sets_cursor) = match &surface.content {
+                PlatformCompositionSurfaceContent::Native(attachment) => (attachment, true),
+                PlatformCompositionSurfaceContent::ExternalGpu(attachment) => (attachment, false),
+                PlatformCompositionSurfaceContent::Gpui => continue,
+            };
+            let Some(view) = views_by_id.get(&surface.id).map(|view| *view as usize) else {
+                continue;
+            };
+            if attachment.input_forwarding() {
+                composition.input_forwarders.insert(view);
+            } else if sets_cursor {
+                composition.cursor_views.insert(view);
             }
         }
+        // The order is set when native views move, and the frame drawn next
+        // follows them.
+        composition.cursor_views_moved = !composition.cursor_views.is_empty();
         let window: Id = msg_send![native_view, window];
         if let Some(window) = window.as_ref() {
             ivar(window, NATIVE_INPUT_IVAR)
