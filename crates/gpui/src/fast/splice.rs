@@ -587,7 +587,10 @@ impl Window {
             crate::fast::layout_key::pop_layout_key(window);
             key
         });
-        let mut view = ViewElement::new(rebuild.view.clone()).rebuildable(rebuild.view.clone());
+        // Named for the view's type, as where it was first drawn (see [`rebuildable`]),
+        // so the profiler's view timings do not call every view built again on its own
+        // `AnyView`.
+        let mut view = rebuildable(rebuild.view.clone(), rebuild.view.clone());
         view.cached_style = rebuild.cached_style.clone();
         // Nothing is read laying it out, but what it reads from here on is
         // checked from now.
@@ -641,7 +644,10 @@ impl Window {
         let element_states_start = self.next_frame.accessed_element_states.len();
         let dependency_recording = cx.begin_recording_dependencies();
         let inherited = self.enter_gap(&global_id, &rebuild, context.content_mask, context.opacity);
-        let mut view = ViewElement::new(rebuild.view.clone()).rebuildable(rebuild.view.clone());
+        // Named for the view's type, as where it was first drawn (see [`rebuildable`]),
+        // so the profiler's view timings do not call every view built again on its own
+        // `AnyView`.
+        let mut view = rebuildable(rebuild.view.clone(), rebuild.view.clone());
         view.cached_style = rebuild.cached_style.clone();
         // What its element's request for layout does, inside the view around
         // it.
