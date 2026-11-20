@@ -620,48 +620,84 @@ mod uniform {
         let (handle, log) = page(cx, 1000);
         let window = handle.into();
         promote(cx, window);
-        // Rows 2..7 show, and ten rows of overscan below them and above them,
-        // as far as row 0. Row 1 showed in the frame before, and was left out:
-        // painted into the layer, it could have kept element states that a
-        // list without a layer drops.
-        let mut expected: Vec<usize> = [0].into_iter().chain(2..17).collect();
-        assert_eq!(held_rows(cx, window), expected);
+        // Rows 2..7 show, and the layer holds those alone: the ten rows of
+        // overscan below them and above them are not painted in the frame
+        // that promotes the layer, which would be five viewports of rows in
+        // one frame.
+        assert_eq!(held_rows(cx, window), (2..7).collect::<Vec<_>>());
         rendered_rows(&log);
 
-        wheel(cx, window, -ROW_HEIGHT);
-        assert_eq!(decision(cx, window), Some(Decision::Composite));
-        assert_eq!(
-            rendered_rows(&log),
-            vec![1..2, 17..18],
-            "the row left out is rendered, and the row entering the overscan"
-        );
-
-        for step in 0..14 {
+        // The frames after grow the overscan, each rendering three quarters
+        // of a viewport's rows at most, three of the five: the row its
+        // scroll shows first, then overscan, until the ten rows below the
+        // rows shown are held.
+        let mut shown_end = 7;
+        let mut frames = 0;
+        loop {
             wheel(cx, window, -ROW_HEIGHT);
+            shown_end += 1;
+            frames += 1;
             assert_eq!(decision(cx, window), Some(Decision::Composite));
-            let new_row = 18 + step;
+            let rendered: usize = rendered_rows(&log).iter().map(Range::len).sum();
+            assert!(
+                (1..=3).contains(&rendered),
+                "frame {frames}: {rendered} rows rendered"
+            );
+            let held = held_rows(cx, window);
+            if held.last() == Some(&(shown_end + 9)) && held.first() == Some(&0) {
+                break;
+            }
+            assert!(frames < 20, "the overscan never grew whole: {held:?}");
+        }
+
+        // Whole, the overscan grows by the row entering it. Rows that left it
+        // are kept until they are more than a quarter of the rows the layer
+        // is to hold, 25, then dropped together.
+        let mut dropped = false;
+        for step in 0..30 {
+            let before = held_rows(cx, window);
+            wheel(cx, window, -ROW_HEIGHT);
+            shown_end += 1;
+            assert_eq!(decision(cx, window), Some(Decision::Composite));
+            let new_row = shown_end + 9;
             assert_eq!(
                 rendered_rows(&log),
                 vec![new_row..new_row + 1],
                 "step {step}: scrolling down one row renders the row entering the overscan"
             );
-            // Rows that left the overscan are kept until they are more than
-            // a quarter of the rows the layer is to hold, then dropped.
-            let first = if step < 13 { 0 } else { new_row - 24 };
-            expected = (first..new_row + 1).collect();
-            assert_eq!(held_rows(cx, window), expected, "step {step}");
+            let held = held_rows(cx, window);
+            let first = held[0];
+            assert_eq!(
+                held,
+                (first..new_row + 1).collect::<Vec<_>>(),
+                "step {step}"
+            );
+            assert!(held.len() <= 31, "step {step}: {} rows held", held.len());
+            if first != before[0] {
+                assert_eq!(
+                    held.len(),
+                    25,
+                    "step {step}: dropped to the rows it is to hold"
+                );
+                dropped = true;
+                break;
+            }
         }
-        // Rows 17..22 show.
-        assert_eq!(held_rows(cx, window), (7..32).collect::<Vec<_>>());
+        assert!(dropped, "rows that left the overscan were never dropped");
 
+        let held = held_rows(cx, window);
+        let (first, last) = (held[0], held[held.len() - 1]);
         wheel(cx, window, ROW_HEIGHT);
         assert_eq!(decision(cx, window), Some(Decision::Composite));
         assert_eq!(
             rendered_rows(&log),
-            vec![6..7],
+            vec![first - 1..first],
             "scrolling up one row renders the dropped row entering the overscan"
         );
-        assert_eq!(held_rows(cx, window), (6..32).collect::<Vec<_>>());
+        assert_eq!(
+            held_rows(cx, window),
+            (first - 1..last + 1).collect::<Vec<_>>()
+        );
 
         // Rows 16..21 show; a quarter of a row down, 16..22 do, all held.
         for _ in 0..2 {
@@ -867,7 +903,13 @@ mod uniform {
         let (handle, log) = page(cx, 1000);
         let window = handle.into();
         promote(cx, window);
-        wheel(cx, window, -ROW_HEIGHT);
+        // The frames after the one promoting the layer grow its overscan,
+        // several rows a frame, whatever they scroll by: three rows of
+        // scrolling in quarters of a row leave it whole, so that a scroll of
+        // one row then adds the one row entering it.
+        for _ in 0..12 {
+            wheel(cx, window, -ROW_HEIGHT / 4.);
+        }
         let parts = |cx: &mut TestAppContext| {
             with_window(cx, window, |window, _| {
                 let layer = window.fast_layers.layers.values().next().unwrap();
