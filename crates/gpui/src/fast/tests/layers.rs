@@ -2693,7 +2693,7 @@ mod decisions {
 /// Tests of which scroll containers get a layer and for how long (M4).
 mod policies {
     use super::decisions::{
-        LayerPage, decision, frame_after, page, promote, scroll, scroll_and, scroller_id,
+        LayerPage, decision, frame_after, page, promote, scroll, scroll_and, scroller_id, viewport,
     };
     use super::invalidation::{draw, with_window};
     use crate::fast::layers::policy::Decision;
@@ -2702,7 +2702,7 @@ mod policies {
         IntoElement, ParentElement as _, Path, Styled as _, TestAppContext, WindowHandle, anchored,
         canvas, deferred, div, point, px, size,
     };
-    use std::{ops::Range, rc::Rc};
+    use std::{cell::RefCell, ops::Range, rc::Rc};
 
     /// Puts `extra` at the top of the page's scroll container.
     fn with_extra(
@@ -2844,6 +2844,65 @@ mod policies {
         with_extra(cx, handle, || div().into_any_element());
         let composited = (0..12).any(|_| scroll(cx, window, -20.) == Some(Decision::Composite));
         assert!(composited, "the layer is composited again");
+    }
+
+    /// A web view appearing in content held in a layer is prepainted once
+    /// into the layer, under the mask that also covers the overscan, before
+    /// the container is kept off its layer. It places its native view within
+    /// the viewport all the same, clipped to `Window::surface_clip`.
+    #[crate::test]
+    fn a_native_surface_appearing_in_a_layer_is_clipped_to_the_viewport(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let handle = page(cx, false);
+        let window = handle.into();
+        // Scrolled 40 px down: the top of the web view added below shows.
+        promote(cx, window);
+        let surface = with_window(cx, window, |window, _| {
+            crate::fast::composition::tests::native_surface(window)
+        });
+        // Each mask the web view is prepainted in, and where it then places
+        // its native view: its bounds within its clip, as gpui-webview does.
+        let placements = Rc::new(RefCell::new(Vec::new()));
+        let (host, noted) = (surface.clone(), placements.clone());
+        with_extra(cx, handle, move || {
+            let (host, noted) = (host.clone(), noted.clone());
+            canvas(
+                move |bounds, window, _| {
+                    let shown = bounds.intersect(&window.surface_clip());
+                    host.set_bounds(shown.to_device_pixels(window.scale_factor()))
+                        .unwrap();
+                    noted
+                        .borrow_mut()
+                        .push((window.content_mask().bounds, host.bounds()));
+                },
+                |_, _, _, _| {},
+            )
+            .size(px(50.))
+            .into_any_element()
+        });
+        for _ in 0..4 {
+            scroll(cx, window, 5.);
+        }
+        let scale = with_window(cx, window, |window, _| window.scale_factor());
+        let shown = viewport().to_device_pixels(scale);
+        let placements = placements.borrow();
+        assert!(
+            placements
+                .iter()
+                .any(|(mask, _)| mask.intersect(&viewport()) != *mask),
+            "the web view was prepainted into the layer"
+        );
+        assert!(
+            placements.iter().all(|(_, placed)| !placed.is_empty()),
+            "the web view shows"
+        );
+        let past = placements
+            .iter()
+            .map(|(_, placed)| placed)
+            .find(|placed| placed.intersect(&shown) != **placed);
+        assert_eq!(past, None, "the web view is placed within the viewport");
     }
 
     #[crate::test]

@@ -2207,7 +2207,8 @@ pub(crate) mod tests {
         dialog_open: bool,
     }
 
-    /// Places `surface` over itself as it is prepainted, as a web view does.
+    /// Places `surface` over itself as it is prepainted, as a web view does,
+    /// without clipping it.
     pub(crate) fn native_host(surface: Rc<dyn PlatformSurfaceAttachment>) -> impl IntoElement {
         canvas(
             move |bounds, window, _| {
