@@ -29,6 +29,7 @@ mod support;
 mod tab_stops;
 mod text;
 mod text_shaping;
+mod tooltip;
 mod tracked_entities;
 mod truncation;
 mod wheel_notifies;
