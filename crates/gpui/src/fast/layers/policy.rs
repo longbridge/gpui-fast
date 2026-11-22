@@ -43,6 +43,14 @@ const PROMOTE_AFTER_SCROLLED_FRAMES: u8 = 2;
 /// A layer whose content changed on at least this many of the last 16
 /// frames is demoted. Include the halfway boundary at 120 Hz.
 const DEMOTE_AFTER_CHANGED_FRAMES: u32 = 8;
+/// A list's layer whose content changed on at least this many of the last 16
+/// frames is demoted. A list changing on every other frame, as a feed of 60
+/// updates a second does at 120 Hz, composites the frames between and keeps
+/// its layer; one changing on every frame, as a list following its tail or
+/// moving its selection does, composites none, and painting its rows afresh
+/// costs more than drawing them without the layer (see
+/// [`crate::fast::layers::work::REPAINT_COST`]).
+const LIST_DEMOTE_AFTER_CHANGED_FRAMES: u32 = 14;
 /// How many frames a demoted container's content must be stable for before
 /// it may get a layer again.
 const REPROMOTE_AFTER_STABLE_FRAMES: u64 = 60;
@@ -233,11 +241,13 @@ pub(crate) fn decide(
         1
     };
     // A list's layer replays its rows (see
-    // [`crate::fast::layers::paint::replays`]): it costs no more than drawing
-    // them without it, so it is not demoted for what it costs or for changing
-    // often, and has no tiles to keep within budget.
+    // [`crate::fast::layers::paint::replays`]): a frame that keeps them costs
+    // no more than drawing the list without it, so it is not demoted for its
+    // estimated work, and has no tiles to keep within budget. It is demoted
+    // for content that changes on nearly every frame (see
+    // [`LIST_DEMOTE_AFTER_CHANGED_FRAMES`]).
     let replayed = layer.rows.list;
-    let mut demoted_until = if replayed { None } else { policy.demoted_until };
+    let mut demoted_until = policy.demoted_until;
     let changed_while_demoted =
         demoted_until.is_some() && invalidate::changed_without_layer(window, cx, id);
     if changed_while_demoted {
@@ -326,7 +336,12 @@ pub(crate) fn decide(
         .unwrap_or_default();
     if changed {
         history |= 1;
-        demote |= !replayed && history.count_ones() >= DEMOTE_AFTER_CHANGED_FRAMES;
+        let changed_frames = if replayed {
+            LIST_DEMOTE_AFTER_CHANGED_FRAMES
+        } else {
+            DEMOTE_AFTER_CHANGED_FRAMES
+        };
+        demote |= history.count_ones() >= changed_frames;
     }
     let decision = if demote { Decision::Bypass } else { decision };
 
