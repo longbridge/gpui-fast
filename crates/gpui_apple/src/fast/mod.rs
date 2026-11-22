@@ -21,3 +21,6 @@ pub(crate) mod rounded_clip;
 pub(crate) mod text_system;
 #[cfg(all(test, feature = "font-kit"))]
 mod truncation_tests;
+
+#[cfg(feature = "font-kit")]
+pub(crate) mod synthetic_italic;
