@@ -36,6 +36,7 @@ impl Twins {
         self.base_of_twin.contains_key(&font_id)
     }
 
+    #[cfg(test)]
     /// The upright face `font_id` was made from, or `font_id` itself.
     pub(crate) fn base(&self, font_id: FontId) -> FontId {
         self.base_of_twin.get(&font_id).copied().unwrap_or(font_id)
