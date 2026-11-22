@@ -107,6 +107,12 @@ pub(crate) struct LayerPolicy {
     /// looked at, before its content was prepainted. See
     /// [`note_surfaces_placed`].
     surfaces_placed: u64,
+    /// Whether the content, last prepainted without a layer, placed a
+    /// native or external GPU surface. A layer is not tried while it does:
+    /// the frame trying it prepaints the content under the layer's wider
+    /// mask, which a web view takes for its clip and would show outside the
+    /// container for that frame. See [`note_surfaces_without_layer`].
+    surfaces_without_layer: bool,
     /// Recent rebuilding work, relative to drawing the visible content.
     work: WorkBudget,
     /// Backoff survives dropping the record and its cached rows.
@@ -306,7 +312,8 @@ pub(crate) fn decide(
             Decision::Repaint
         }
         None if streak >= PROMOTE_AFTER_SCROLLED_FRAMES
-            && retry_at.is_none_or(|at| frame >= at) =>
+            && retry_at.is_none_or(|at| frame >= at)
+            && !policy.surfaces_without_layer =>
         {
             Decision::Repaint
         }
@@ -449,6 +456,23 @@ pub(crate) fn note_surfaces_placed(window: &mut Window, id: &GlobalElementId) {
         .is_some_and(|layer| layer.policy.surfaces_placed != placed)
     {
         layers.scrolls.anchored.push(id.clone());
+    }
+}
+
+/// Notes whether the content of the container `id`, prepainted without its
+/// layer since the container was looked at this frame, placed a native or
+/// external GPU surface. Called where such a prepaint ends; the container
+/// is not promoted while its content holds one (see
+/// [`LayerPolicy::surfaces_without_layer`]).
+pub(crate) fn note_surfaces_without_layer(window: &mut Window, id: &GlobalElementId) {
+    let placed = crate::fast::composition::surfaces_placed(window);
+    let frame = window.fast_layers.frame;
+    if let Some(layer) = window.fast_layers.layers.get_mut(id)
+        && layer.record.is_none()
+        && layer.policy.last_seen_frame == frame
+        && layer.policy.last_decision == Some(Decision::Bypass)
+    {
+        layer.policy.surfaces_without_layer = layer.policy.surfaces_placed != placed;
     }
 }
 

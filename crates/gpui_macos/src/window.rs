@@ -655,7 +655,7 @@ pub(crate) enum FrameSource {
 
 pub(crate) struct MacWindowState {
     handle: AnyWindowHandle,
-    foreground_executor: ForegroundExecutor,
+    pub(crate) foreground_executor: ForegroundExecutor,
     background_executor: BackgroundExecutor,
     pub(crate) native_window: *mut AnyObject,
     pub(crate) native_view: NonNull<AnyObject>,
@@ -3544,6 +3544,7 @@ extern "C" fn step(view: *mut c_void) {
             (None, FrameRequestSource::NativeCallback),
             |(at, source)| (Some(at), source),
         );
+        crate::fast::composition::present_for_native_views(&mut lock);
         drop(lock);
         callback(RequestFrameOptions {
             signal_at,

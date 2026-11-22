@@ -1558,8 +1558,19 @@ fn record_layout_keys(window: &mut Window) -> (usize, usize) {
 }
 
 /// Ends what [`begin_uniform_list`] began, once the rows are prepainted.
-pub(crate) fn end_rows(window: &mut Window, cx: &mut App, rows: Rows) {
+pub(crate) fn end_rows(
+    window: &mut Window,
+    cx: &mut App,
+    id: Option<&GlobalElementId>,
+    rows: Rows,
+) {
     if rows.0.is_none() {
+        if COMPILED
+            && let Some(id) = id
+            && !window.fast_layers.layers.is_empty()
+        {
+            policy::note_surfaces_without_layer(window, id);
+        }
         return;
     }
     let Some(painting) = window.fast_layers.painting.take() else {
@@ -2437,6 +2448,7 @@ fn note_shown_without_layer(
         return;
     }
     let id = list_id(window, &state.version);
+    policy::note_surfaces_without_layer(window, &id);
     let frame = window.fast_layers.frame;
     let Some(layer) = window.fast_layers.layers.get_mut(&id) else {
         return;

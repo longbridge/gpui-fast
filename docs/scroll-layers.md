@@ -126,7 +126,12 @@ each frame it then takes one of three paths (`fast::layers::policy::decide`):
     painted again 8 frames later, then twice as long after each attempt
     that finds the content as it was, up to 256 frames
     (`fast::layers::policy::RETRY_AFTER_INELIGIBLE_FRAMES`). The focus
-    leaving an input in the content ends the wait at once;
+    leaving an input in the content ends the wait at once. Content that
+    placed a native surface while drawn without its layer is not painted
+    into the layer at all, neither promoted nor retried, until it no
+    longer does: that prepaint would run under the layer's wider mask,
+    which a web view takes for its clip, and show it outside the container
+    for a frame;
   - the view holding the container asked for an animation frame from
     outside the content (a scrollbar fading beside a list, a pulsing
     button): it renders again on every frame the animation runs, and
