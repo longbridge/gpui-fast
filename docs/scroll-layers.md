@@ -129,9 +129,11 @@ each frame it then takes one of three paths (`fast::layers::policy::decide`):
     leaving an input in the content ends the wait at once. Content that
     placed a native surface while drawn without its layer is not painted
     into the layer at all, neither promoted nor retried, until it no
-    longer does: that prepaint would run under the layer's wider mask,
-    which a web view takes for its clip, and show it outside the container
-    for a frame;
+    longer does. A surface still placed while the layer is painted, as one
+    appearing in content already composited from it, must be clipped by the
+    element placing it to `Window::surface_clip`, the content mask within
+    the viewport: the layer's mask also covers the overscan, and a surface
+    clipped to it would show outside the container for that frame;
   - the view holding the container asked for an animation frame from
     outside the content (a scrollbar fading beside a list, a pulsing
     button): it renders again on every frame the animation runs, and

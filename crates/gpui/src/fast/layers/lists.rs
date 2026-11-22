@@ -489,14 +489,18 @@ fn needed_rows(visible: &Range<usize>, overscan: usize, item_count: usize) -> Ra
 /// dragged, renders on each frame the rows it shows, as the list does
 /// without its layer, instead of the whole overscan around them.
 ///
-/// The frame promoting the layer paints the whole overscan, which the frames
-/// compositing it pay back. A frame painting it afresh for a change of its
-/// content, which costs more than drawing the rows directly (see
+/// A frame painting a uniform list's layer afresh, which costs more than
+/// drawing the rows directly (see
 /// [`crate::fast::layers::work::REPAINT_COST`]), paints only the rows the
 /// list shows, as the list does without a layer, and the frames keeping the
 /// rows after it grow the overscan back: a view holding the list that is
 /// notified now and then, as a chat transcript is when it reaches its end,
-/// does not render five viewports of rows each time.
+/// does not render five viewports of rows each time. That holds for the
+/// frame promoting the layer and for one painting it afresh for having
+/// added too many rows as well: the frames compositing the layer pay the
+/// whole overscan back on average, but it is five viewports of rows in one
+/// frame, which is late wherever a viewport of rows takes a fifth of the
+/// display's refresh.
 const RENDER_PER_FRAME_VIEWPORTS: f32 = 0.75;
 
 /// The rows of `limit`, around and including `visible`, that a uniform
@@ -883,7 +887,6 @@ pub(crate) fn begin_uniform_list(
         .max(1.) as usize;
     let needed = needed_rows(visible, overscan, item_count);
     let layer = paint::layer_mut(window, id);
-    let promoting = layer.record.is_none();
     let extends = decision == Decision::Composite
         && layer.rows.list
         && !layer.rows.due_for_repaint(&needed)
@@ -921,12 +924,11 @@ pub(crate) fn begin_uniform_list(
                 translation,
             ),
         ),
-        // Promoted, the layer is painted over the whole overscan, which the
-        // frames compositing it pay back; painted afresh while it only
-        // scrolls, for having added too many rows, too, as the scroll goes
-        // on. Painted afresh for a change of its content, it is painted over
-        // the rows the list shows, as the list is drawn without it.
-        Mode::Repaint if promoting || decision == Decision::Composite => needed,
+        // Painted afresh, whether promoted, for a change of its content or,
+        // while it only scrolls, for having added too many rows, the layer is
+        // painted over the rows the list shows, as the list is drawn without
+        // it, and the frames after grow the overscan back (see
+        // [`RENDER_PER_FRAME_VIEWPORTS`]).
         Mode::Repaint => visible.start.max(needed.start)..visible.end.min(needed.end),
     };
     let (retain, carried) = match mode {
