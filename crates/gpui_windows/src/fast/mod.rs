@@ -28,3 +28,4 @@ pub(crate) mod occlusion;
 pub(crate) mod opaque_tiles;
 pub(crate) mod partial;
 pub(crate) mod rounded_clip;
+pub(crate) mod synthetic_italic;
