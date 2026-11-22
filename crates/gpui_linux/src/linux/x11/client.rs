@@ -2377,7 +2377,7 @@ fn check_compositor_present(xcb_connection: &XCBConnection, root: xproto::Window
         method3
     );
 
-    method1 || method2 || method3
+    crate::fast::x11_compositor::compositor_present(xcb_connection, root)
 }
 
 fn check_gtk_frame_extents_supported(

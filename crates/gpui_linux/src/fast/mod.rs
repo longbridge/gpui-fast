@@ -13,6 +13,8 @@ pub(crate) mod wayland_connection;
 #[cfg(feature = "wayland")]
 pub(crate) mod wayland_viewport;
 #[cfg(feature = "x11")]
+pub(crate) mod x11_compositor;
+#[cfg(feature = "x11")]
 pub(crate) mod x11_focus;
 #[cfg(feature = "x11")]
 pub(crate) mod x11_scale;
