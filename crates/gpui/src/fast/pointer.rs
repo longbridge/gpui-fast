@@ -28,3 +28,24 @@ pub(crate) fn hit_test(window: &Window, frame: &Frame) -> HitTest {
         frame.hit_test(window.mouse_position)
     }
 }
+
+/// Records the hover state an element paints with, so the next mouse move compares against
+/// what is on screen. An element can become hovered without a mouse move (an occluding overlay
+/// closes under a still pointer); if the move that leaves it compared against a stale `false`,
+/// nothing would be redrawn and the hover style would stay (gpui-kit#4072).
+pub(crate) fn note_painted_hover(
+    state: &Option<std::rc::Rc<std::cell::RefCell<crate::ElementHoverState>>>,
+    group: bool,
+    hitbox: &crate::HitboxId,
+    window: &Window,
+) {
+    if let Some(state) = state {
+        let hovered = !window.last_input_was_touch() && hitbox.is_hovered(window);
+        let mut state = state.borrow_mut();
+        if group {
+            state.group = hovered;
+        } else {
+            state.element = hovered;
+        }
+    }
+}
