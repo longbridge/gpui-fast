@@ -1570,7 +1570,7 @@ impl WaylandWindowStatePtr {
 
         let state = self.state.borrow_mut();
         if let Some(viewport) = &state.viewport {
-            viewport.set_destination(f32::from(size.width) as i32, f32::from(size.height) as i32);
+            crate::fast::wayland_viewport::set_destination(viewport, size);
         }
         update_window(state);
     }
