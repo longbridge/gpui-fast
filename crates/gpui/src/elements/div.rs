@@ -2989,6 +2989,7 @@ impl Interactivity {
                     .and_then(|state| state.hover_state.as_ref())
                     .cloned()
             });
+            crate::fast::pointer::note_painted_hover(&hover_state, false, &hitbox.id, window);
             let current_view = window.current_view();
             let subtrees = crate::fast::retained::enclosing_retained_subtrees(window);
 
@@ -3013,6 +3014,12 @@ impl Interactivity {
                     .as_ref()
                     .and_then(|element| element.hover_state.as_ref())
                     .cloned();
+                crate::fast::pointer::note_painted_hover(
+                    &hover_state,
+                    true,
+                    &group_hitbox_id,
+                    window,
+                );
                 let current_view = window.current_view();
                 let subtrees = crate::fast::retained::enclosing_retained_subtrees(window);
 
