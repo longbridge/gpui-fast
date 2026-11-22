@@ -102,6 +102,23 @@ pub(crate) fn inside_layer(window: &Window) -> bool {
     window.fast_layers.painting.is_some()
 }
 
+impl Window {
+    /// The bounds a native or external GPU surface placed by the element
+    /// being prepainted shows within, for the element to clip the surface
+    /// to rather than [`Window::content_mask`]. While a scroll layer's
+    /// content is painted, the content mask also covers the overscan painted
+    /// around the viewport, which a surface clipped to it would show over;
+    /// hitboxes are clipped to the viewport the same way
+    /// (`fast::layers::input::hitbox_mask`).
+    pub fn surface_clip(&self) -> Bounds<Pixels> {
+        let mask = self.content_mask().bounds;
+        match &self.fast_layers.painting {
+            Some(painting) => mask.intersect(&painting.viewport),
+            None => mask,
+        }
+    }
+}
+
 /// Decides what the container `id`, prepainting its children at
 /// `scroll_offset`, does with them, and sets up their prepaint for it.
 /// `bounds` are the container's, `child_min` and `content_size` where its
