@@ -41,7 +41,6 @@ use gpui::{
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use pathfinder_geometry::{
     rect::{RectF, RectI},
-    transform2d::Transform2F,
     vector::Vector2F,
 };
 use smallvec::SmallVec;
@@ -77,6 +76,7 @@ struct AppleTextSystemState {
     font_ids_by_postscript_name: HashMap<String, FontId>,
     font_ids_by_font_key: HashMap<FontKey, SmallVec<[FontId; 4]>>,
     postscript_names_by_font_id: HashMap<FontId, String>,
+    italics: crate::fast::synthetic_italic::Italics,
     sized_fonts: crate::fast::text_system::SizedFonts,
     color_bitmap_fonts: crate::fast::color_bitmap_fonts::ColorBitmapFonts,
 }
@@ -92,6 +92,7 @@ impl AppleTextSystem {
             font_ids_by_postscript_name: HashMap::default(),
             font_ids_by_font_key: HashMap::default(),
             postscript_names_by_font_id: HashMap::default(),
+            italics: crate::fast::synthetic_italic::Italics::default(),
             sized_fonts: crate::fast::text_system::SizedFonts::default(),
             color_bitmap_fonts: crate::fast::color_bitmap_fonts::ColorBitmapFonts::default(),
         }))
@@ -177,7 +178,13 @@ impl PlatformTextSystem for AppleTextSystem {
                 },
             )?;
 
-            let font_id = candidates[ix];
+            let base = candidates[ix];
+            let state = &mut *lock;
+            let font_id = state.italics.select(
+                &mut state.fonts,
+                base,
+                crate::fast::synthetic_italic::requested(font.style),
+            );
             lock.font_selections.insert(font.clone(), font_id);
             Ok(font_id)
         }
@@ -431,7 +438,10 @@ impl AppleTextSystemState {
 
     fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
         let font = &self.fonts[params.font_id.0];
-        let scale = Transform2F::from_scale(params.scale_factor);
+        let scale = crate::fast::synthetic_italic::raster_transform(
+            params.scale_factor,
+            self.italics.contains(params.font_id),
+        );
         let bounds: Bounds<DevicePixels> = bounds_from_rect_i(font.raster_bounds(
             params.glyph_id.0,
             params.font_size.into(),
@@ -519,17 +529,19 @@ impl AppleTextSystemState {
                 crate::fast::text_system::smooth_undilated(&cx, font_smoothing_allowed_by_user());
                 cx.set_gray_fill_color(0.0, 1.0);
             }
-            self.fonts[params.font_id.0]
-                .native_font()
-                .clone_with_font_size(f32::from(params.font_size) as CGFloat)
-                .draw_glyphs(
-                    &[params.glyph_id.0 as CGGlyph],
-                    &[CGPoint::new(
-                        (subpixel_shift.x / params.scale_factor) as CGFloat,
-                        (subpixel_shift.y / params.scale_factor) as CGFloat,
-                    )],
-                    cx,
-                );
+            crate::fast::synthetic_italic::sized(
+                &self.fonts[params.font_id.0],
+                f32::from(params.font_size).into(),
+                self.italics.contains(params.font_id),
+            )
+            .draw_glyphs(
+                &[params.glyph_id.0 as CGGlyph],
+                &[CGPoint::new(
+                    (subpixel_shift.x / params.scale_factor) as CGFloat,
+                    (subpixel_shift.y / params.scale_factor) as CGFloat,
+                )],
+                cx,
+            );
 
             if params.is_emoji {
                 // Convert from RGBA with premultiplied alpha to BGRA with straight alpha.
@@ -545,6 +557,7 @@ impl AppleTextSystemState {
     fn layout_line(&mut self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> LineLayout {
         // Construct the attributed string, converting UTF8 ranges to UTF16 ranges.
         let mut string = CFMutableAttributedString::new();
+        let mut italic_ranges = Vec::new(); // crate::fast::synthetic_italic fallback runs
         let mut max_ascent = 0.0f32;
         let mut max_descent = 0.0f32;
 
@@ -565,6 +578,12 @@ impl AppleTextSystemState {
                 string.replace_str(&CFString::new(text_run), CFRange::init(utf16_start, 0));
                 let utf16_end = string.char_len();
 
+                crate::fast::synthetic_italic::record_range(
+                    &mut italic_ranges,
+                    utf16_start..utf16_end,
+                    &self.fonts[run.font_id.0],
+                    self.italics.contains(run.font_id),
+                );
                 let length = utf16_end - utf16_start;
                 let cf_range = CFRange::init(utf16_start, length);
                 let font = &self.fonts[run.font_id.0];
@@ -588,6 +607,7 @@ impl AppleTextSystemState {
                             run.font_id,
                             font,
                             font_size,
+                            self.italics.contains(run.font_id),
                         ),
                     );
                 }
@@ -609,7 +629,13 @@ impl AppleTextSystemState {
                     .downcast::<CTFont>()
                     .unwrap()
             };
-            let font_id = self.id_for_native_font(font);
+            let base = self.id_for_native_font(font);
+            let italic = run
+                .string_indices()
+                .first()
+                .is_some_and(|i| italic_ranges.iter().any(|r| r.contains(i)));
+            let synthesize = italic && !self.is_emoji(base);
+            let font_id = self.italics.select(&mut self.fonts, base, synthesize); // crate::fast::synthetic_italic
 
             let glyphs = match runs.last_mut() {
                 Some(run) if run.font_id == font_id => &mut run.glyphs,
