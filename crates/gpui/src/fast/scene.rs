@@ -509,20 +509,38 @@ pub(crate) fn quad_piece(
 /// next, which the tree replays. Inside a layer the pieces already share the
 /// layer's place, so they are inserted as they are.
 pub(crate) fn insert_quad_pieces(scene: &mut Scene, pieces: &[Quad]) {
-    use crate::scene::{PaintOperation, Primitive};
     if pieces.len() < 2 || !scene.fast_top_level() {
         for piece in pieces {
             scene.insert_primitive(*piece);
         }
         return;
     }
+    let pieces: smallvec::SmallVec<[_; 5]> = pieces
+        .iter()
+        .map(|piece| (*piece, quad_clipped_bounds(piece)))
+        .collect();
+    insert_bounded_pieces(scene, &pieces);
+}
+
+fn quad_clipped_bounds(quad: &Quad) -> crate::Bounds<crate::ScaledPixels> {
+    crate::scene::Primitive::Quad(*quad).clipped_bounds()
+}
+
+/// [`insert_quad_pieces`] with each piece's clipped bounds worked out once.
+fn insert_bounded_pieces(scene: &mut Scene, pieces: &[(Quad, crate::Bounds<crate::ScaledPixels>)]) {
+    use crate::scene::{PaintOperation, Primitive};
+    if pieces.len() < 2 || !scene.fast_top_level() {
+        for (piece, _) in pieces {
+            scene.insert_primitive(*piece);
+        }
+        return;
+    }
     let mut union = None::<crate::Bounds<crate::ScaledPixels>>;
-    for piece in pieces {
-        let bounds = Primitive::Quad(*piece).clipped_bounds();
+    for (_, bounds) in pieces {
         if !bounds.is_empty() {
             union = Some(match union {
-                Some(union) => union.join(&bounds),
-                None => bounds,
+                Some(union) => union.join(bounds),
+                None => *bounds,
             });
         }
     }
@@ -530,11 +548,11 @@ pub(crate) fn insert_quad_pieces(scene: &mut Scene, pieces: &[Quad]) {
         return;
     };
     let order = scene.primitive_bounds.insert(union);
-    for piece in pieces {
-        let mut primitive = Primitive::Quad(*piece);
-        if primitive.clipped_bounds().is_empty() {
+    for (piece, bounds) in pieces {
+        if bounds.is_empty() {
             continue;
         }
+        let mut primitive = Primitive::Quad(*piece);
         set_draw_order(&mut primitive, order);
         scene.fast_push_primitive(primitive.clone(), order);
         scene
@@ -548,29 +566,27 @@ pub(crate) fn insert_quad_pieces(scene: &mut Scene, pieces: &[Quad]) {
 /// pieces keep the bounds of the whole) and don't overlap.
 #[derive(Default)]
 pub(crate) struct QuadRun {
-    pieces: smallvec::SmallVec<[Quad; 5]>,
+    pieces: smallvec::SmallVec<[(Quad, crate::Bounds<crate::ScaledPixels>); 5]>,
 }
 
 impl QuadRun {
     pub(crate) fn push(&mut self, scene: &mut Scene, quad: Quad) {
-        use crate::scene::Primitive;
-        if let Some(first) = self.pieces.first() {
-            let bounds = Primitive::Quad(quad).clipped_bounds();
-            if first.bounds != quad.bounds
+        let bounds = quad_clipped_bounds(&quad);
+        if let Some((first, _)) = self.pieces.first()
+            && (first.bounds != quad.bounds
                 || self
                     .pieces
                     .iter()
-                    .any(|piece| Primitive::Quad(*piece).clipped_bounds().intersects(&bounds))
-            {
-                self.flush(scene);
-            }
+                    .any(|(_, piece)| piece.intersects(&bounds)))
+        {
+            self.flush(scene);
         }
-        self.pieces.push(quad);
+        self.pieces.push((quad, bounds));
     }
 
     pub(crate) fn flush(&mut self, scene: &mut Scene) {
         if !self.pieces.is_empty() {
-            insert_quad_pieces(scene, &self.pieces);
+            insert_bounded_pieces(scene, &self.pieces);
             self.pieces.clear();
         }
     }
