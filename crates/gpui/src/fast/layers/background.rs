@@ -124,11 +124,12 @@ pub(crate) fn draw_order(primitive: &Primitive) -> DrawOrder {
     match primitive {
         Primitive::Shadow(shadow) => shadow.order,
         Primitive::Quad(quad) => quad.order,
-        Primitive::Path(path) => path.order,
+        Primitive::Path(path) => path.order(),
         Primitive::Underline(underline) => underline.order,
         Primitive::MonochromeSprite(sprite) => sprite.order,
         Primitive::SubpixelSprite(sprite) => sprite.order,
         Primitive::PolychromeSprite(sprite) => sprite.order,
         Primitive::Surface(surface) => surface.order,
+        Primitive::NativeView(native_view) => native_view.order,
     }
 }

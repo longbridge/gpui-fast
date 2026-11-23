@@ -68,7 +68,6 @@ pub(crate) struct StateInner {
     alignment: ListAlignment,
     overdraw: Pixels,
     reset: bool,
-    #[allow(clippy::type_complexity)]
     scroll_handler: Option<Box<dyn FnMut(&ListScrollEvent, &mut Window, &mut App)>>,
     scrollbar_drag_start_height: Option<Pixels>,
     pub(crate) measuring_behavior: ListMeasuringBehavior,

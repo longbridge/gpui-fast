@@ -36,7 +36,6 @@ pub(crate) mod list_measure;
 pub(crate) mod misc;
 pub(crate) mod number_shaping;
 pub(crate) mod observers;
-pub(crate) mod path_cache;
 pub(crate) mod pointer;
 pub(crate) mod retained;
 pub(crate) mod rounded_clip;

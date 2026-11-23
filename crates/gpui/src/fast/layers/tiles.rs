@@ -229,9 +229,9 @@ fn hash_primitive(primitive: &Primitive, tile: &Bounds<ScaledPixels>, hasher: &m
             hash_corners(&shadow.corner_radii, hasher);
             hash_mask(&shadow.content_mask, tile, hasher);
             hash_hsla(&shadow.color, hasher);
-            hash_bounds(&shadow.element_bounds, hasher);
-            hash_corners(&shadow.element_corner_radii, hasher);
-            hasher.write_u32(shadow.inset);
+            hash_bounds(&shadow.shape_bounds, hasher);
+            hash_corners(&shadow.shape_corner_radii, hasher);
+            hasher.write_u8(shadow.inset.as_bool() as u8);
         }
         Primitive::Quad(quad) => {
             hasher.write_u8(1);
@@ -246,15 +246,19 @@ fn hash_primitive(primitive: &Primitive, tile: &Bounds<ScaledPixels>, hasher: &m
         Primitive::Path(path) => {
             hasher.write_u8(2);
             hash_bounds(&path.bounds, hasher);
-            hash_mask(&path.content_mask, tile, hasher);
-            hash_background(&path.color, hasher);
-            hasher.write_usize(path.vertices.len());
-            for vertex in &path.vertices {
-                hash_f32(vertex.xy_position.x.0, hasher);
-                hash_f32(vertex.xy_position.y.0, hasher);
-                hash_f32(vertex.st_position.x, hasher);
-                hash_f32(vertex.st_position.y, hasher);
-                hash_mask(&vertex.content_mask, tile, hasher);
+            hash_mask(&path.paint.content_mask, tile, hasher);
+            hash_background(&path.paint.color, hasher);
+            hasher.write_u8(path.paint.even_odd.as_bool() as u8);
+            let curves = path.tiles.curves();
+            hasher.write_usize(curves.len());
+            for curve in curves {
+                hash_f32(curve.p0.x, hasher);
+                hash_f32(curve.p0.y, hasher);
+                hash_f32(curve.p1.x, hasher);
+                hash_f32(curve.p1.y, hasher);
+                hash_f32(curve.a.x, hasher);
+                hash_f32(curve.a.y, hasher);
+                hash_f32(curve.sign, hasher);
             }
         }
         Primitive::Underline(underline) => {
@@ -300,6 +304,12 @@ fn hash_primitive(primitive: &Primitive, tile: &Bounds<ScaledPixels>, hasher: &m
             hasher.write_u8(7);
             hash_bounds(&surface.bounds, hasher);
             hash_mask(&surface.content_mask, tile, hasher);
+        }
+        Primitive::NativeView(native_view) => {
+            // Like a surface, a native view's pixels come from outside.
+            hasher.write_u8(8);
+            hash_bounds(&native_view.bounds, hasher);
+            hash_mask(&native_view.content_mask, tile, hasher);
         }
     }
 }

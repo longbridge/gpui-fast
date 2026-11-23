@@ -4,8 +4,8 @@
 //! the bounds tree replays.
 
 use crate::{
-    DrawOrder, MonochromeSprite, PaintSurface, Path, PolychromeSprite, Quad, ScaledPixels, Scene,
-    Shadow, SubpixelSprite, Underline,
+    DrawOrder, MonochromeSprite, PaintSurface, PaintedPath, PolychromeSprite, Quad, Scene, Shadow,
+    SubpixelSprite, Underline,
 };
 use std::mem;
 
@@ -16,7 +16,7 @@ pub(crate) struct SortScratch {
     permutation: Permutation,
     shadows: Vec<Shadow>,
     quads: Vec<Quad>,
-    paths: Vec<Path<ScaledPixels>>,
+    paths: Vec<PaintedPath>,
     underlines: Vec<Underline>,
     monochrome_sprites: Vec<MonochromeSprite>,
     subpixel_sprites: Vec<SubpixelSprite>,
@@ -259,7 +259,7 @@ pub(crate) fn sort_in_drawing_order(scene: &mut Scene) {
     }
     sort!(shadows, |shadow: &Shadow| shadow.order);
     sort!(quads, |quad: &Quad| quad.order);
-    sort!(paths, |path: &Path<ScaledPixels>| path.order);
+    sort!(paths, |path: &PaintedPath| path.order);
     sort!(underlines, |underline: &Underline| underline.order);
     sort_sprites!(monochrome_sprites);
     sort_sprites!(subpixel_sprites);

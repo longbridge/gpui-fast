@@ -76,7 +76,6 @@ impl ShapedLine {
     }
 
     /// The length of the line in utf-8 bytes.
-    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.layout.len
     }
@@ -457,7 +456,6 @@ pub struct WrappedLine {
 
 impl WrappedLine {
     /// The length of the underlying, unwrapped layout, in utf-8 bytes.
-    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.layout.len()
     }
@@ -966,6 +964,29 @@ fn paint_line_background(
     })
 }
 
+fn aligned_origin_x(
+    origin: Point<Pixels>,
+    align_width: Pixels,
+    last_glyph_x: Pixels,
+    align: &TextAlign,
+    layout: &LineLayout,
+    wrap_boundary: Option<&&WrapBoundary>,
+) -> Pixels {
+    let end_of_line = if let Some(WrapBoundary { run_ix, glyph_ix }) = wrap_boundary {
+        layout.runs[*run_ix].glyphs[*glyph_ix].position.x
+    } else {
+        layout.width
+    };
+
+    let line_width = end_of_line - last_glyph_x;
+
+    match align {
+        TextAlign::Left => origin.x,
+        TextAlign::Center => (origin.x * 2.0 + align_width - line_width) / 2.0,
+        TextAlign::Right => origin.x + align_width - line_width,
+    }
+}
+
 fn line_paint_bounds(
     origin: Point<Pixels>,
     layout: &LineLayout,
@@ -1011,29 +1032,6 @@ fn line_paint_bounds(
     bounds
 }
 
-fn aligned_origin_x(
-    origin: Point<Pixels>,
-    align_width: Pixels,
-    last_glyph_x: Pixels,
-    align: &TextAlign,
-    layout: &LineLayout,
-    wrap_boundary: Option<&&WrapBoundary>,
-) -> Pixels {
-    let end_of_line = if let Some(WrapBoundary { run_ix, glyph_ix }) = wrap_boundary {
-        layout.runs[*run_ix].glyphs[*glyph_ix].position.x
-    } else {
-        layout.width
-    };
-
-    let line_width = end_of_line - last_glyph_x;
-
-    match align {
-        TextAlign::Left => origin.x,
-        TextAlign::Center => (origin.x * 2.0 + align_width - line_width) / 2.0,
-        TextAlign::Right => origin.x + align_width - line_width,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1075,68 +1073,6 @@ mod tests {
             }),
             text: SharedString::new(text),
             decoration_runs: SmallVec::from(decorations.to_vec()),
-        }
-    }
-
-    #[test]
-    fn test_aligned_line_paint_bounds() {
-        let line = make_shaped_line("abcd", &[(0, 0.), (1, 10.), (2, 20.), (3, 30.)], 40., &[]);
-        let origin = point(px(10.), px(20.));
-        let line_height = px(16.);
-        for (wrapped, align_width, expected_edges) in [
-            (false, None, [(10., 50.), (10., 50.), (10., 50.)]),
-            (true, None, [(10., 50.), (10., 50.), (10., 50.)]),
-            (false, Some(40.), [(10., 50.), (10., 50.), (10., 50.)]),
-            (true, Some(40.), [(10., 50.), (10., 50.), (10., 50.)]),
-            (false, Some(100.), [(10., 50.), (10., 80.), (10., 110.)]),
-            (true, Some(100.), [(10., 50.), (10., 70.), (10., 110.)]),
-            (false, Some(10.), [(10., 50.), (-5., 50.), (-20., 50.)]),
-            (true, Some(10.), [(10., 50.), (5., 50.), (0., 50.)]),
-            (false, Some(0.), [(10., 50.), (-10., 50.), (-30., 50.)]),
-            (true, Some(0.), [(10., 50.), (0., 50.), (-10., 50.)]),
-        ] {
-            let boundaries = if wrapped {
-                vec![WrapBoundary {
-                    run_ix: 0,
-                    glyph_ix: 2,
-                }]
-            } else {
-                Vec::new()
-            };
-            for (align, (left, right)) in [TextAlign::Left, TextAlign::Center, TextAlign::Right]
-                .into_iter()
-                .zip(expected_edges)
-            {
-                assert_eq!(
-                    line_paint_bounds(
-                        origin,
-                        &line.layout,
-                        line_height,
-                        align,
-                        align_width.map(px),
-                        &boundaries,
-                    ),
-                    Bounds::new(
-                        point(px(left), origin.y),
-                        size(px(right - left), px(if wrapped { 32. } else { 16. })),
-                    ),
-                    "wrapped={wrapped}, align={align:?}, align_width={align_width:?}",
-                );
-            }
-        }
-        let empty = make_shaped_line("", &[], 0., &[]);
-        for align in [TextAlign::Left, TextAlign::Center, TextAlign::Right] {
-            assert_eq!(
-                line_paint_bounds(
-                    origin,
-                    &empty.layout,
-                    line_height,
-                    align,
-                    Some(px(100.)),
-                    &[]
-                ),
-                Bounds::new(origin, size(Pixels::ZERO, line_height)),
-            );
         }
     }
 

@@ -605,28 +605,6 @@ fn viewports(window: &Window) -> Viewports {
 /// as fine as a GPU rasterizer resolves a vertex's position.
 const PATH_GRID: f32 = 256.;
 
-/// `path`, in device pixels, with its vertices and bounds moved to the
-/// nearest 1/256 of a device pixel where layers are compiled.
-///
-/// A path painted into a layer is drawn moved by whole device pixels, while
-/// drawn without a layer it is painted where it is now: at a fractional
-/// scale factor the two differ by rounding error in the last bits of each
-/// position (a snapped scroll offset is not a whole number of logical
-/// pixels). On the grid they land on the same positions.
-pub(crate) fn snap_path(mut path: crate::Path<ScaledPixels>) -> crate::Path<ScaledPixels> {
-    if !COMPILED {
-        return path;
-    }
-    for vertex in &mut path.vertices {
-        vertex.xy_position = snap_point(vertex.xy_position);
-    }
-    path.bounds = snap_bounds(path.bounds);
-    // Its mask too: a layer's overlay clips the path to the viewport where
-    // it is drawn, which must come out as the mask painted there.
-    path.content_mask.bounds = snap_bounds(path.content_mask.bounds);
-    path
-}
-
 /// `value` on the grid of [`PATH_GRID`] steps a device pixel.
 fn snap(value: ScaledPixels) -> ScaledPixels {
     // Adding and taking away 1.5 × 2^23 rounds an `f32` below 2^22 in
@@ -722,19 +700,13 @@ fn clip_primitive(primitive: &mut Primitive, viewports: Viewports) {
     match primitive {
         Primitive::Shadow(p) => clip(&mut p.content_mask),
         Primitive::Quad(p) => clip(&mut p.content_mask),
-        Primitive::Path(p) => {
-            clip(&mut p.content_mask);
-            for vertex in &mut p.vertices {
-                if !vertex.content_mask.bounds.is_empty() {
-                    clip(&mut vertex.content_mask);
-                }
-            }
-        }
+        Primitive::Path(p) => p.clip_content_mask(mask),
         Primitive::Underline(p) => clip(&mut p.content_mask),
         Primitive::MonochromeSprite(p) => clip(&mut p.content_mask),
         Primitive::SubpixelSprite(p) => clip(&mut p.content_mask),
         Primitive::PolychromeSprite(p) => clip(&mut p.content_mask),
         Primitive::Surface(p) => clip(&mut p.content_mask),
+        Primitive::NativeView(p) => clip(&mut p.content_mask),
     }
 }
 
