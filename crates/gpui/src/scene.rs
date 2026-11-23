@@ -271,7 +271,11 @@ impl Scene {
 
     /// Pushes a primitive painted at `order` to its batch and the paint operations.
     pub(crate) fn fast_push_painted(&mut self, primitive: &Primitive, order: DrawOrder) {
-        let mut primitive = primitive.clone();
+        self.fast_push_owned(primitive.clone(), order);
+    }
+
+    /// [`Self::fast_push_painted`] for a primitive the caller owns.
+    pub(crate) fn fast_push_owned(&mut self, mut primitive: Primitive, order: DrawOrder) {
         crate::fast::scene::set_draw_order(&mut primitive, order);
         match &primitive {
             Primitive::Quad(quad) => self.quads.push(*quad),

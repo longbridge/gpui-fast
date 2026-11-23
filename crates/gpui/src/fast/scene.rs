@@ -22,6 +22,8 @@ pub(crate) struct SortScratch {
     subpixel_sprites: Vec<SubpixelSprite>,
     polychrome_sprites: Vec<PolychromeSprite>,
     surfaces: Vec<PaintSurface>,
+    /// The primitives of a layer being drawn by [`insert_flat_layer`].
+    pub(crate) layer: Vec<crate::scene::Primitive>,
 }
 
 /// The order to gather a kind of primitive in, and what working it out takes.
@@ -269,6 +271,71 @@ pub(crate) fn sort_in_drawing_order(scene: &mut Scene) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inserting_a_flat_layer_inserts_what_painting_it_did() {
+        use crate::scene::{PaintOperation, Primitive, Quad, Scene};
+        use crate::{Bounds, ContentMask, ScaledPixels, point, size};
+        let rect = |x: f32, y: f32, w: f32, h: f32| Bounds {
+            origin: point(ScaledPixels(x), ScaledPixels(y)),
+            size: size(ScaledPixels(w), ScaledPixels(h)),
+        };
+        let quad = |bounds: Bounds<ScaledPixels>, mask: Bounds<ScaledPixels>| Quad {
+            bounds,
+            content_mask: ContentMask { bounds: mask },
+            ..Default::default()
+        };
+        let all = rect(0., 0., 1000., 1000.);
+        let layer = [
+            quad(rect(10., 10., 20., 20.), all),
+            // Clipped away: left out of the layer's bounds and batches.
+            quad(rect(500., 500., 20., 20.), rect(0., 0., 1., 1.)),
+            quad(rect(20., 10., 20., 20.), all),
+        ];
+        let mut painted = Scene::default();
+        let mut inserted = Scene::default();
+        for scene in [&mut painted, &mut inserted] {
+            scene.insert_primitive(quad(rect(0., 0., 100., 100.), all));
+        }
+        painted.push_layer(rect(10., 10., 50., 20.));
+        for primitive in layer {
+            painted.insert_primitive(primitive);
+        }
+        painted.pop_layer();
+        painted.push_layer(rect(0., 0., 0., 0.));
+        painted.pop_layer();
+        let mut primitives = layer.iter().map(|quad| Primitive::Quad(*quad)).collect();
+        super::insert_flat_layer(&mut inserted, rect(10., 10., 50., 20.), &mut primitives);
+        super::insert_flat_layer(&mut inserted, rect(0., 0., 0., 0.), &mut Vec::new());
+        assert!(primitives.is_empty());
+        for scene in [&mut painted, &mut inserted] {
+            scene.insert_primitive(quad(rect(30., 15., 10., 10.), all));
+        }
+
+        let quads = |scene: &Scene| {
+            scene
+                .quads
+                .iter()
+                .map(|quad| (quad.bounds, quad.order))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(quads(&inserted), quads(&painted));
+        let operations = |scene: &Scene| {
+            scene
+                .paint_operations
+                .iter()
+                .map(|operation| match operation {
+                    PaintOperation::Primitive(Primitive::Quad(quad)) => {
+                        format!("quad {:?} {}", quad.bounds, quad.order)
+                    }
+                    PaintOperation::StartLayer(bounds) => format!("start {bounds:?}"),
+                    PaintOperation::EndLayer => "end".to_string(),
+                    _ => "other".to_string(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(operations(&inserted), operations(&painted));
+    }
+
     #[test]
     fn replaying_a_layer_in_one_pass_inserts_what_painting_it_did() {
         use crate::scene::{PaintOperation, Primitive, Quad, Scene};
@@ -704,4 +771,42 @@ pub(crate) fn replay_flat_layer(
     }
     scene.paint_operations.push(PaintOperation::EndLayer);
     Some(end + 1)
+}
+
+/// Inserts a top-level layer whose primitives (no nested layers, rounded clips
+/// or native views) were already moved into place, the way painting them
+/// between `push_layer` and `pop_layer` would: one place in the drawing order
+/// for the union of what isn't clipped away. Painting collects the layer as a
+/// pending one and copies every primitive into its batch when it pops; this
+/// pushes each straight to its batch. Leaves `primitives` empty.
+pub(crate) fn insert_flat_layer(
+    scene: &mut Scene,
+    layer_bounds: crate::Bounds<crate::ScaledPixels>,
+    primitives: &mut Vec<crate::scene::Primitive>,
+) {
+    use crate::scene::PaintOperation;
+    debug_assert!(scene.fast_top_level() && scene.fast_quad_pieces.is_none());
+    scene
+        .paint_operations
+        .push(PaintOperation::StartLayer(layer_bounds));
+    let mut union = None::<crate::Bounds<crate::ScaledPixels>>;
+    primitives.retain(|primitive| {
+        let bounds = primitive.clipped_bounds();
+        if bounds.is_empty() {
+            return false;
+        }
+        union = Some(match union {
+            Some(union) => union.join(&bounds),
+            None => bounds,
+        });
+        true
+    });
+    if let Some(union) = union {
+        let order = scene.primitive_bounds.insert(union);
+        for primitive in primitives.drain(..) {
+            scene.fast_push_owned(primitive, order);
+        }
+    }
+    primitives.clear();
+    scene.paint_operations.push(PaintOperation::EndLayer);
 }

@@ -52,7 +52,27 @@ pub(crate) fn compile(scene: &mut Scene) {
     let mut stack = vec![new_scene(trees.take(None))];
     let mut shapes = Vec::new();
     let mut redundant = Vec::new();
-    for operation in &operations {
+    // As `Scene::replay` does: a split quad's pieces are inserted together,
+    // and a flat top-level layer in one pass.
+    let mut quads = crate::fast::scene::QuadRun::default();
+    let mut next = 0;
+    while let Some(operation) = operations.get(next) {
+        next += 1;
+        if let PaintOperation::Primitive(crate::Primitive::Quad(quad)) = operation {
+            quads.push(stack.last_mut().unwrap(), *quad);
+            continue;
+        }
+        quads.flush(stack.last_mut().unwrap());
+        if let PaintOperation::StartLayer(_) = operation {
+            let target = stack.last_mut().unwrap();
+            if target.fast_top_level()
+                && let Some(len) =
+                    crate::fast::scene::replay_flat_layer(target, &operations[next - 1..])
+            {
+                next += len - 1;
+                continue;
+            }
+        }
         match operation {
             PaintOperation::FastRoundedClip(ClipOperation::Begin(shape)) => {
                 let already_active = shapes.contains(shape);
@@ -127,6 +147,7 @@ pub(crate) fn compile(scene: &mut Scene) {
             PaintOperation::EndLayer => stack.last_mut().unwrap().pop_layer(),
         }
     }
+    quads.flush(stack.last_mut().unwrap());
     assert!(
         shapes.is_empty() && stack.len() == 1,
         "balanced rounded clips"

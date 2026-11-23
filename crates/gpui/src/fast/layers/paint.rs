@@ -769,36 +769,94 @@ pub(crate) fn draw_into_frame<'a>(
     let scene = &mut window.next_frame.scene;
     // A split quad's pieces are inserted together, as they were painted.
     let mut quads = crate::fast::scene::QuadRun::default();
-    for operation in operations {
-        if let PaintOperation::Primitive(primitive @ Primitive::Quad(_)) = operation {
-            let mut primitive = translate_primitive(primitive, delta);
-            clip_primitive(&mut primitive, viewports);
-            if let Primitive::Quad(quad) = primitive {
-                quads.push(scene, quad);
+    let mut layer = mem::take(&mut scene.sort_scratch.layer);
+    let mut operations = operations.into_iter();
+    while let Some(operation) = operations.next() {
+        if let PaintOperation::StartLayer(bounds) = operation
+            && scene.fast_top_level()
+        {
+            quads.flush(scene);
+            let bounds = Bounds {
+                origin: bounds.origin + delta,
+                size: bounds.size,
+            }
+            .intersect(&viewport);
+            // A flat layer (each text line paints in one) is inserted in one
+            // pass rather than collected as a pending layer.
+            let mut read = smallvec::SmallVec::<[&PaintOperation; 32]>::new();
+            let mut flat = false;
+            for operation in operations.by_ref() {
+                match operation {
+                    PaintOperation::EndLayer => {
+                        flat = true;
+                        break;
+                    }
+                    PaintOperation::Primitive(Primitive::NativeView(_))
+                    | PaintOperation::StartLayer(_)
+                    | PaintOperation::FastRoundedClip(_) => {
+                        read.push(operation);
+                        break;
+                    }
+                    PaintOperation::Primitive(primitive) => {
+                        read.push(operation);
+                        let mut primitive = translate_primitive(primitive, delta);
+                        clip_primitive(&mut primitive, viewports);
+                        layer.push(primitive);
+                    }
+                }
+            }
+            if flat {
+                crate::fast::scene::insert_flat_layer(scene, bounds, &mut layer);
+                continue;
+            }
+            layer.clear();
+            scene.push_layer(bounds);
+            for operation in read {
+                draw_operation(scene, operation, &mut quads, delta, viewports);
             }
             continue;
         }
-        quads.flush(scene);
-        match operation {
-            PaintOperation::Primitive(primitive) => {
-                let mut primitive = translate_primitive(primitive, delta);
-                clip_primitive(&mut primitive, viewports);
-                scene.insert_primitive(primitive);
-            }
-            PaintOperation::StartLayer(bounds) => {
-                let bounds = Bounds {
-                    origin: bounds.origin + delta,
-                    size: bounds.size,
-                };
-                scene.push_layer(bounds.intersect(&viewport));
-            }
-            PaintOperation::EndLayer => scene.pop_layer(),
-            PaintOperation::FastRoundedClip(clip) => {
-                crate::fast::rounded_clip::record(scene, clip.translated(delta))
-            }
-        }
+        draw_operation(scene, operation, &mut quads, delta, viewports);
     }
     quads.flush(scene);
+    scene.sort_scratch.layer = layer;
+}
+
+/// Draws one operation for [`draw_into_frame`].
+fn draw_operation(
+    scene: &mut Scene,
+    operation: &PaintOperation,
+    quads: &mut crate::fast::scene::QuadRun,
+    delta: Point<ScaledPixels>,
+    viewports: Viewports,
+) {
+    if let PaintOperation::Primitive(primitive @ Primitive::Quad(_)) = operation {
+        let mut primitive = translate_primitive(primitive, delta);
+        clip_primitive(&mut primitive, viewports);
+        if let Primitive::Quad(quad) = primitive {
+            quads.push(scene, quad);
+        }
+        return;
+    }
+    quads.flush(scene);
+    match operation {
+        PaintOperation::Primitive(primitive) => {
+            let mut primitive = translate_primitive(primitive, delta);
+            clip_primitive(&mut primitive, viewports);
+            scene.insert_primitive(primitive);
+        }
+        PaintOperation::StartLayer(bounds) => {
+            let bounds = Bounds {
+                origin: bounds.origin + delta,
+                size: bounds.size,
+            };
+            scene.push_layer(bounds.intersect(&viewports.snapped));
+        }
+        PaintOperation::EndLayer => scene.pop_layer(),
+        PaintOperation::FastRoundedClip(clip) => {
+            crate::fast::rounded_clip::record(scene, clip.translated(delta))
+        }
+    }
 }
 
 /// Narrows every content mask `primitive` carries to `viewports`.
