@@ -18,22 +18,16 @@ use std::ptr;
 
 use anyhow::{Context as _, Result};
 use block2::RcBlock;
-use gpui::{
-    DevicePixels, LayerKey, PrimitiveBatch, Rgba, Scene, TileCoord, decode_layer_tile, size,
-};
+use gpui::{DevicePixels, LayerKey, Rgba, Scene, TileCoord, decode_layer_tile, size};
 use objc2::{Message as _, runtime::ProtocolObject};
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::CVMetalTexture;
 use objc2_foundation::NSString;
 use objc2_metal::{
-    MTLClearColor, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue,
-    MTLPixelFormat, MTLRenderCommandEncoder,
+    MTLClearColor, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue, MTLPixelFormat,
 };
 
-use crate::metal_renderer::{
-    InstanceBindings, InstanceBufferWriter, MetalRenderer, SurfaceBounds,
-    new_command_encoder_for_texture,
-};
+use crate::metal_renderer::{InstanceBufferWriter, MetalRenderer, write_instances};
 
 /// The pixel format of tiles: the drawable's and every pipeline's.
 const TILE_FORMAT: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm;
@@ -114,22 +108,6 @@ fn encode(
             continue;
         };
         let tile_scene = layer.tile_scene(tile);
-        if crate::fast::rounded_clip::has_groups(&tile_scene) {
-            crate::fast::rounded_clip::draw_tile(
-                renderer,
-                &tile_scene,
-                &mut writer,
-                &texture,
-                size(
-                    DevicePixels(layer.tile_size as i32),
-                    DevicePixels(layer.tile_size as i32),
-                ),
-                &command_buffer,
-                clear_color(layer.background),
-                &mut surface_textures,
-            )?;
-            continue;
-        }
         let bindings = match write_instances(&tile_scene, &mut writer) {
             Ok(bindings) => bindings,
             Err(error) => {
@@ -141,27 +119,16 @@ fn encode(
             DevicePixels(layer.tile_size as i32),
             DevicePixels(layer.tile_size as i32),
         );
-        let command_encoder = match new_command_encoder_for_texture(
-            &command_buffer,
-            &texture,
-            viewport_size,
-            Some(clear_color(layer.background)),
-        ) {
-            Ok(command_encoder) => command_encoder,
-            Err(error) => {
-                result = Err(error);
-                break;
-            }
-        };
-        let drawn = draw_tile_scene(
-            renderer,
+        let drawn = renderer.encode_fast_scene(
             &tile_scene,
             &bindings,
+            &mut writer,
+            &texture,
             viewport_size,
-            &command_encoder,
+            &command_buffer,
+            clear_color(layer.background),
             &mut surface_textures,
         );
-        command_encoder.endEncoding();
         if let Err(error) = drawn {
             result = Err(error);
             break;
@@ -203,80 +170,5 @@ fn encode(
         command_buffer.addCompletedHandler(RcBlock::as_ptr(&block));
     }
     command_buffer.commit();
-    Ok(())
-}
-
-/// Writes a tile scene's instance data, as upstream's `write_instances` does
-/// for a frame.
-fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<InstanceBindings> {
-    Ok(InstanceBindings {
-        quads: writer.write(&scene.quads)?,
-        shadows: writer.write(&scene.shadows)?,
-        underlines: writer.write(&scene.underlines)?,
-        monochrome_sprites: writer.write(&scene.monochrome_sprites)?,
-        polychrome_sprites: writer.write(&scene.polychrome_sprites)?,
-        surfaces: writer.write_iter(scene.surfaces.iter().map(|surface| SurfaceBounds {
-            bounds: surface.bounds,
-            content_mask: surface.content_mask,
-        }))?,
-    })
-}
-
-/// Draws a tile scene's batches with the renderer's pipelines, as upstream's
-/// `draw_primitives_to_texture` draws a frame without paths.
-fn draw_tile_scene(
-    renderer: &mut MetalRenderer,
-    scene: &Scene,
-    bindings: &InstanceBindings,
-    viewport_size: gpui::Size<DevicePixels>,
-    command_encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
-    surface_textures: &mut Vec<CFRetained<CVMetalTexture>>,
-) -> Result<()> {
-    for batch in scene.batches() {
-        match batch {
-            PrimitiveBatch::Shadows(range) => {
-                renderer.draw_shadows(range, bindings, viewport_size, command_encoder)
-            }
-            PrimitiveBatch::Quads(range) => {
-                renderer.draw_quads(range, bindings, viewport_size, command_encoder)
-            }
-            PrimitiveBatch::Underlines(range) => {
-                renderer.draw_underlines(range, bindings, viewport_size, command_encoder)
-            }
-            PrimitiveBatch::MonochromeSprites { texture_id, range } => renderer
-                .draw_monochrome_sprites(
-                    texture_id,
-                    range,
-                    bindings,
-                    viewport_size,
-                    command_encoder,
-                ),
-            PrimitiveBatch::PolychromeSprites { texture_id, range } => renderer
-                .draw_polychrome_sprites(
-                    texture_id,
-                    range,
-                    bindings,
-                    viewport_size,
-                    command_encoder,
-                ),
-            PrimitiveBatch::Surfaces(range) => renderer.draw_surfaces(
-                &scene.surfaces[range.clone()],
-                range.start,
-                bindings,
-                viewport_size,
-                command_encoder,
-                surface_textures,
-            )?,
-            // The core keeps paths out of layers: a path rasterized into a
-            // tile and moved by an odd number of pixels antialiases
-            // differently. Metal draws no subpixel sprites.
-            PrimitiveBatch::Paths(range) | PrimitiveBatch::SubpixelSprites { range, .. } => {
-                debug_assert!(
-                    range.is_empty(),
-                    "a layer tile holds a path or subpixel sprite"
-                );
-            }
-        }
-    }
     Ok(())
 }

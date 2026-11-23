@@ -12,10 +12,11 @@ use std::sync::Arc;
 
 use gpui::{
     AtlasKey, AtlasTile, Bounds, ContentMask, Corners, DevicePixels, Edges, FontId, GlyphId, Hsla,
-    ImageId, LayerFrame, LayerKey, MonochromeSprite, Path, PlatformAtlas, PolychromeSprite, Quad,
-    RenderGlyphParams, RenderImageParams, Rgba, ScaledPixels, Scene, SceneLayers, Shadow, Size,
-    TileCoord, TransformationMatrix, Underline, decode_layer_tile, layer_tile_id,
-    layer_tile_texture_id, linear_color_stop, linear_gradient, point, px, rgba, size,
+    ImageId, LayerFrame, LayerKey, MonochromeSprite, PaintedPath, PathBuilder, PlatformAtlas,
+    PolychromeSprite, Quad, RenderGlyphParams, RenderImageParams, Rgba, ScaledPixels, Scene,
+    SceneLayers, Shadow, Size, TileCoord, TransformationMatrix, Underline, decode_layer_tile,
+    layer_tile_id, layer_tile_texture_id, linear_color_stop, linear_gradient, point, px, rgba,
+    size,
 };
 use objc2_metal::{MTLCommandBuffer as _, MTLDevice as _};
 use parking_lot::Mutex;
@@ -94,10 +95,6 @@ fn rounded_overflow_mask_cost(cx: &mut gpui::TestAppContext) {
                     .device
                     .newTextureWithDescriptor(&descriptor)
                     .expect("timing target texture");
-                harness
-                    .renderer
-                    .update_path_intermediate_textures(extent)
-                    .expect("path textures");
                 let mut samples = Vec::new();
                 for frame in 0..18 {
                     objc2::rc::autoreleasepool(|_| {
@@ -191,8 +188,41 @@ fn a_composited_layer_equals_direct_drawing() {
     );
 }
 
-/// A path the frame draws over a layer, outside it, as the core draws paths
-/// that nothing covers: the frame then takes `fast::paths`'s encoding.
+/// A path crossing the tile boundary is binned into both tile render passes.
+#[test]
+fn a_path_inside_two_tiles_matches_direct_drawing() {
+    let Some(mut harness) = Harness::new() else {
+        return;
+    };
+    let window = Window {
+        size: device_size(1024, 512),
+        viewport: sp(0., 0., 1024., 512.),
+    };
+    let tiles = [coord(0, 0), coord(1, 0)];
+    let mut direct = Scene::default();
+    direct.insert_primitive(panel(&window));
+    add_path(&mut direct);
+    direct.insert_primitive(scrollbar());
+    direct.finish();
+    let expected = harness.render(&direct, window.size);
+
+    let mut content = Scene::default();
+    add_path(&mut content);
+    content.finish();
+    let layer = layer_frame(LayerKey(5), 1, content, &tiles);
+    let scene = composited(&window, layer, &tiles, (0., 0.), false);
+    let actual = harness.render(&scene, window.size);
+    assert_eq!(actual.len(), expected.len());
+    for (index, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
+        // Translating curves into tile space can round edge coverage by one level.
+        assert!(
+            actual.abs_diff(expected) <= 1,
+            "byte {index}: {actual} vs {expected}"
+        );
+    }
+}
+
+/// A path drawn directly over the composited layer.
 #[test]
 fn a_path_over_a_composited_layer_equals_direct_drawing() {
     let Some(mut harness) = Harness::new() else {
@@ -712,9 +742,9 @@ fn add_content(
         corner_radii: Corners::all(ScaledPixels(6.)),
         content_mask: mask(clip),
         color: Hsla::from(rgba(0x00000080)),
-        element_bounds: at(380., 420., 120., 70.),
-        element_corner_radii: Corners::all(ScaledPixels(6.)),
-        inset: 0,
+        shape_bounds: at(380., 420., 120., 70.),
+        shape_corner_radii: Corners::all(ScaledPixels(6.)),
+        inset: false.into(),
         pad: 0,
     });
     scene.insert_primitive(Quad {
@@ -757,7 +787,7 @@ fn add_content(
     let mono = glyph_tile(harness, 1);
     scene.insert_primitive(MonochromeSprite {
         order: 0,
-        pad: 0,
+        animation: Default::default(),
         bounds: at(505., 700., 16., 16.),
         content_mask: mask(clip),
         color: Hsla::from(rgba(0xffffffff)),
@@ -778,15 +808,19 @@ fn add_content(
 
 /// A path of lines and a curve over the viewport's edge, in window space.
 fn add_path(scene: &mut Scene) {
-    let mut path = Path::new(point(px(480.), px(300.)));
+    let mut path = PathBuilder::fill();
+    path.move_to(point(px(480.), px(300.)));
     path.line_to(point(px(660.5), px(330.)));
     path.curve_to(point(px(500.), px(460.)), point(px(600.), px(450.)));
     path.line_to(point(px(480.), px(300.)));
-    path.content_mask = ContentMask {
-        bounds: no_mask().bounds.map(|c| px(c.0)),
-    };
-    path.color = Hsla::from(rgba(0x8800ffcc)).into();
-    scene.insert_primitive(path.scale(1.));
+    scene.insert_primitive(PaintedPath::new(
+        path.build().expect("path"),
+        1.,
+        ContentMask {
+            bounds: no_mask().bounds.map(|c| px(c.0)),
+        },
+        Hsla::from(rgba(0x8800ffcc)).into(),
+    ));
 }
 
 /// What GPUI Kit draws for a table's rounded frame: paths filling corner
@@ -805,15 +839,19 @@ fn add_covered_paths(
         (200., 410.25, 1., -1.),
     ] {
         let corner = point(px(x + ox), px(y + oy));
-        let mut path = Path::new(corner);
+        let mut path = PathBuilder::fill();
+        path.move_to(corner);
         path.line_to(corner + point(px(9. * dx), px(0.)));
         path.curve_to(corner + point(px(0.), px(9. * dy)), corner);
         path.line_to(corner);
-        path.content_mask = ContentMask {
-            bounds: clip.map(|c| px(c.0)),
-        };
-        path.color = Hsla::from(rgba(0x3366ccff)).into();
-        scene.insert_primitive(path.scale(1.));
+        scene.insert_primitive(PaintedPath::new(
+            path.build().expect("path"),
+            1.,
+            ContentMask {
+                bounds: clip.map(|c| px(c.0)),
+            },
+            Hsla::from(rgba(0x3366ccff)).into(),
+        ));
     }
     scene.insert_primitive(Quad {
         bounds: sp(200. + ox, 330. + oy, 130.5, 80.25),
@@ -826,25 +864,29 @@ fn add_covered_paths(
     });
     scene.insert_primitive(MonochromeSprite {
         order: 0,
-        pad: 0,
+        animation: Default::default(),
         bounds: sp(204. + ox, 334. + oy, 16., 16.),
         content_mask: mask,
         color: Hsla::from(rgba(0xff8800ff)),
         tile: glyph_tile(harness, 1),
         transformation: TransformationMatrix::unit(),
     });
-    let mut path = Path::new(point(px(250. + ox), px(360. + oy)));
+    let mut path = PathBuilder::fill();
+    path.move_to(point(px(250. + ox), px(360. + oy)));
     path.line_to(point(px(290.5 + ox), px(372. + oy)));
     path.curve_to(
         point(px(255. + ox), px(400. + oy)),
         point(px(300. + ox), px(395. + oy)),
     );
     path.line_to(point(px(250. + ox), px(360. + oy)));
-    path.content_mask = ContentMask {
-        bounds: clip.map(|c| px(c.0)),
-    };
-    path.color = Hsla::from(rgba(0x8800ffcc)).into();
-    scene.insert_primitive(path.scale(1.));
+    scene.insert_primitive(PaintedPath::new(
+        path.build().expect("path"),
+        1.,
+        ContentMask {
+            bounds: clip.map(|c| px(c.0)),
+        },
+        Hsla::from(rgba(0x8800ffcc)).into(),
+    ));
 }
 
 /// A 16×16 monochrome glyph of a made-up font, uploaded to the renderer's

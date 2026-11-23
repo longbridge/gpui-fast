@@ -11,6 +11,7 @@ pub fn source(source: &str) -> String {
         "polychrome_sprite_fragment",
         "path_tile_fragment",
         "surface_fragment",
+        "native_view_fragment",
     ] {
         let start = source
             .find(&format!("fragment float4 {name}("))
@@ -76,6 +77,7 @@ float4 fast_rounded_clip_color(float4 color, float2 position, constant FastRound
     source
 }
 
+#[cfg(not(feature = "runtime_shaders"))]
 pub fn stage(input: impl AsRef<std::path::Path>, output: impl AsRef<std::path::Path>) {
     std::fs::write(output, source(&std::fs::read_to_string(input).unwrap())).unwrap();
 }

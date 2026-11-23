@@ -1,3 +1,5 @@
+#[path = "fast/frame.rs"]
+mod fast_frame;
 use crate::metal_atlas::MetalAtlas;
 use anyhow::{Context as _, Result};
 use block2::RcBlock;
@@ -71,7 +73,7 @@ impl Default for InstanceBufferPool {
     }
 }
 
-struct InstanceBuffer {
+pub(crate) struct InstanceBuffer {
     metal_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
     size: usize,
 }
@@ -110,7 +112,7 @@ impl InstanceBufferPool {
         })
     }
 
-    fn release(&mut self, buffer: InstanceBuffer) {
+    pub(crate) fn release(&mut self, buffer: InstanceBuffer) {
         if buffer.size == self.buffer_size {
             self.buffers.push(buffer)
         }
@@ -128,27 +130,30 @@ pub struct MetalRenderer {
     pub(crate) device: Retained<ProtocolObject<dyn MTLDevice>>,
     pub(crate) layer: Option<Retained<CAMetalLayer>>,
     is_apple_gpu: bool,
-    is_unified_memory: bool,
+    pub(crate) is_unified_memory: bool,
     presents_with_transaction: bool,
     display_link_mode: DisplayLinkMode,
     /// For headless rendering, tracks whether output should be opaque
     opaque: bool,
     /// Whether the last scene drawn to the layer let native views show through it.
     shows_native_views: bool,
-    command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    pub(crate) fast_layers: crate::fast::layers::TileCache,
+    pub(crate) command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     path_tiles_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     shadows_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     quads_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     opaque_quads_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     underlines_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     monochrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
-    polychrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    // Shared with fast::layers when drawing sprites backed by tile textures.
+    pub(crate) polychrome_sprites_pipeline_state:
+        Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     surfaces_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     native_views_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     depth_write_state: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     depth_test_state: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     depth_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
-    instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
+    pub(crate) instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
     pub(crate) sprite_atlas: Arc<MetalAtlas>,
     core_video_texture_cache: CFRetained<CVMetalTextureCache>,
     /// Offscreen render target reused across `render_scene` calls when
@@ -361,7 +366,6 @@ impl MetalRenderer {
             MTLPixelFormat::BGRA8Unorm,
             true,
         )?;
-        // Blending is off so that the transparent output replaces what was drawn beneath it.
         let native_views_pipeline_state = build_pipeline_state(
             &device,
             &library,
@@ -369,19 +373,20 @@ impl MetalRenderer {
             "native_view_vertex",
             "native_view_fragment",
             MTLPixelFormat::BGRA8Unorm,
-            false,
+            true, // fast rounded clips blend partially covered native-view holes.
         )?;
 
         let depth_write_state = build_depth_stencil_state(&device, true)?;
         let depth_test_state = build_depth_stencil_state(&device, false)?;
 
-        let command_queue = device.newCommandQueue().context("creating command queue")?;
+        let command_queue = crate::fast::dynamic_textures::command_queue(&device)?;
         let supports_shared_storage = cfg!(target_os = "ios") || is_apple_gpu;
         #[expect(
             clippy::arc_with_non_send_sync,
             reason = "PlatformWindow::sprite_atlas requires Arc, not Send or Sync"
         )]
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), supports_shared_storage));
+        crate::fast::dynamic_textures::init(device.clone(), supports_shared_storage);
         let mut cache = ptr::null_mut();
         // SAFETY: The output pointer is writable and both optional attribute dictionaries are absent.
         let status = unsafe {
@@ -404,6 +409,7 @@ impl MetalRenderer {
             is_unified_memory,
             opaque,
             shows_native_views: false,
+            fast_layers: Default::default(),
             command_queue,
             path_tiles_pipeline_state,
             shadows_pipeline_state,
@@ -496,6 +502,7 @@ impl MetalRenderer {
     }
 
     pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
+        crate::fast::layers::TileCache::clear(&mut self.fast_layers);
         if let Some(layer) = &self.layer {
             layer.setDrawableSize(CGSize::new(size.width.0 as f64, size.height.0 as f64));
         }
@@ -574,12 +581,13 @@ impl MetalRenderer {
         }
     }
 
-    fn render_frame(
+    pub(crate) fn render_frame(
         &mut self,
         scene: &Scene,
         texture: &ProtocolObject<dyn MTLTexture>,
         viewport_size: Size<DevicePixels>,
     ) -> Result<Retained<ProtocolObject<dyn MTLCommandBuffer>>> {
+        crate::fast::layers::raster::rasterize_tiles(self, scene);
         let mut writer = InstanceBufferWriter::new(
             &self.device,
             &self.instance_buffer_pool,
@@ -598,9 +606,10 @@ impl MetalRenderer {
             )
         })?;
         let mut surface_textures = Vec::new();
-        let command_buffer = self.draw_primitives_to_texture(
+        let command_buffer = self.fast_frame(
             scene,
             &instance_bindings,
+            &mut writer, // fast child scenes append their own instance bindings.
             texture,
             viewport_size,
             &mut surface_textures,
@@ -772,6 +781,7 @@ impl MetalRenderer {
         let command_buffer = command_queue
             .commandBuffer()
             .context("creating command buffer")?;
+        crate::fast::dynamic_textures::encode_uploads(&command_buffer);
         let alpha = if self.opaque { 1. } else { 0. };
         let depth_texture = self.depth_texture_matching(texture)?;
 
@@ -787,6 +797,7 @@ impl MetalRenderer {
                 alpha,
             },
         )?;
+        crate::fast::rounded_clip::default_mask(&command_encoder);
         let depth_scale = quad_depth_scale(scene.quads.len());
         // SAFETY: Metal copies both values, which match every vertex shader's
         // `GlobalInputIndex_ViewportSize` and `GlobalInputIndex_DepthScale` arguments.
@@ -1147,7 +1158,9 @@ impl MetalRenderer {
             return;
         }
 
-        let Some(texture) = self.sprite_atlas.metal_texture(texture_id) else {
+        let Some(texture) = crate::fast::dynamic_textures::metal_texture(&self.device, texture_id)
+            .or_else(|| self.sprite_atlas.metal_texture(texture_id))
+        else {
             return;
         };
         let texture_size = size(
@@ -1198,7 +1211,18 @@ impl MetalRenderer {
             return;
         }
 
-        let Some(texture) = self.sprite_atlas.metal_texture(texture_id) else {
+        if crate::fast::layers::composite::draw_tiles(
+            self,
+            texture_id,
+            &sprites,
+            instance_bindings,
+            command_encoder,
+        ) {
+            return;
+        }
+        let Some(texture) = crate::fast::dynamic_textures::metal_texture(&self.device, texture_id)
+            .or_else(|| self.sprite_atlas.metal_texture(texture_id))
+        else {
             return;
         };
         let texture_size = size(
@@ -1444,6 +1468,11 @@ fn build_pipeline_state(
     color_attachment.setSourceAlphaBlendFactor(MTLBlendFactor::One);
     color_attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
     color_attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+    if label == "native_views" {
+        // The fast fragment emits hole coverage for destination-out blending.
+        color_attachment.setSourceRGBBlendFactor(MTLBlendFactor::Zero);
+        color_attachment.setSourceAlphaBlendFactor(MTLBlendFactor::Zero);
+    }
     descriptor.setDepthAttachmentPixelFormat(MTLPixelFormat::Depth32Float);
 
     device
@@ -1464,12 +1493,12 @@ fn build_depth_stencil_state(
 }
 
 #[derive(Clone)]
-struct InstanceBinding {
-    buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
-    offset: usize,
+pub(crate) struct InstanceBinding {
+    pub(crate) buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    pub(crate) offset: usize,
 }
 
-struct InstanceBindings {
+pub(crate) struct InstanceBindings {
     quads: InstanceBinding,
     path_tiles: InstanceBinding,
     path_curves: InstanceBinding,
@@ -1477,12 +1506,16 @@ struct InstanceBindings {
     shadows: InstanceBinding,
     underlines: InstanceBinding,
     monochrome_sprites: InstanceBinding,
-    polychrome_sprites: InstanceBinding,
+    pub(crate) polychrome_sprites: InstanceBinding,
     surfaces: InstanceBinding,
     native_views: InstanceBinding,
 }
 
-fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<InstanceBindings> {
+// Shared by fast layer tiles and clipped child scenes.
+pub(crate) fn write_instances(
+    scene: &Scene,
+    writer: &mut InstanceBufferWriter,
+) -> Result<InstanceBindings> {
     let mut path_paints = Vec::with_capacity(scene.paths.len());
     let mut path_curves = Vec::new();
     let mut path_tiles = Vec::new();
@@ -1511,7 +1544,7 @@ fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<I
     })
 }
 
-struct InstanceBufferWriter {
+pub(crate) struct InstanceBufferWriter {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     pool: Arc<Mutex<InstanceBufferPool>>,
     unified_memory: bool,
@@ -1521,7 +1554,7 @@ struct InstanceBufferWriter {
 }
 
 impl InstanceBufferWriter {
-    fn new(
+    pub(crate) fn new(
         device: &ProtocolObject<dyn MTLDevice>,
         pool: &Arc<Mutex<InstanceBufferPool>>,
         unified_memory: bool,
@@ -1614,7 +1647,7 @@ impl InstanceBufferWriter {
         Ok(())
     }
 
-    fn finish(self) -> InstanceBuffer {
+    pub(crate) fn finish(self) -> InstanceBuffer {
         let Self {
             unified_memory,
             filled,
@@ -1673,7 +1706,8 @@ enum UnderlineInputIndex {
 }
 
 #[repr(C)]
-enum SpriteInputIndex {
+// Shared by atlas sprites and fast layer tile sprites.
+pub(crate) enum SpriteInputIndex {
     Sprites = 2,
     AtlasTextureSize = 3,
     AtlasTexture = 4,

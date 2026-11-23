@@ -83,7 +83,8 @@ vertex QuadFragmentInput quad_vertex(
     [[buffer(GlobalInputIndex_ViewportSize)]],
     constant float *depth_scale [[buffer(GlobalInputIndex_DepthScale)]]) {
   Quad quad = quads[quad_id];
-  if (is_opaque_rectangle(quad)) {
+  // A fast rounded-clip child draws opaque quads in its masked color pass.
+  if (*depth_scale != 0.0 && is_opaque_rectangle(quad)) {
     QuadFragmentInput culled = {};
     culled.position = CULLED_POSITION;
     return culled;
@@ -985,9 +986,9 @@ vertex NativeViewVertexOutput native_view_vertex(
       to_device_position_impl(clipped.position, viewport_size)};
 }
 
-// The pipeline does not blend, so this erases what was drawn beneath the view.
+// The fast destination-out pipeline erases covered pixels beneath the view.
 fragment float4 native_view_fragment(NativeViewVertexOutput input [[stage_in]]) {
-  return float4(0.);
+  return float4(0., 0., 0., 1.);
 }
 
 float4 hsla_to_rgba(Hsla hsla) {
