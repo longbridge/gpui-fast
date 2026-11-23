@@ -269,6 +269,66 @@ pub(crate) fn sort_in_drawing_order(scene: &mut Scene) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn replaying_a_layer_in_one_pass_inserts_what_painting_it_did() {
+        use crate::scene::{PaintOperation, Primitive, Quad, Scene};
+        use crate::{Bounds, ContentMask, ScaledPixels, point, size};
+        let rect = |x: f32, y: f32, w: f32, h: f32| Bounds {
+            origin: point(ScaledPixels(x), ScaledPixels(y)),
+            size: size(ScaledPixels(w), ScaledPixels(h)),
+        };
+        let quad = |bounds: Bounds<ScaledPixels>, mask: Bounds<ScaledPixels>| Quad {
+            bounds,
+            content_mask: ContentMask { bounds: mask },
+            ..Default::default()
+        };
+        let all = rect(0., 0., 1000., 1000.);
+        let mut painted = Scene::default();
+        painted.insert_primitive(quad(rect(0., 0., 100., 100.), all));
+        painted.push_layer(rect(10., 10., 50., 20.));
+        painted.insert_primitive(quad(rect(10., 10., 20., 20.), all));
+        painted.insert_primitive(quad(rect(20., 10., 20., 20.), all));
+        // Clipped away: left out of the layer's bounds and batches.
+        painted.insert_primitive(quad(rect(500., 500., 20., 20.), rect(0., 0., 1., 1.)));
+        painted.insert_primitive(quad(rect(40., 10., 20., 20.), all));
+        painted.pop_layer();
+        painted.push_layer(rect(0., 0., 0., 0.));
+        painted.pop_layer();
+        painted.insert_primitive(quad(rect(30., 15., 10., 10.), all));
+        painted.push_layer(rect(0., 0., 300., 300.));
+        painted.push_layer(rect(0., 0., 300., 300.)); // nested: the general path
+        painted.insert_primitive(quad(rect(25., 25., 200., 200.), all));
+        painted.pop_layer();
+        painted.pop_layer();
+
+        let mut replayed = Scene::default();
+        replayed.replay(0..painted.len(), &painted);
+
+        let quads = |scene: &Scene| {
+            scene
+                .quads
+                .iter()
+                .map(|quad| (quad.bounds, quad.order))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(quads(&replayed), quads(&painted));
+        let operations = |scene: &Scene| {
+            scene
+                .paint_operations
+                .iter()
+                .map(|operation| match operation {
+                    PaintOperation::Primitive(Primitive::Quad(quad)) => {
+                        format!("quad {:?} {}", quad.bounds, quad.order)
+                    }
+                    PaintOperation::StartLayer(bounds) => format!("start {bounds:?}"),
+                    PaintOperation::EndLayer => "end".to_string(),
+                    _ => "other".to_string(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(operations(&replayed), operations(&painted));
+    }
+
     use super::{MAX_ORDERS_PER_PRIMITIVE, Permutation, sort_by_draw_order, sort_sprites};
     use crate::DrawOrder;
     use rand::{Rng as _, SeedableRng as _, rngs::StdRng};
@@ -522,13 +582,15 @@ pub(crate) fn insert_quad_pieces(scene: &mut Scene, pieces: &[Quad]) {
     insert_bounded_pieces(scene, &pieces);
 }
 
+/// A quad's bounds clipped to its content mask (quads have no transformation),
+/// without building a `Primitive` around it.
+#[inline]
 fn quad_clipped_bounds(quad: &Quad) -> crate::Bounds<crate::ScaledPixels> {
-    crate::scene::Primitive::Quad(*quad).clipped_bounds()
+    quad.bounds.intersect(&quad.content_mask.bounds)
 }
 
 /// [`insert_quad_pieces`] with each piece's clipped bounds worked out once.
 fn insert_bounded_pieces(scene: &mut Scene, pieces: &[(Quad, crate::Bounds<crate::ScaledPixels>)]) {
-    use crate::scene::{PaintOperation, Primitive};
     if pieces.len() < 2 || !scene.fast_top_level() {
         for (piece, _) in pieces {
             scene.insert_primitive(*piece);
@@ -552,12 +614,7 @@ fn insert_bounded_pieces(scene: &mut Scene, pieces: &[(Quad, crate::Bounds<crate
         if bounds.is_empty() {
             continue;
         }
-        let mut primitive = Primitive::Quad(*piece);
-        set_draw_order(&mut primitive, order);
-        scene.fast_push_primitive(primitive.clone(), order);
-        scene
-            .paint_operations
-            .push(PaintOperation::Primitive(primitive));
+        scene.fast_push_quad(*piece, order);
     }
 }
 
@@ -590,4 +647,61 @@ impl QuadRun {
             self.pieces.clear();
         }
     }
+}
+
+/// Replays a top-level layer of the previous scene (`operations` starts at its
+/// `StartLayer`) the way painting it would insert it: one place in the drawing
+/// order for the union of what it painted, in one pass instead of collecting
+/// it as a pending layer. Gives up (`None`) on nested layers, rounded clips and
+/// native views, which the general path handles; otherwise returns how many
+/// operations it replayed.
+pub(crate) fn replay_flat_layer(
+    scene: &mut Scene,
+    operations: &[crate::scene::PaintOperation],
+) -> Option<usize> {
+    use crate::scene::{PaintOperation, Primitive};
+    let PaintOperation::StartLayer(layer_bounds) = operations.first()? else {
+        return None;
+    };
+    let mut union = None::<crate::Bounds<crate::ScaledPixels>>;
+    let mut end = None;
+    // What painting clipped away, which is rare.
+    let mut clipped_away = smallvec::SmallVec::<[usize; 4]>::new();
+    for (index, operation) in operations.iter().enumerate().skip(1) {
+        match operation {
+            PaintOperation::Primitive(Primitive::NativeView(_)) => return None,
+            PaintOperation::Primitive(primitive) => {
+                let bounds = primitive.clipped_bounds();
+                if bounds.is_empty() {
+                    clipped_away.push(index);
+                } else {
+                    union = Some(match union {
+                        Some(union) => union.join(&bounds),
+                        None => bounds,
+                    });
+                }
+            }
+            PaintOperation::EndLayer => {
+                end = Some(index);
+                break;
+            }
+            PaintOperation::StartLayer(_) | PaintOperation::FastRoundedClip(_) => return None,
+        }
+    }
+    let end = end?;
+    scene
+        .paint_operations
+        .push(PaintOperation::StartLayer(*layer_bounds));
+    if let Some(union) = union {
+        let order = scene.primitive_bounds.insert(union);
+        for (index, operation) in operations[..end].iter().enumerate().skip(1) {
+            if let PaintOperation::Primitive(primitive) = operation
+                && !clipped_away.contains(&index)
+            {
+                scene.fast_push_painted(primitive, order);
+            }
+        }
+    }
+    scene.paint_operations.push(PaintOperation::EndLayer);
+    Some(end + 1)
 }

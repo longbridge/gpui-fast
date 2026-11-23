@@ -269,8 +269,26 @@ impl Scene {
         self.layer_stack.is_empty()
     }
 
-    pub(crate) fn fast_push_primitive(&mut self, primitive: Primitive, order: DrawOrder) {
-        self.push_primitive(primitive, order)
+    /// Pushes a primitive painted at `order` to its batch and the paint operations.
+    pub(crate) fn fast_push_painted(&mut self, primitive: &Primitive, order: DrawOrder) {
+        let mut primitive = primitive.clone();
+        crate::fast::scene::set_draw_order(&mut primitive, order);
+        match &primitive {
+            Primitive::Quad(quad) => self.quads.push(*quad),
+            Primitive::MonochromeSprite(sprite) => self.monochrome_sprites.push(*sprite),
+            Primitive::SubpixelSprite(sprite) => self.subpixel_sprites.push(*sprite),
+            Primitive::PolychromeSprite(sprite) => self.polychrome_sprites.push(*sprite),
+            _ => self.push_primitive(primitive.clone(), order),
+        }
+        self.paint_operations
+            .push(PaintOperation::Primitive(primitive));
+    }
+
+    pub(crate) fn fast_push_quad(&mut self, quad: Quad, order: DrawOrder) {
+        let quad = Quad { order, ..quad };
+        self.quads.push(quad);
+        self.paint_operations
+            .push(PaintOperation::Primitive(Primitive::Quad(quad)));
     }
 
     fn push_primitive(&mut self, primitive: Primitive, order: DrawOrder) {
@@ -307,7 +325,22 @@ impl Scene {
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
         crate::fast::layers::paint::replay_layers(self, range.clone(), prev_scene);
         let mut quads = crate::fast::scene::QuadRun::default(); // fast: split quads insert together
-        for operation in &prev_scene.paint_operations[range] {
+        let operations = &prev_scene.paint_operations[range]; // fast
+        let mut next = 0; // fast
+        while let Some(operation) = operations.get(next) {
+            next += 1; // fast
+            if let PaintOperation::StartLayer(_) = operation
+                && self.layer_stack.is_empty()
+                && prev_scene.animations.is_empty()
+            {
+                quads.flush(self); // fast: a layer replayed in one pass
+                if let Some(len) =
+                    crate::fast::scene::replay_flat_layer(self, &operations[next - 1..])
+                {
+                    next += len - 1;
+                    continue;
+                }
+            }
             if let PaintOperation::Primitive(Primitive::Quad(quad)) = operation {
                 quads.push(self, *quad); // fast
                 continue;
@@ -522,8 +555,8 @@ impl Primitive {
         }
     }
 
+    #[inline] // fast: also read by fast::scene
     pub(crate) fn clipped_bounds(&self) -> Bounds<ScaledPixels> {
-        // fast: read by fast::scene
         self.transformation()
             .transform_bounds(*self.bounds())
             .intersect(&self.content_mask().bounds)
