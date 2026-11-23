@@ -364,3 +364,6 @@ fn translate_transformation(matrix: &mut TransformationMatrix, delta: Point<Scal
     matrix.translation[0] += dx - (r[0][0] * dx + r[0][1] * dy);
     matrix.translation[1] += dy - (r[1][0] * dx + r[1][1] * dy);
 }
+
+/// Exported with the layer types (`gpui::painted_path_key`).
+pub use crate::fast::scene::painted_path_key;

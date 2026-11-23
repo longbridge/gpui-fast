@@ -14,10 +14,11 @@ use std::slice;
 use anyhow::{Context as _, Result};
 use gpui::{
     AtlasKey, AtlasTile, Bounds, ContentMask, Corners, DevicePixels, Edges, FontId, GlyphId, Hsla,
-    ImageId, LayerFrame, LayerKey, MonochromeSprite, Path, PlatformAtlas, PolychromeSprite, Quad,
-    RenderGlyphParams, RenderImageParams, Rgba, ScaledPixels, Scene, SceneLayers, Shadow, Size,
-    SubpixelSprite, TileCoord, TransformationMatrix, Underline, layer_tile_id,
-    layer_tile_texture_id, linear_color_stop, linear_gradient, point, px, rgba, size,
+    ImageId, LayerFrame, LayerKey, MonochromeSprite, PaintedPath, PathBuilder, PlatformAtlas,
+    PolychromeSprite, Quad, RenderGlyphParams, RenderImageParams, Rgba, ScaledPixels, Scene,
+    SceneLayers, Shadow, Size, SubpixelSprite, TileCoord, TransformationMatrix, Underline,
+    layer_tile_id, layer_tile_texture_id, linear_color_stop, linear_gradient, point, px, rgba,
+    size,
 };
 use windows::Win32::{
     Foundation::HMODULE,
@@ -40,9 +41,8 @@ use windows::Win32::{
 use crate::DirectXAtlas;
 use crate::directx_renderer::{
     DirectXGlobalElements, DirectXRenderPipelines, RENDER_TARGET_FORMAT,
-    create_path_intermediate_msaa_texture_and_view, create_path_intermediate_texture,
 };
-use crate::fast::frame::{FrameState, PathTargets, Target, draw_scene, upload};
+use crate::fast::frame::{FrameState, Target, draw_scene, upload};
 use crate::fast::layers::TileCache;
 use crate::fast::layers::raster::{clear_color, rasterize};
 use crate::fast::layers::tile_cache::create_globals;
@@ -559,9 +559,9 @@ fn add_content(
         corner_radii: Corners::all(ScaledPixels(6.)),
         content_mask: mask(clip),
         color: Hsla::from(rgba(0x00000080)),
-        element_bounds: at(380., 420., 120., 70.),
-        element_corner_radii: Corners::all(ScaledPixels(6.)),
-        inset: 0,
+        shape_bounds: at(380., 420., 120., 70.),
+        shape_corner_radii: Corners::all(ScaledPixels(6.)),
+        inset: false.into(),
         pad: 0,
     });
     scene.insert_primitive(Quad {
@@ -605,7 +605,7 @@ fn add_content(
     let mono = glyph_tile(harness, 1, false);
     scene.insert_primitive(MonochromeSprite {
         order: 0,
-        pad: 0,
+        animation: Default::default(),
         bounds: at(505., 700., 16., 16.),
         content_mask: mask(clip),
         color: Hsla::from(rgba(0xffffffff)),
@@ -650,15 +650,19 @@ fn add_covered_paths(
         (200., 410.25, 1., -1.),
     ] {
         let corner = point(px(x + ox), px(y + oy));
-        let mut path = Path::new(corner);
+        let mut path = PathBuilder::fill();
+        path.move_to(corner);
         path.line_to(corner + point(px(9. * dx), px(0.)));
         path.curve_to(corner + point(px(0.), px(9. * dy)), corner);
         path.line_to(corner);
-        path.content_mask = ContentMask {
-            bounds: clip.map(|c| px(c.0)),
-        };
-        path.color = Hsla::from(rgba(0x3366ccff)).into();
-        scene.insert_primitive(path.scale(1.));
+        scene.insert_primitive(PaintedPath::new(
+            path.build().expect("path"),
+            1.,
+            ContentMask {
+                bounds: clip.map(|c| px(c.0)),
+            },
+            Hsla::from(rgba(0x3366ccff)).into(),
+        ));
     }
     scene.insert_primitive(Quad {
         bounds: sp(200. + ox, 330. + oy, 130.5, 80.25),
@@ -671,25 +675,29 @@ fn add_covered_paths(
     });
     scene.insert_primitive(MonochromeSprite {
         order: 0,
-        pad: 0,
+        animation: Default::default(),
         bounds: sp(204. + ox, 334. + oy, 16., 16.),
         content_mask: mask,
         color: Hsla::from(rgba(0xff8800ff)),
         tile: glyph_tile(harness, 1, false),
         transformation: TransformationMatrix::unit(),
     });
-    let mut path = Path::new(point(px(250. + ox), px(360. + oy)));
+    let mut path = PathBuilder::fill();
+    path.move_to(point(px(250. + ox), px(360. + oy)));
     path.line_to(point(px(290.5 + ox), px(372. + oy)));
     path.curve_to(
         point(px(255. + ox), px(400. + oy)),
         point(px(300. + ox), px(395. + oy)),
     );
     path.line_to(point(px(250. + ox), px(360. + oy)));
-    path.content_mask = ContentMask {
-        bounds: clip.map(|c| px(c.0)),
-    };
-    path.color = Hsla::from(rgba(0x8800ffcc)).into();
-    scene.insert_primitive(path.scale(1.));
+    scene.insert_primitive(PaintedPath::new(
+        path.build().expect("path"),
+        1.,
+        ContentMask {
+            bounds: clip.map(|c| px(c.0)),
+        },
+        Hsla::from(rgba(0x8800ffcc)).into(),
+    ));
 }
 
 /// A 16×16 glyph of a made-up font, uploaded to the harness's atlas: a
@@ -842,7 +850,7 @@ impl Harness {
                 device_context: &self.context,
                 atlas: &self.atlas,
                 globals: &self.globals,
-                paths: None,
+                depth_scale: None,
             };
             rasterize(&tiles, &mut self.pipelines, &mut self.frame, scene)?;
         }
@@ -854,23 +862,12 @@ impl Harness {
             self.device
                 .CreateRenderTargetView(&texture, None, Some(&mut render_target))?
         };
-        // The window's path textures, as `DirectXResources::new` makes them.
-        let (intermediate_texture, intermediate_srv) =
-            create_path_intermediate_texture(&self.device, width, height)?;
-        let (msaa_texture, msaa_view) =
-            create_path_intermediate_msaa_texture_and_view(&self.device, width, height)?;
         let target = Target {
             device: &self.device,
             device_context: &self.context,
             atlas: &self.atlas,
             globals: &self.globals,
-            paths: Some(PathTargets {
-                render_target_view: &render_target,
-                intermediate_texture: &intermediate_texture,
-                intermediate_srv: &intermediate_srv,
-                msaa_texture: &msaa_texture,
-                msaa_view: &msaa_view,
-            }),
+            depth_scale: None,
         };
         let globals = create_globals(&self.device, width, height)?;
         // What `DirectXRenderer::pre_draw` binds.
@@ -1094,7 +1091,7 @@ fn composition_whole_scene_matches_replayed_surface_pixels(cx: &mut gpui::TestAp
 // --- Overdraw culling (`fast::occlusion`) --- //
 
 /// Draws `scene` with culling off and on and checks that culling changed no
-/// byte; returns whether culling hid or cut anything.
+/// byte; returns whether culling hid anything.
 fn culling_keeps_pixels(harness: &mut Harness, scene: &Scene) -> bool {
     let size = device_size(1024, 1024);
     harness.frame.skip_occlusion = true;
@@ -1105,10 +1102,7 @@ fn culling_keeps_pixels(harness: &mut Harness, scene: &Scene) -> bool {
     let occlusion = crate::fast::occlusion::Occlusion::of(scene, |sprite| {
         harness.atlas.is_opaque(&sprite.tile)
     });
-    scene
-        .quads
-        .iter()
-        .any(|q| occlusion.hides_quad(q) || occlusion.pieces(q).is_some())
+    scene.quads.iter().any(|q| occlusion.hides_quad(q))
         || scene.shadows.iter().any(|s| occlusion.hides_shadow(s))
         || scene
             .polychrome_sprites
@@ -1373,10 +1367,6 @@ fn culling_at_a_shared_edge_on_a_pixel_centre_changes_no_pixel() {
             culling_keeps_pixels(&mut harness, &scene);
             let occlusion = crate::fast::occlusion::Occlusion::of(&scene, |_| false);
             assert!(!occlusion.hides_quad(&scene.quads[1]), "{name} {bordered}");
-            assert!(
-                occlusion.pieces(&scene.quads[1]).is_none(),
-                "{name} {bordered}"
-            );
         }
     }
 }
@@ -1407,7 +1397,7 @@ impl crate::fast::partial::Drawer for PartialDrawer<'_> {
             device_context: &harness.context,
             atlas: &harness.atlas,
             globals: &harness.globals,
-            paths: None,
+            depth_scale: None,
         };
         rasterize(
             &tiles,
@@ -1454,7 +1444,7 @@ impl crate::fast::partial::Drawer for PartialDrawer<'_> {
             device_context: &harness.context,
             atlas: &harness.atlas,
             globals: &harness.globals,
-            paths: None,
+            depth_scale: None,
         };
         upload(&target, &mut harness.pipelines, self.scene)
     }
@@ -1463,24 +1453,13 @@ impl crate::fast::partial::Drawer for PartialDrawer<'_> {
         if self.fail {
             anyhow::bail!("the drawer fails");
         }
-        let (width, height) = self.size;
         let harness = &mut *self.harness;
-        let (intermediate_texture, intermediate_srv) =
-            create_path_intermediate_texture(&harness.device, width, height)?;
-        let (msaa_texture, msaa_view) =
-            create_path_intermediate_msaa_texture_and_view(&harness.device, width, height)?;
         let target = Target {
             device: &harness.device,
             device_context: &harness.context,
             atlas: &harness.atlas,
             globals: &harness.globals,
-            paths: Some(PathTargets {
-                render_target_view: &self.target,
-                intermediate_texture: &intermediate_texture,
-                intermediate_srv: &intermediate_srv,
-                msaa_texture: &msaa_texture,
-                msaa_view: &msaa_view,
-            }),
+            depth_scale: None,
         };
         draw_scene(
             &target,
@@ -1659,7 +1638,7 @@ fn turned_sprite_scene(harness: &Harness, angle: f32) -> Scene {
     let (cx, cy) = (400. + 60., 400. + 60.);
     scene.insert_primitive(MonochromeSprite {
         order: 0,
-        pad: 0,
+        animation: Default::default(),
         bounds: sp(400., 400., 120., 120.),
         content_mask: ContentMask {
             bounds: sp(0., 0., 1024., 1024.),
@@ -1776,7 +1755,7 @@ fn transformed_sprite_scene(
     if let Some((transformation, color)) = sprite {
         scene.insert_primitive(MonochromeSprite {
             order: 0,
-            pad: 0,
+            animation: Default::default(),
             bounds: sp(200., 200., 120., 120.),
             content_mask: ContentMask {
                 bounds: sp(0., 0., 1024., 1024.),
@@ -1886,7 +1865,7 @@ fn clip_with_turned_sprite(
         let bounds = sp(side * 0.55, side * 0.3, side * 0.4, side * 0.4);
         child.insert_primitive(MonochromeSprite {
             order: 0,
-            pad: 0,
+            animation: Default::default(),
             bounds,
             content_mask: ContentMask {
                 bounds: sp(0., 0., 1024., 1024.),

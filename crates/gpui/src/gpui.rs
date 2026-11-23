@@ -137,7 +137,7 @@ pub use fast::dynamic_textures::{
 };
 pub use fast::layers::scene::{
     LAYER_TILE_TEXTURE_BASE, LayerContent, LayerFrame, LayerKey, SceneLayers, TileCoord,
-    decode_layer_tile, layer_tile_id, layer_tile_texture_id,
+    decode_layer_tile, layer_tile_id, layer_tile_texture_id, painted_path_key,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use fast::stats::LayoutStats;

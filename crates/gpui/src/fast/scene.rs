@@ -433,3 +433,24 @@ mod tests {
         assert_eq!(painted, [3, 2, 1, 0]);
     }
 }
+
+/// What a platform's partial redraw compares a painted path by: its draw
+/// order and a key that changes when the pixels it paints may change (its
+/// binned tiles, shared while the path keeps its shape and place, and its
+/// paint).
+pub fn painted_path_key(path: &PaintedPath) -> (DrawOrder, u64) {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = collections::FxHasher::default();
+    (std::rc::Rc::as_ptr(&path.tiles) as usize).hash(&mut hasher);
+    for value in [
+        path.bounds.origin.x.0,
+        path.bounds.origin.y.0,
+        path.bounds.size.width.0,
+        path.bounds.size.height.0,
+    ] {
+        value.to_bits().hash(&mut hasher);
+    }
+    format!("{:?}", path.paint.color).hash(&mut hasher);
+    (path.paint.even_odd == true.into()).hash(&mut hasher);
+    (path.order, hasher.finish())
+}

@@ -25,7 +25,8 @@ mod shader_compilation {
     };
 
     pub fn compile_shaders() {
-        let shader_path = crate::fast_rounded_clip_shader::generated_path(std::env::var("OUT_DIR").unwrap());
+        let shader_path =
+            crate::fast_rounded_clip_shader::generated_path(std::env::var("OUT_DIR").unwrap());
         let out_dir = std::env::var("OUT_DIR").unwrap();
 
         println!("cargo:rerun-if-changed={}", shader_path.display());
