@@ -103,7 +103,6 @@ fn draw_other(
         scene,
         &target.create_view(&Default::default()),
         size(DevicePixels(side as i32), DevicePixels(side as i32)),
-        false,
         wgpu::Color::BLACK,
     )
     .unwrap();

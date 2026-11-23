@@ -543,7 +543,7 @@ fn paint_line(
         &mut Window,
     ),
 ) -> Result<()> {
-    let line_bounds = line_paint_bounds(
+    let line_bounds = crate::fast::text::line_paint_bounds(
         origin,
         layout,
         line_height,
@@ -825,7 +825,7 @@ fn paint_line_background(
     if crate::fast::glyphs::has_no_background(decoration_runs) {
         return Ok(());
     }
-    let line_bounds = line_paint_bounds(
+    let line_bounds = crate::fast::text::line_paint_bounds(
         origin,
         layout,
         line_height,
@@ -985,51 +985,6 @@ fn aligned_origin_x(
         TextAlign::Center => (origin.x * 2.0 + align_width - line_width) / 2.0,
         TextAlign::Right => origin.x + align_width - line_width,
     }
-}
-
-fn line_paint_bounds(
-    origin: Point<Pixels>,
-    layout: &LineLayout,
-    line_height: Pixels,
-    align: TextAlign,
-    align_width: Option<Pixels>,
-    wrap_boundaries: &[WrapBoundary],
-) -> Bounds<Pixels> {
-    let mut bounds = Bounds::new(
-        origin,
-        size(
-            layout.width,
-            line_height * (wrap_boundaries.len() as f32 + 1.),
-        ),
-    );
-    if align == TextAlign::Left || layout.len == 0 {
-        return bounds;
-    }
-
-    let align_width = align_width.unwrap_or(layout.width);
-    let mut row_start = Pixels::ZERO;
-    let row_ends = wrap_boundaries
-        .iter()
-        .map(|boundary| {
-            layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix]
-                .position
-                .x
-        })
-        .chain([layout.width]);
-    for (row, row_end) in row_ends.enumerate() {
-        let width = row_end - row_start;
-        let offset = match align {
-            TextAlign::Left => Pixels::ZERO,
-            TextAlign::Center => (align_width - width) / 2.,
-            TextAlign::Right => align_width - width,
-        };
-        bounds = bounds.union(&Bounds::new(
-            point(origin.x + offset, origin.y + line_height * row as f32),
-            size(width, line_height),
-        ));
-        row_start = row_end;
-    }
-    bounds
 }
 
 #[cfg(test)]

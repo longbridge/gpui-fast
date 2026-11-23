@@ -1256,3 +1256,50 @@ mod tests {
         .unwrap();
     }
 }
+
+/// The bounds a line painted at `origin` covers, its wrapped rows aligned:
+/// the bounds `Window::paint_layer` is given for the line's layer.
+pub(crate) fn line_paint_bounds(
+    origin: crate::Point<crate::Pixels>,
+    layout: &crate::LineLayout,
+    line_height: crate::Pixels,
+    align: crate::TextAlign,
+    align_width: Option<crate::Pixels>,
+    wrap_boundaries: &[crate::WrapBoundary],
+) -> crate::Bounds<crate::Pixels> {
+    let mut bounds = crate::Bounds::new(
+        origin,
+        crate::size(
+            layout.width,
+            line_height * (wrap_boundaries.len() as f32 + 1.),
+        ),
+    );
+    if align == crate::TextAlign::Left || layout.len == 0 {
+        return bounds;
+    }
+
+    let align_width = align_width.unwrap_or(layout.width);
+    let mut row_start = crate::Pixels::ZERO;
+    let row_ends = wrap_boundaries
+        .iter()
+        .map(|boundary| {
+            layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix]
+                .position
+                .x
+        })
+        .chain([layout.width]);
+    for (row, row_end) in row_ends.enumerate() {
+        let width = row_end - row_start;
+        let offset = match align {
+            crate::TextAlign::Left => crate::Pixels::ZERO,
+            crate::TextAlign::Center => (align_width - width) / 2.,
+            crate::TextAlign::Right => align_width - width,
+        };
+        bounds = bounds.union(&crate::Bounds::new(
+            crate::point(origin.x + offset, origin.y + line_height * row as f32),
+            crate::size(width, line_height),
+        ));
+        row_start = row_end;
+    }
+    bounds
+}

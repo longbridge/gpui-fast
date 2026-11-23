@@ -1238,6 +1238,17 @@ impl PaintedPath {
         self.order
     }
 
+    /// The bounds of the pixels the path paints, in device pixels
+    /// (gpui-fast composition occluders).
+    pub fn painted_bounds(&self) -> Bounds<ScaledPixels> {
+        self.bounds
+    }
+
+    /// The mask the path is drawn within (gpui-fast composition occluders).
+    pub fn content_mask(&self) -> &ContentMask<ScaledPixels> {
+        &self.paint.content_mask
+    }
+
     /// Narrows the mask the path is drawn within (gpui-fast layers).
     pub(crate) fn clip_content_mask(&mut self, mask: &Bounds<ScaledPixels>) {
         self.paint.content_mask.bounds = self.paint.content_mask.bounds.intersect(mask);
@@ -1323,7 +1334,7 @@ mod tests {
     #[test]
     fn a_native_view_in_a_layer_is_covered_by_what_the_layer_paints_after_it() {
         let mut scene = Scene::default();
-        scene.push_layer();
+        scene.push_layer(Bounds::default());
         scene.insert_primitive(quad(0.));
         scene.insert_primitive(PaintNativeView {
             order: 0,
@@ -1378,7 +1389,7 @@ mod tests {
         // A quad painted after a layer goes above it.
         let mut scene = Scene::default();
         scene.insert_primitive(quad(0.));
-        scene.push_layer();
+        scene.push_layer(Bounds::default());
         scene.insert_primitive(underline(0.));
         scene.insert_primitive(underline(5.));
         scene.pop_layer();
@@ -1390,10 +1401,10 @@ mod tests {
 
         // A layer goes above the layer painted before it.
         let mut scene = Scene::default();
-        scene.push_layer();
+        scene.push_layer(Bounds::default());
         scene.insert_primitive(underline(0.));
         scene.pop_layer();
-        scene.push_layer();
+        scene.push_layer(Bounds::default());
         scene.insert_primitive(quad(5.));
         scene.pop_layer();
         assert_eq!(batch_labels(&mut scene), ["underlines (1)", "quads (1)"]);
@@ -1404,9 +1415,9 @@ mod tests {
         // A layer has one draw order, so what it paints after a nested layer
         // still goes below that layer.
         let mut scene = Scene::default();
-        scene.push_layer();
+        scene.push_layer(Bounds::default());
         scene.insert_primitive(underline(0.));
-        scene.push_layer();
+        scene.push_layer(Bounds::default());
         scene.insert_primitive(quad(5.));
         scene.pop_layer();
         scene.insert_primitive(underline(5.));
@@ -1415,9 +1426,9 @@ mod tests {
 
         // The same holds when the nested layer shares its parent's order.
         let mut scene = Scene::default();
-        scene.push_layer();
+        scene.push_layer(Bounds::default());
         scene.insert_primitive(quad(0.));
-        scene.push_layer();
+        scene.push_layer(Bounds::default());
         scene.insert_primitive(quad(5.));
         scene.pop_layer();
         scene.insert_primitive(quad(8.));
@@ -1434,12 +1445,12 @@ mod tests {
 
         // A layer goes above the layers nested in the layer before it.
         let mut scene = Scene::default();
-        scene.push_layer();
-        scene.push_layer();
+        scene.push_layer(Bounds::default());
+        scene.push_layer(Bounds::default());
         scene.insert_primitive(underline(0.));
         scene.pop_layer();
         scene.pop_layer();
-        scene.push_layer();
+        scene.push_layer(Bounds::default());
         scene.insert_primitive(quad(5.));
         scene.pop_layer();
         assert_eq!(batch_labels(&mut scene), ["underlines (1)", "quads (1)"]);

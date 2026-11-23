@@ -190,7 +190,7 @@ fn paint(scene: &mut Scene, rng: &mut StdRng) -> Vec<Painted> {
                     match kind {
                         Kind::Monochrome => scene.insert_primitive(MonochromeSprite {
                             order: 0,
-                            pad: 0,
+                            animation: Default::default(),
                             bounds: b,
                             content_mask,
                             color,

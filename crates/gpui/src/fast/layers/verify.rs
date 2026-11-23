@@ -54,17 +54,13 @@ fn clip_to(primitive: &mut Primitive, mask: &Bounds<ScaledPixels>) {
     let content_mask = match primitive {
         Primitive::Shadow(p) => &mut p.content_mask,
         Primitive::Quad(p) => &mut p.content_mask,
-        Primitive::Path(p) => {
-            for vertex in &mut p.vertices {
-                vertex.content_mask.bounds = vertex.content_mask.bounds.intersect(mask);
-            }
-            &mut p.content_mask
-        }
+        Primitive::Path(p) => &mut p.paint.content_mask,
         Primitive::Underline(p) => &mut p.content_mask,
         Primitive::MonochromeSprite(p) => &mut p.content_mask,
         Primitive::SubpixelSprite(p) => &mut p.content_mask,
         Primitive::PolychromeSprite(p) => &mut p.content_mask,
         Primitive::Surface(p) => &mut p.content_mask,
+        Primitive::NativeView(p) => &mut p.content_mask,
     };
     content_mask.bounds = content_mask.bounds.intersect(mask);
 }
@@ -196,8 +192,8 @@ fn describe(primitive: &Primitive) -> String {
         Primitive::Shadow(p) => format!("{:?}", crate::Shadow { order: 0, ..*p }),
         Primitive::Quad(p) => format!("{:?}", Quad { order: 0, ..*p }),
         Primitive::Path(p) => format!(
-            "path {:?} {:?} {:?} {:?}",
-            p.bounds, p.content_mask, p.color, p.vertices
+            "path {:?} {:?} {:?}",
+            p.bounds, p.paint, p.tiles
         ),
         Primitive::Underline(p) => format!("{:?}", crate::Underline { order: 0, ..*p }),
         Primitive::MonochromeSprite(p) => format!(
@@ -225,6 +221,7 @@ fn describe(primitive: &Primitive) -> String {
             }
         ),
         Primitive::Surface(p) => format!("surface {:?} {:?}", p.bounds, p.content_mask),
+        Primitive::NativeView(p) => format!("native view {:?} {:?}", p.bounds, p.content_mask),
     }
 }
 

@@ -2988,10 +2988,11 @@ mod rows {
                             } else {
                                 30.
                             };
-                            let mut path = crate::Path::new(origin);
+                            let mut path = crate::PathBuilder::fill();
+                            path.move_to(origin);
                             path.line_to(origin + crate::point(px(30.), px(0.)));
                             path.line_to(origin + crate::point(px(0.), px(reach)));
-                            window.paint_path(path, crate::black());
+                            window.paint_path(path.build().expect("path"), crate::black());
                             window.paint_quad(crate::fill(
                                 crate::Bounds::new(
                                     origin + crate::point(px(2.), px(2.)),

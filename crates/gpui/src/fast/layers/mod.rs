@@ -159,3 +159,21 @@ impl Window {
         self.refresh();
     }
 }
+
+/// `Window::paint_layer`'s body: a layer over `bounds`, the device pixels the
+/// layer covers (fast keeps upstream's layer bounds for its scroll layers), or
+/// none when the layer is clipped away.
+pub(crate) fn paint_layer<R>(
+    window: &mut Window,
+    bounds: Option<crate::Bounds<crate::ScaledPixels>>,
+    f: impl FnOnce(&mut Window) -> R,
+) -> R {
+    if let Some(bounds) = bounds {
+        window.next_frame.scene.push_layer(bounds);
+    }
+    let result = f(window);
+    if bounds.is_some() {
+        window.next_frame.scene.pop_layer();
+    }
+    result
+}

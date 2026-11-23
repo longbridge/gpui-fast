@@ -5023,23 +5023,11 @@ impl Window {
     ///
     /// This method should only be called as part of the paint phase of element drawing.
     pub fn paint_layer<R>(&mut self, bounds: Bounds<Pixels>, f: impl FnOnce(&mut Self) -> R) -> R {
+        // Upstream's layer has no bounds; crate::fast::layers records scroll layers by them.
         self.invalidator.debug_assert_paint();
-
-        let content_mask = self.content_mask();
-        let clipped_bounds = bounds.intersect(&content_mask.bounds);
-        if !clipped_bounds.is_empty() {
-            self.next_frame
-                .scene
-                .push_layer(self.cover_bounds(clipped_bounds));
-        }
-
-        let result = f(self);
-
-        if !clipped_bounds.is_empty() {
-            self.next_frame.scene.pop_layer();
-        }
-
-        result
+        let clipped = bounds.intersect(&self.content_mask().bounds);
+        let cover = (!clipped.is_empty()).then(|| self.cover_bounds(clipped));
+        crate::fast::layers::paint_layer(self, cover, f)
     }
 
     /// Paint the drop (non-inset) shadows from `shadows` into the scene at the current

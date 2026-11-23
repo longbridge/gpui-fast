@@ -67,7 +67,7 @@ pub(crate) struct GlobalParams {
     pub(crate) pad: u32,
 }
 
-const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 struct DepthTexture {
     texture: wgpu::Texture,
@@ -130,7 +130,7 @@ pub(crate) struct WgpuPipelines {
     pub(crate) poly_sprites: wgpu::RenderPipeline,
     #[allow(dead_code)]
     surfaces: wgpu::RenderPipeline,
-    premultiplied_alpha: bool,
+    pub(crate) premultiplied_alpha: bool,
 }
 
 /// One frame allocation of instance data, ready to bind.
@@ -1301,10 +1301,6 @@ impl WgpuRendererCore {
             transient_attachments: context.supports_transient_attachments(),
             adapter_info: context.adapter.get_info(),
             depth_texture: None,
-            #[cfg(all(
-                not(target_family = "wasm"),
-                any(test, feature = "bench-support", feature = "test-support")
-            ))]
             target_format,
             max_texture_size,
             fast_frame: crate::fast::frame::FrameState::default(),
@@ -1386,7 +1382,7 @@ impl WgpuRendererCore {
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex> {
         if let Some(submission) =
-            crate::fast::frame::record_frame(self, scene, frame_view, clear_color)?
+            crate::fast::frame::record_frame(self, scene, frame_view, size, clear_color)?
         {
             return Ok(submission);
         }
@@ -2563,7 +2559,7 @@ pub(crate) struct RenderingParameters {
 }
 
 impl RenderingParameters {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         use std::env;
 
         let gamma = env::var("ZED_FONTS_GAMMA")

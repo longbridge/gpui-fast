@@ -6,13 +6,12 @@
 //! through `fast::frame` as the renderer does, into a texture it reads back.
 
 use std::borrow::Cow;
-use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use anyhow::Result;
 use gpui::{
     AtlasKey, AtlasTile, Bounds, ContentMask, Corners, DevicePixels, Edges, FontId, GlyphId, Hsla,
-    ImageId, LayerFrame, LayerKey, MonochromeSprite, Path, PlatformAtlas, PolychromeSprite, Quad,
+    ImageId, LayerFrame, LayerKey, MonochromeSprite, PaintedPath, PathBuilder, PlatformAtlas, PolychromeSprite, Quad,
     RenderGlyphParams, RenderImageParams, Rgba, ScaledPixels, Scene, SceneLayers, Shadow, Size,
     SubpixelSprite, TileCoord, TransformationMatrix, Underline, layer_tile_id,
     layer_tile_texture_id, linear_color_stop, linear_gradient, point, px, rgba, size,
@@ -53,7 +52,6 @@ fn rounded_overflow_frame_cost(cx: &mut gpui::TestAppContext) {
             let mut harness = Harness::new().expect("timing requires a GPU");
             rounded_clip_tests::render_with(cx, build, |scene, _| {
                 harness.write_globals(side, side);
-                harness.ensure_path_targets(device_size(side as i32, side as i32));
                 let texture = harness.device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("clip_timing_target"),
                     size: wgpu::Extent3d {
@@ -76,6 +74,7 @@ fn rounded_overflow_frame_cost(cx: &mut gpui::TestAppContext) {
                         &mut harness,
                         scene,
                         &view,
+                        device_size(side as i32, side as i32),
                         wgpu::Color::WHITE,
                     )
                     .unwrap();
@@ -204,11 +203,9 @@ fn a_composited_layer_equals_direct_drawing() {
     composite_and_compare(&mut harness, (37., -91.), Paths::Without);
 }
 
-/// Paths are drawn exactly when the content moved by an even number of
-/// device pixels since its tiles were rasterized. At an odd translation an
-/// antialiased path edge pixel can come out one level apart: the path
-/// shader's `dpdx` and `dpdy` are differences within 2×2 pixel quads,
-/// which then pair other pixels.
+/// Paths are drawn alike when the content moved by an even number of device
+/// pixels since its tiles were rasterized (see `assert_same_pixels` for the
+/// one level an antialiased path edge may differ by).
 #[test]
 fn paths_composite_exactly_at_even_translations() {
     let Some(mut harness) = Harness::new() else {
@@ -502,10 +499,19 @@ fn rasterize_and_assemble(harness: &mut Harness, content: Scene, tiles: &[(i32, 
     image
 }
 
+/// Asserts two images are the same but for antialiased path edges one level
+/// apart. Upstream's path tile shader evaluates curves at absolute device
+/// coordinates, so a path moved into a tile's space rounds its crossings at
+/// another f32 magnitude and an edge pixel's coverage can land one level off.
 fn assert_same_pixels(actual: &[u8], expected: &[u8], width: usize) {
     assert_eq!(actual.len(), expected.len());
     let differing: Vec<(usize, usize)> = (0..actual.len() / 4)
-        .filter(|i| actual[i * 4..i * 4 + 4] != expected[i * 4..i * 4 + 4])
+        .filter(|i| {
+            actual[i * 4..i * 4 + 4]
+                .iter()
+                .zip(&expected[i * 4..i * 4 + 4])
+                .any(|(a, b)| a.abs_diff(*b) > 1)
+        })
         .map(|i| (i % width, i / width))
         .collect();
     if differing.is_empty() {
@@ -584,9 +590,9 @@ fn add_content(
         corner_radii: Corners::all(ScaledPixels(6.)),
         content_mask: mask(clip),
         color: Hsla::from(rgba(0x00000080)),
-        element_bounds: at(380., 420., 120., 70.),
-        element_corner_radii: Corners::all(ScaledPixels(6.)),
-        inset: 0,
+        shape_bounds: at(380., 420., 120., 70.),
+        shape_corner_radii: Corners::all(ScaledPixels(6.)),
+        inset: false.into(),
         pad: 0,
     });
     scene.insert_primitive(Quad {
@@ -624,7 +630,7 @@ fn add_content(
     let mono = glyph_tile(harness, 1, false);
     scene.insert_primitive(MonochromeSprite {
         order: 0,
-        pad: 0,
+        animation: Default::default(),
         bounds: at(505., 700., 16., 16.),
         content_mask: mask(clip),
         color: Hsla::from(rgba(0xffffffff)),
@@ -659,18 +665,22 @@ fn add_content(
 
 /// A path of lines and a curve across a tile edge.
 fn add_path(scene: &mut Scene, (ox, oy): (f32, f32), clip: Bounds<ScaledPixels>) {
-    let mut path = Path::new(point(px(480. + ox), px(300. + oy)));
+    let mut path = PathBuilder::fill();
+    path.move_to(point(px(480. + ox), px(300. + oy)));
     path.line_to(point(px(560.5 + ox), px(330. + oy)));
     path.curve_to(
         point(px(500. + ox), px(560. + oy)),
         point(px(600. + ox), px(450. + oy)),
     );
     path.line_to(point(px(480. + ox), px(300. + oy)));
-    path.content_mask = ContentMask {
-        bounds: clip.map(|c| px(c.0)),
-    };
-    path.color = Hsla::from(rgba(0x8800ffcc)).into();
-    scene.insert_primitive(path.scale(1.));
+    scene.insert_primitive(PaintedPath::new(
+        path.build().expect("path"),
+        1.,
+        ContentMask {
+            bounds: clip.map(|c| px(c.0)),
+        },
+        Hsla::from(rgba(0x8800ffcc)).into(),
+    ));
 }
 
 /// What GPUI Kit draws for a table's rounded frame: paths filling corner
@@ -689,15 +699,19 @@ fn add_covered_paths(
         (200., 410.25, 1., -1.),
     ] {
         let corner = point(px(x + ox), px(y + oy));
-        let mut path = Path::new(corner);
+        let mut path = PathBuilder::fill();
+    path.move_to(corner);
         path.line_to(corner + point(px(9. * dx), px(0.)));
         path.curve_to(corner + point(px(0.), px(9. * dy)), corner);
         path.line_to(corner);
-        path.content_mask = ContentMask {
-            bounds: clip.map(|c| px(c.0)),
-        };
-        path.color = Hsla::from(rgba(0x3366ccff)).into();
-        scene.insert_primitive(path.scale(1.));
+        scene.insert_primitive(PaintedPath::new(
+            path.build().expect("path"),
+            1.,
+            ContentMask {
+                bounds: clip.map(|c| px(c.0)),
+            },
+            Hsla::from(rgba(0x3366ccff)).into(),
+        ));
     }
     scene.insert_primitive(Quad {
         bounds: sp(200. + ox, 330. + oy, 130.5, 80.25),
@@ -710,25 +724,29 @@ fn add_covered_paths(
     });
     scene.insert_primitive(MonochromeSprite {
         order: 0,
-        pad: 0,
+        animation: Default::default(),
         bounds: sp(204. + ox, 334. + oy, 16., 16.),
         content_mask: mask,
         color: Hsla::from(rgba(0xff8800ff)),
         tile: glyph_tile(harness, 1, false),
         transformation: TransformationMatrix::unit(),
     });
-    let mut path = Path::new(point(px(250. + ox), px(360. + oy)));
+    let mut path = PathBuilder::fill();
+    path.move_to(point(px(250. + ox), px(360. + oy)));
     path.line_to(point(px(290.5 + ox), px(372. + oy)));
     path.curve_to(
         point(px(255. + ox), px(400. + oy)),
         point(px(300. + ox), px(395. + oy)),
     );
     path.line_to(point(px(250. + ox), px(360. + oy)));
-    path.content_mask = ContentMask {
-        bounds: clip.map(|c| px(c.0)),
-    };
-    path.color = Hsla::from(rgba(0x8800ffcc)).into();
-    scene.insert_primitive(path.scale(1.));
+    scene.insert_primitive(PaintedPath::new(
+        path.build().expect("path"),
+        1.,
+        ContentMask {
+            bounds: clip.map(|c| px(c.0)),
+        },
+        Hsla::from(rgba(0x8800ffcc)).into(),
+    ));
 }
 
 /// A 16×16 glyph of a made-up font, uploaded to the harness's atlas: a
@@ -831,26 +849,13 @@ pub(super) struct Harness {
     atlas_sampler: wgpu::Sampler,
     rendering_params: RenderingParameters,
     globals_buffer: wgpu::Buffer,
-    path_globals_offset: u64,
     gamma_offset: u64,
-    globals_bind_group: wgpu::BindGroup,
-    path_globals_bind_group: wgpu::BindGroup,
     instance_buffer: wgpu::Buffer,
     instance_capacity: u64,
     instance_alignment: u64,
-    path_targets: Option<PathTargets>,
     state: FrameState,
     dynamic_textures: crate::fast::dynamic_textures::TextureStore,
     dual_source_blending: bool,
-}
-
-/// The path intermediate texture, and its multisampled twin, of one size.
-struct PathTargets {
-    size: Size<DevicePixels>,
-    _intermediate: wgpu::Texture,
-    intermediate_view: wgpu::TextureView,
-    _msaa: Option<wgpu::Texture>,
-    msaa_view: Option<wgpu::TextureView>,
 }
 
 impl Harness {
@@ -889,14 +894,13 @@ impl Harness {
                 .contains(usages)
         })?;
 
-        let rendering_params = RenderingParameters::new(&adapter, format);
+        let rendering_params = RenderingParameters::new();
         let bind_group_layouts = WgpuRendererCore::create_bind_group_layouts(&device, false);
         let pipelines = WgpuRendererCore::create_pipelines(
             &device,
             &bind_group_layouts,
             format,
             wgpu::CompositeAlphaMode::Opaque,
-            rendering_params.path_sample_count,
             dual_source_blending,
             false,
         );
@@ -910,42 +914,13 @@ impl Harness {
         let uniform_alignment = device.limits().min_uniform_buffer_offset_alignment as u64;
         let globals_size = size_of::<GlobalParams>() as u64;
         let gamma_size = size_of::<GammaParams>() as u64;
-        let path_globals_offset = globals_size.next_multiple_of(uniform_alignment);
-        let gamma_offset = (path_globals_offset + globals_size).next_multiple_of(uniform_alignment);
+        let gamma_offset = globals_size.next_multiple_of(uniform_alignment);
         let globals_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("globals_buffer"),
             size: gamma_offset + gamma_size,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let globals_bind_group = |label: &str, offset: u64| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(label),
-                layout: &bind_group_layouts.globals,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &globals_buffer,
-                            offset,
-                            size: NonZeroU64::new(globals_size),
-                        }),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &globals_buffer,
-                            offset: gamma_offset,
-                            size: NonZeroU64::new(gamma_size),
-                        }),
-                    },
-                ],
-            })
-        };
-        let path_globals_bind_group =
-            globals_bind_group("path_globals_bind_group", path_globals_offset);
-        let globals_bind_group = globals_bind_group("globals_bind_group", 0);
-
         let instance_alignment = device.limits().min_storage_buffer_offset_alignment as u64;
         let instance_buffer = create_instance_buffer(&device, INITIAL_INSTANCE_CAPACITY);
         let atlas = WgpuAtlas::new(device.clone(), queue.clone(), color_texture_format);
@@ -960,14 +935,10 @@ impl Harness {
             atlas_sampler,
             rendering_params,
             globals_buffer,
-            path_globals_offset,
             gamma_offset,
-            globals_bind_group,
-            path_globals_bind_group,
             instance_buffer,
             instance_capacity: INITIAL_INSTANCE_CAPACITY,
             instance_alignment,
-            path_targets: None,
             state: FrameState::default(),
             dynamic_textures: crate::fast::dynamic_textures::TextureStore::default(),
             dual_source_blending,
@@ -1000,7 +971,6 @@ impl Harness {
     ) -> Vec<u8> {
         let (width, height) = (size.width.0 as u32, size.height.0 as u32);
         self.write_globals(width, height);
-        self.ensure_path_targets(size);
         self.atlas.before_frame();
 
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -1024,16 +994,12 @@ impl Harness {
             b: clear.b as f64,
             a: clear.a as f64,
         };
-        crate::fast::frame::record_into(self, scene, &view, clear).expect("frame recorded");
+        crate::fast::frame::record_into(self, scene, &view, size, clear).expect("frame recorded");
         read_back(&self.device, &self.queue, &texture, self.format)
     }
 
-    fn write_globals(&self, width: u32, height: u32) {
-        let globals = GlobalParams {
-            viewport_size: [width as f32, height as f32],
-            premultiplied_alpha: 0,
-            pad: 0,
-        };
+    /// Writes the gamma parameters every scene's globals share.
+    fn write_globals(&self, _width: u32, _height: u32) {
         let gamma = GammaParams {
             gamma_ratios: self.rendering_params.gamma_ratios,
             grayscale_enhanced_contrast: self.rendering_params.grayscale_enhanced_contrast,
@@ -1041,46 +1007,11 @@ impl Harness {
             is_bgr: 0,
             _pad: 0,
         };
-        self.queue
-            .write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
-        self.queue.write_buffer(
-            &self.globals_buffer,
-            self.path_globals_offset,
-            bytemuck::bytes_of(&globals),
-        );
         self.queue.write_buffer(
             &self.globals_buffer,
             self.gamma_offset,
             bytemuck::bytes_of(&gamma),
         );
-    }
-
-    fn ensure_path_targets(&mut self, size: Size<DevicePixels>) {
-        if self
-            .path_targets
-            .as_ref()
-            .is_some_and(|targets| targets.size == size)
-        {
-            return;
-        }
-        let (width, height) = (size.width.0 as u32, size.height.0 as u32);
-        let (intermediate, intermediate_view) =
-            WgpuRendererCore::create_path_intermediate(&self.device, self.format, width, height);
-        let (msaa, msaa_view) = WgpuRendererCore::create_msaa_if_needed(
-            &self.device,
-            self.format,
-            width,
-            height,
-            self.rendering_params.path_sample_count,
-        )
-        .unzip();
-        self.path_targets = Some(PathTargets {
-            size,
-            _intermediate: intermediate,
-            intermediate_view,
-            _msaa: msaa,
-            msaa_view,
-        });
     }
 }
 
@@ -1102,7 +1033,6 @@ impl FrameHost for Harness {
     }
 
     fn target(&self) -> Result<FrameTarget<'_>> {
-        let path_targets = self.path_targets.as_ref();
         Ok(FrameTarget {
             dynamic_textures: &self.dynamic_textures,
             device: &self.device,
@@ -1111,16 +1041,11 @@ impl FrameHost for Harness {
             bind_group_layouts: &self.bind_group_layouts,
             atlas: &self.atlas,
             atlas_sampler: &self.atlas_sampler,
-            globals_bind_group: &self.globals_bind_group,
-            path_globals_bind_group: &self.path_globals_bind_group,
-            path_intermediate_view: path_targets.map(|targets| &targets.intermediate_view),
-            path_msaa_view: path_targets.and_then(|targets| targets.msaa_view.as_ref()),
             instance_data: crate::fast::frame::InstanceSource::Storage(&self.instance_buffer),
             globals_buffer: &self.globals_buffer,
             gamma_offset: self.gamma_offset,
             gamma_size: size_of::<GammaParams>() as u64,
             format: self.format,
-            path_sample_count: self.rendering_params.path_sample_count,
             premultiplied_alpha: false,
         })
     }

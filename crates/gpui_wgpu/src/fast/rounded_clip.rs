@@ -243,14 +243,25 @@ pub(crate) fn group(scene: &Scene, texture: AtlasTextureId) -> Option<&LayerFram
         .find(|frame| frame.key.0 == key && frame.tile_size == 0)
 }
 
-/// Extend the unchanged upstream WGSL entry points. Path rasterization is
-/// unmasked; paths are masked once, when their premultiplied sprite is drawn.
+/// Extend the unchanged upstream WGSL entry points.
+///
+/// Opaque rectangles are drawn by upstream's opaque pass, without blending,
+/// which can't fade them out at a clip's edge. A scene drawn under a rounded
+/// clip has no opaque pass: its globals set `pad`, and its quad pass draws
+/// its opaque rectangles too, masked like every other quad.
 pub(crate) fn shader(source: &str) -> String {
     let mut source = source.to_owned();
+    let opaque_cull = "if (is_opaque_rectangle(quad)) {";
+    assert!(source.contains(opaque_cull), "upstream quad shader changed");
+    source = source.replacen(
+        opaque_cull,
+        "if (is_opaque_rectangle(quad) && globals.pad == 0u) {",
+        1,
+    );
     for name in [
         "fs_quad",
         "fs_shadow",
-        "fs_path",
+        "fs_path_tile",
         "fs_underline",
         "fs_mono_sprite",
         "fs_poly_sprite",
@@ -279,11 +290,7 @@ pub(crate) fn shader(source: &str) -> String {
         } else {
             "fast_clip_color"
         };
-        let premultiplied = if name == "fs_path" {
-            "true"
-        } else {
-            "globals.premultiplied_alpha != 0u"
-        };
+        let premultiplied = "globals.premultiplied_alpha != 0u";
         let mut remaining = &source[body_start + 1..body_end];
         let mut body = String::new();
         while let Some(start) = remaining.find("return ") {

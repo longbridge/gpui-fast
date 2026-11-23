@@ -497,11 +497,12 @@ fn table_row(ix: usize) -> AnyElement {
                 (bounds.bottom_right(), -1., -1.),
                 (bounds.bottom_left(), 1., -1.),
             ] {
-                let mut path = gpui::Path::new(corner);
+                let mut path = gpui::PathBuilder::fill();
+                path.move_to(corner);
                 path.line_to(corner + point(radius * x, px(0.)));
                 path.curve_to(corner + point(px(0.), radius * y), corner);
                 path.line_to(corner);
-                window.paint_path(path, background());
+                window.paint_path(path.build().expect("path"), background());
             }
         },
     )
