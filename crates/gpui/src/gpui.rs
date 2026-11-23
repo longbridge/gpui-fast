@@ -46,6 +46,7 @@ mod interactive;
 mod key_dispatch;
 mod keymap;
 mod path_builder;
+mod path_winding;
 mod platform;
 mod platform_scheduler;
 mod scene;
@@ -136,7 +137,7 @@ pub use fast::dynamic_textures::{
 };
 pub use fast::layers::scene::{
     LAYER_TILE_TEXTURE_BASE, LayerContent, LayerFrame, LayerKey, SceneLayers, TileCoord,
-    decode_layer_tile, layer_tile_id, layer_tile_texture_id,
+    decode_layer_tile, layer_tile_id, layer_tile_texture_id, painted_path_key,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use fast::stats::LayoutStats;
@@ -153,6 +154,7 @@ pub use inspector::*;
 pub use interactive::*;
 pub use keymap::*;
 pub use path_builder::*;
+pub(crate) use path_winding::*;
 pub use platform::*;
 pub use profiler::*;
 pub use refineable::*;

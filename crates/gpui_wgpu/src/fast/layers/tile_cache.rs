@@ -8,13 +8,10 @@
 //! of the previous generation stays as it is. A tile the cache has missed a
 //! generation of could have changed in it, so it is rasterized again.
 
-use std::num::NonZeroU64;
-
 use collections::{FxHashMap, FxHashSet};
 use gpui::{LayerKey, SceneLayers, TileCoord};
 
 use crate::fast::frame::FrameTarget;
-use crate::wgpu_renderer::{GlobalParams, WgpuRendererCore};
 
 /// How much tile texture memory a window keeps, by default (spec §5.6).
 pub(crate) const DEFAULT_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
@@ -33,10 +30,6 @@ pub(crate) struct TileCache {
     pool: Vec<TileTexture>,
     frame: u64,
     budget_bytes: u64,
-    /// Per tile size: the globals tiles are drawn with.
-    globals: FxHashMap<u32, TileGlobals>,
-    /// Per tile size: the path intermediate textures of tiles.
-    paths: FxHashMap<u32, TilePaths>,
 }
 
 impl Default for TileCache {
@@ -47,8 +40,6 @@ impl Default for TileCache {
             pool: Vec::new(),
             frame: 0,
             budget_bytes: DEFAULT_BUDGET_BYTES,
-            globals: FxHashMap::default(),
-            paths: FxHashMap::default(),
         }
     }
 }
@@ -75,25 +66,6 @@ pub(crate) struct TileTexture {
     #[cfg_attr(not(test), allow(dead_code))]
     texture: wgpu::Texture,
     view: wgpu::TextureView,
-}
-
-/// The globals a tile's primitives are drawn with: the frame's, with a
-/// viewport the size of the tile.
-pub(crate) struct TileGlobals {
-    premultiplied_alpha: bool,
-    _buffer: wgpu::Buffer,
-    pub(crate) globals: wgpu::BindGroup,
-    pub(crate) path_globals: wgpu::BindGroup,
-}
-
-/// A tile-sized path intermediate texture, and its multisampled twin.
-pub(crate) struct TilePaths {
-    format: wgpu::TextureFormat,
-    sample_count: u32,
-    _intermediate: wgpu::Texture,
-    pub(crate) intermediate: wgpu::TextureView,
-    _msaa: Option<wgpu::Texture>,
-    pub(crate) msaa: Option<wgpu::TextureView>,
 }
 
 fn tile_bytes(tile_size: u32) -> u64 {
@@ -128,11 +100,7 @@ impl TileCache {
 
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
-        self.tiles.is_empty()
-            && self.layers.is_empty()
-            && self.pool.is_empty()
-            && self.globals.is_empty()
-            && self.paths.is_empty()
+        self.tiles.is_empty() && self.layers.is_empty() && self.pool.is_empty()
     }
 
     /// Starts a frame that composites the tiles `composited` of the layers in
@@ -304,8 +272,6 @@ impl TileCache {
         self.tiles.clear();
         self.layers.clear();
         self.pool.clear();
-        self.globals.clear();
-        self.paths.clear();
     }
 
     /// Gives every tile in `planned` a texture, fits the cache in its
@@ -337,119 +303,6 @@ impl TileCache {
             };
             tile.texture = Some(texture);
         }
-        for &(index, _) in planned {
-            let tile_size = layers.frames[index].tile_size;
-            self.ensure_globals(target, tile_size);
-            self.ensure_paths(target, tile_size);
-        }
-    }
-
-    pub(crate) fn globals(&self, tile_size: u32) -> Option<&TileGlobals> {
-        self.globals.get(&tile_size)
-    }
-
-    pub(crate) fn paths(&self, tile_size: u32) -> Option<&TilePaths> {
-        self.paths.get(&tile_size)
-    }
-
-    fn ensure_globals(&mut self, target: &FrameTarget, tile_size: u32) {
-        if self
-            .globals
-            .get(&tile_size)
-            .is_some_and(|globals| globals.premultiplied_alpha == target.premultiplied_alpha)
-        {
-            return;
-        }
-        let device = target.device;
-        let globals_size = size_of::<GlobalParams>() as u64;
-        let alignment = device.limits().min_uniform_buffer_offset_alignment as u64;
-        let path_offset = globals_size.next_multiple_of(alignment);
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("tile_globals_buffer"),
-            size: path_offset + globals_size,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let globals = GlobalParams {
-            viewport_size: [tile_size as f32, tile_size as f32],
-            premultiplied_alpha: target.premultiplied_alpha as u32,
-            pad: 0,
-        };
-        let path_globals = GlobalParams {
-            premultiplied_alpha: 0,
-            ..globals
-        };
-        target
-            .queue
-            .write_buffer(&buffer, 0, bytemuck::bytes_of(&globals));
-        target
-            .queue
-            .write_buffer(&buffer, path_offset, bytemuck::bytes_of(&path_globals));
-        // The gamma parameters are the frame's own.
-        let bind_group = |label: &str, offset: u64| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(label),
-                layout: &target.bind_group_layouts.globals,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &buffer,
-                            offset,
-                            size: NonZeroU64::new(globals_size),
-                        }),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: target.globals_buffer,
-                            offset: target.gamma_offset,
-                            size: NonZeroU64::new(target.gamma_size),
-                        }),
-                    },
-                ],
-            })
-        };
-        let tile_globals = TileGlobals {
-            premultiplied_alpha: target.premultiplied_alpha,
-            globals: bind_group("tile_globals_bind_group", 0),
-            path_globals: bind_group("tile_path_globals_bind_group", path_offset),
-            _buffer: buffer,
-        };
-        self.globals.insert(tile_size, tile_globals);
-    }
-
-    fn ensure_paths(&mut self, target: &FrameTarget, tile_size: u32) {
-        if self.paths.get(&tile_size).is_some_and(|paths| {
-            paths.format == target.format && paths.sample_count == target.path_sample_count
-        }) {
-            return;
-        }
-        let (intermediate_texture, intermediate) = WgpuRendererCore::create_path_intermediate(
-            target.device,
-            target.format,
-            tile_size,
-            tile_size,
-        );
-        let (msaa_texture, msaa) = WgpuRendererCore::create_msaa_if_needed(
-            target.device,
-            target.format,
-            tile_size,
-            tile_size,
-            target.path_sample_count,
-        )
-        .unzip();
-        self.paths.insert(
-            tile_size,
-            TilePaths {
-                format: target.format,
-                sample_count: target.path_sample_count,
-                _intermediate: intermediate_texture,
-                intermediate,
-                _msaa: msaa_texture,
-                msaa,
-            },
-        );
     }
 }
 

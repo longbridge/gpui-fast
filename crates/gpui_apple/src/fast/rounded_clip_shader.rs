@@ -1,7 +1,5 @@
 //! Build-time injection keeps the upstream Metal shader source unchanged.
-//! Each colour-producing fragment evaluates its immutable clip stack. Path
-//! rasterization itself is unmasked; its premultiplied result is masked when
-//! the path sprite is composited, avoiding applying coverage twice.
+//! Path tiles apply clip coverage directly to their straight-alpha output.
 
 pub fn source(source: &str) -> String {
     let mut source = source.to_owned();
@@ -11,8 +9,9 @@ pub fn source(source: &str) -> String {
         "underline_fragment",
         "monochrome_sprite_fragment",
         "polychrome_sprite_fragment",
-        "path_sprite_fragment",
+        "path_tile_fragment",
         "surface_fragment",
+        "native_view_fragment",
     ] {
         let start = source
             .find(&format!("fragment float4 {name}("))
@@ -33,8 +32,7 @@ pub fn source(source: &str) -> String {
             }
         }
         let body = &source[body_start + 1..body_end];
-        let premultiplied = name == "path_sprite_fragment";
-        let body = mask_returns(body, premultiplied);
+        let body = mask_returns(body);
         source.replace_range(body_start + 1..body_end, &body);
         source.insert_str(signature_end, ", constant FastRoundedClip *fast_clip_shapes [[buffer(28)]], constant uint &fast_clip_enabled [[buffer(29)]]");
     }
@@ -79,11 +77,12 @@ float4 fast_rounded_clip_color(float4 color, float2 position, constant FastRound
     source
 }
 
+#[cfg(not(feature = "runtime_shaders"))]
 pub fn stage(input: impl AsRef<std::path::Path>, output: impl AsRef<std::path::Path>) {
     std::fs::write(output, source(&std::fs::read_to_string(input).unwrap())).unwrap();
 }
 
-fn mask_returns(body: &str, premultiplied: bool) -> String {
+fn mask_returns(body: &str) -> String {
     let mut result = String::new();
     let mut remaining = body;
     while let Some(start) = remaining.find("return ") {
@@ -92,7 +91,7 @@ fn mask_returns(body: &str, premultiplied: bool) -> String {
                 .find(';')
                 .expect("fragment return semicolon");
         result.push_str(&remaining[..start]);
-        result.push_str(&format!("return fast_rounded_clip_color({}, input.position.xy, fast_clip_shapes, fast_clip_enabled, {premultiplied});", &remaining[start + 7..end]));
+        result.push_str(&format!("return fast_rounded_clip_color({}, input.position.xy, fast_clip_shapes, fast_clip_enabled, false);", &remaining[start + 7..end]));
         remaining = &remaining[end + 1..];
     }
     result.push_str(remaining);

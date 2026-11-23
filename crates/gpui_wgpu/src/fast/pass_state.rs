@@ -18,11 +18,6 @@ pub(crate) struct PassState {
 }
 
 impl PassState {
-    /// Forgets what is bound, for a pass that starts with nothing bound.
-    pub(crate) fn forget(&mut self) {
-        *self = Self::default();
-    }
-
     pub(crate) fn set_pipeline(
         &mut self,
         pass: &mut wgpu::RenderPass<'_>,

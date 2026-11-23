@@ -198,7 +198,7 @@ unchanged, and a new entry needs as good a reason.
 - `crates/gpui/Cargo.toml` names this repository and sets `publish = false`.
 - Window composition, the API of
   [zed#62379](https://github.com/zed-industries/zed/pull/62379), which
-  upstream has not merged yet: native views drawn between a window's GPUI
+  upstream closed without merging: native views drawn between a window's GPUI
   content and its overlays. `gpui` exports `WindowComposition`,
   `WindowCompositionSurface`, `CompositionSurfaceId`,
   `CompositionSurfaceKind`, `PlatformSurfaceAttachment`,
@@ -212,8 +212,13 @@ unchanged, and a new entry needs as good a reason.
   `with_composition_surface`; `gpui_apple` exports `new_overlay_renderer`
 for `gpui_macos`, `WgpuRenderer` gains `new_sharing_atlas` and
 `replace_surface_sharing_context` for `gpui_linux`, and `Background` gains
-`is_opaque` so `gpui_linux` cuts only opaque content out of native surfaces. It all lives in `fast::composition`, so when
-  upstream merges its version, the sync replaces ours with it. Two things
+`is_opaque` so `gpui_linux` cuts only opaque content out of native surfaces. It all lives in `fast::composition`.
+  Upstream instead merged a different, macOS-only API,
+  [zed#67311](https://github.com/zed-industries/zed/pull/67311) `NativeView`
+  (primitives composited into the scene by the Metal renderer). The two
+  coexist: syncs keep upstream's `NativeView` as it is and keep
+  `fast::composition`, which covers macOS, Windows, X11 and Wayland and which
+  gpui-kit's webview and NSH depend on. Neither replaces the other. Two things
   behave differently from the pull request: a retained view drawn again from
   last frame keeps the surface switches it made, and `with_composition_surface`
   inside a scroll layer paints where the layer does. A window that composes

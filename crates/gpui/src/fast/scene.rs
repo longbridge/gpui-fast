@@ -4,8 +4,8 @@
 //! the bounds tree replays.
 
 use crate::{
-    DrawOrder, MonochromeSprite, PaintSurface, Path, PolychromeSprite, Quad, ScaledPixels, Scene,
-    Shadow, SubpixelSprite, Underline,
+    DrawOrder, MonochromeSprite, PaintSurface, PaintedPath, PolychromeSprite, Quad, Scene, Shadow,
+    SubpixelSprite, Underline,
 };
 use std::mem;
 
@@ -16,7 +16,7 @@ pub(crate) struct SortScratch {
     permutation: Permutation,
     shadows: Vec<Shadow>,
     quads: Vec<Quad>,
-    paths: Vec<Path<ScaledPixels>>,
+    paths: Vec<PaintedPath>,
     underlines: Vec<Underline>,
     monochrome_sprites: Vec<MonochromeSprite>,
     subpixel_sprites: Vec<SubpixelSprite>,
@@ -259,7 +259,7 @@ pub(crate) fn sort_in_drawing_order(scene: &mut Scene) {
     }
     sort!(shadows, |shadow: &Shadow| shadow.order);
     sort!(quads, |quad: &Quad| quad.order);
-    sort!(paths, |path: &Path<ScaledPixels>| path.order);
+    sort!(paths, |path: &PaintedPath| path.order);
     sort!(underlines, |underline: &Underline| underline.order);
     sort_sprites!(monochrome_sprites);
     sort_sprites!(subpixel_sprites);
@@ -269,6 +269,66 @@ pub(crate) fn sort_in_drawing_order(scene: &mut Scene) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn replaying_a_layer_in_one_pass_inserts_what_painting_it_did() {
+        use crate::scene::{PaintOperation, Primitive, Quad, Scene};
+        use crate::{Bounds, ContentMask, ScaledPixels, point, size};
+        let rect = |x: f32, y: f32, w: f32, h: f32| Bounds {
+            origin: point(ScaledPixels(x), ScaledPixels(y)),
+            size: size(ScaledPixels(w), ScaledPixels(h)),
+        };
+        let quad = |bounds: Bounds<ScaledPixels>, mask: Bounds<ScaledPixels>| Quad {
+            bounds,
+            content_mask: ContentMask { bounds: mask },
+            ..Default::default()
+        };
+        let all = rect(0., 0., 1000., 1000.);
+        let mut painted = Scene::default();
+        painted.insert_primitive(quad(rect(0., 0., 100., 100.), all));
+        painted.push_layer(rect(10., 10., 50., 20.));
+        painted.insert_primitive(quad(rect(10., 10., 20., 20.), all));
+        painted.insert_primitive(quad(rect(20., 10., 20., 20.), all));
+        // Clipped away: left out of the layer's bounds and batches.
+        painted.insert_primitive(quad(rect(500., 500., 20., 20.), rect(0., 0., 1., 1.)));
+        painted.insert_primitive(quad(rect(40., 10., 20., 20.), all));
+        painted.pop_layer();
+        painted.push_layer(rect(0., 0., 0., 0.));
+        painted.pop_layer();
+        painted.insert_primitive(quad(rect(30., 15., 10., 10.), all));
+        painted.push_layer(rect(0., 0., 300., 300.));
+        painted.push_layer(rect(0., 0., 300., 300.)); // nested: the general path
+        painted.insert_primitive(quad(rect(25., 25., 200., 200.), all));
+        painted.pop_layer();
+        painted.pop_layer();
+
+        let mut replayed = Scene::default();
+        replayed.replay(0..painted.len(), &painted);
+
+        let quads = |scene: &Scene| {
+            scene
+                .quads
+                .iter()
+                .map(|quad| (quad.bounds, quad.order))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(quads(&replayed), quads(&painted));
+        let operations = |scene: &Scene| {
+            scene
+                .paint_operations
+                .iter()
+                .map(|operation| match operation {
+                    PaintOperation::Primitive(Primitive::Quad(quad)) => {
+                        format!("quad {:?} {}", quad.bounds, quad.order)
+                    }
+                    PaintOperation::StartLayer(bounds) => format!("start {bounds:?}"),
+                    PaintOperation::EndLayer => "end".to_string(),
+                    _ => "other".to_string(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(operations(&replayed), operations(&painted));
+    }
+
     use super::{MAX_ORDERS_PER_PRIMITIVE, Permutation, sort_by_draw_order, sort_sprites};
     use crate::DrawOrder;
     use rand::{Rng as _, SeedableRng as _, rngs::StdRng};
@@ -432,4 +492,216 @@ mod tests {
         let painted: Vec<usize> = sorted.iter().map(|item| item.painted).collect();
         assert_eq!(painted, [3, 2, 1, 0]);
     }
+}
+
+/// What a platform's partial redraw compares a painted path by: its draw
+/// order and a key that changes when the pixels it paints may change (its
+/// binned tiles, shared while the path keeps its shape and place, and its
+/// paint).
+pub fn painted_path_key(path: &PaintedPath) -> (DrawOrder, u64) {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = collections::FxHasher::default();
+    (std::rc::Rc::as_ptr(&path.tiles) as usize).hash(&mut hasher);
+    for value in [
+        path.bounds.origin.x.0,
+        path.bounds.origin.y.0,
+        path.bounds.size.width.0,
+        path.bounds.size.height.0,
+    ] {
+        value.to_bits().hash(&mut hasher);
+    }
+    format!("{:?}", path.paint.color).hash(&mut hasher);
+    (path.paint.even_odd == true.into()).hash(&mut hasher);
+    (path.order, hasher.finish())
+}
+
+/// Sets the draw order of `primitive`, as the scene keeps it in its paint
+/// operations: upstream assigns orders only to the primitives it batches,
+/// while `fast::layers` reads them from the paint operations (baking a
+/// layer's background, ordering its tiles).
+pub(crate) fn set_draw_order(primitive: &mut crate::scene::Primitive, order: DrawOrder) {
+    use crate::scene::Primitive;
+    match primitive {
+        Primitive::Shadow(p) => p.order = order,
+        Primitive::Quad(p) => p.order = order,
+        Primitive::Path(p) => p.order = order,
+        Primitive::Underline(p) => p.order = order,
+        Primitive::MonochromeSprite(p) => p.order = order,
+        Primitive::SubpixelSprite(p) => p.order = order,
+        Primitive::PolychromeSprite(p) => p.order = order,
+        Primitive::Surface(p) => p.order = order,
+        Primitive::NativeView(p) => p.order = order,
+    }
+}
+
+/// Starts collecting the pieces upstream's `Window::insert_quad` splits a
+/// quad into, to insert them together at [`end_quad_pieces`].
+pub(crate) fn begin_quad_pieces(scene: &mut Scene) {
+    scene.fast_quad_pieces = Some(smallvec::SmallVec::new());
+}
+
+pub(crate) fn end_quad_pieces(scene: &mut Scene) {
+    if let Some(pieces) = scene.fast_quad_pieces.take() {
+        insert_quad_pieces(scene, &pieces);
+    }
+}
+
+/// Keeps `primitive` as a piece while pieces are collected, or hands it back.
+pub(crate) fn quad_piece(
+    scene: &mut Scene,
+    primitive: crate::scene::Primitive,
+) -> Option<crate::scene::Primitive> {
+    match (&mut scene.fast_quad_pieces, primitive) {
+        (Some(pieces), crate::scene::Primitive::Quad(quad)) => {
+            pieces.push(quad);
+            None
+        }
+        (_, primitive) => Some(primitive),
+    }
+}
+
+/// Inserts the pieces a quad was split into (upstream's `Window::insert_quad`
+/// splits a bordered or rounded quad into its interior and four strips).
+///
+/// The pieces don't overlap, so they can share one place in the drawing
+/// order: the one the quad as a whole would get. That is one insert into the
+/// bounds tree instead of five, and the same insert from one frame to the
+/// next, which the tree replays. Inside a layer the pieces already share the
+/// layer's place, so they are inserted as they are.
+pub(crate) fn insert_quad_pieces(scene: &mut Scene, pieces: &[Quad]) {
+    if pieces.len() < 2 || !scene.fast_top_level() {
+        for piece in pieces {
+            scene.insert_primitive(*piece);
+        }
+        return;
+    }
+    let pieces: smallvec::SmallVec<[_; 5]> = pieces
+        .iter()
+        .map(|piece| (*piece, quad_clipped_bounds(piece)))
+        .collect();
+    insert_bounded_pieces(scene, &pieces);
+}
+
+/// A quad's bounds clipped to its content mask (quads have no transformation),
+/// without building a `Primitive` around it.
+#[inline]
+fn quad_clipped_bounds(quad: &Quad) -> crate::Bounds<crate::ScaledPixels> {
+    quad.bounds.intersect(&quad.content_mask.bounds)
+}
+
+/// [`insert_quad_pieces`] with each piece's clipped bounds worked out once.
+fn insert_bounded_pieces(scene: &mut Scene, pieces: &[(Quad, crate::Bounds<crate::ScaledPixels>)]) {
+    if pieces.len() < 2 || !scene.fast_top_level() {
+        for (piece, _) in pieces {
+            scene.insert_primitive(*piece);
+        }
+        return;
+    }
+    let mut union = None::<crate::Bounds<crate::ScaledPixels>>;
+    for (_, bounds) in pieces {
+        if !bounds.is_empty() {
+            union = Some(match union {
+                Some(union) => union.join(bounds),
+                None => *bounds,
+            });
+        }
+    }
+    let Some(union) = union else {
+        return;
+    };
+    let order = scene.primitive_bounds.insert(union);
+    for (piece, bounds) in pieces {
+        if bounds.is_empty() {
+            continue;
+        }
+        scene.fast_push_quad(*piece, order);
+    }
+}
+
+/// Consecutive quads being replayed that can be inserted as the pieces of
+/// one, see [`insert_quad_pieces`]: they have the same bounds (a split quad's
+/// pieces keep the bounds of the whole) and don't overlap.
+#[derive(Default)]
+pub(crate) struct QuadRun {
+    pieces: smallvec::SmallVec<[(Quad, crate::Bounds<crate::ScaledPixels>); 5]>,
+}
+
+impl QuadRun {
+    pub(crate) fn push(&mut self, scene: &mut Scene, quad: Quad) {
+        let bounds = quad_clipped_bounds(&quad);
+        if let Some((first, _)) = self.pieces.first()
+            && (first.bounds != quad.bounds
+                || self
+                    .pieces
+                    .iter()
+                    .any(|(_, piece)| piece.intersects(&bounds)))
+        {
+            self.flush(scene);
+        }
+        self.pieces.push((quad, bounds));
+    }
+
+    pub(crate) fn flush(&mut self, scene: &mut Scene) {
+        if !self.pieces.is_empty() {
+            insert_bounded_pieces(scene, &self.pieces);
+            self.pieces.clear();
+        }
+    }
+}
+
+/// Replays a top-level layer of the previous scene (`operations` starts at its
+/// `StartLayer`) the way painting it would insert it: one place in the drawing
+/// order for the union of what it painted, in one pass instead of collecting
+/// it as a pending layer. Gives up (`None`) on nested layers, rounded clips and
+/// native views, which the general path handles; otherwise returns how many
+/// operations it replayed.
+pub(crate) fn replay_flat_layer(
+    scene: &mut Scene,
+    operations: &[crate::scene::PaintOperation],
+) -> Option<usize> {
+    use crate::scene::{PaintOperation, Primitive};
+    let PaintOperation::StartLayer(layer_bounds) = operations.first()? else {
+        return None;
+    };
+    let mut union = None::<crate::Bounds<crate::ScaledPixels>>;
+    let mut end = None;
+    // What painting clipped away, which is rare.
+    let mut clipped_away = smallvec::SmallVec::<[usize; 4]>::new();
+    for (index, operation) in operations.iter().enumerate().skip(1) {
+        match operation {
+            PaintOperation::Primitive(Primitive::NativeView(_)) => return None,
+            PaintOperation::Primitive(primitive) => {
+                let bounds = primitive.clipped_bounds();
+                if bounds.is_empty() {
+                    clipped_away.push(index);
+                } else {
+                    union = Some(match union {
+                        Some(union) => union.join(&bounds),
+                        None => bounds,
+                    });
+                }
+            }
+            PaintOperation::EndLayer => {
+                end = Some(index);
+                break;
+            }
+            PaintOperation::StartLayer(_) | PaintOperation::FastRoundedClip(_) => return None,
+        }
+    }
+    let end = end?;
+    scene
+        .paint_operations
+        .push(PaintOperation::StartLayer(*layer_bounds));
+    if let Some(union) = union {
+        let order = scene.primitive_bounds.insert(union);
+        for (index, operation) in operations[..end].iter().enumerate().skip(1) {
+            if let PaintOperation::Primitive(primitive) = operation
+                && !clipped_away.contains(&index)
+            {
+                scene.fast_push_painted(primitive, order);
+            }
+        }
+    }
+    scene.paint_operations.push(PaintOperation::EndLayer);
+    Some(end + 1)
 }

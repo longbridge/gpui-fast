@@ -1,331 +1,255 @@
-//! Tessellated paths kept from one build to the next.
+//! Paths kept from one frame to the next.
 //!
-//! A path is tessellated into triangles every time it is built, which for a
-//! sparkline in every row of a table, a chart's moving averages or a donut is
-//! a large part of what painting them costs, though most of them are the same
-//! shape as the frame before, or the same shape moved, as a table scrolls.
+//! Upstream builds a path's outline (stroking it with tiny-skia) and bins its
+//! curves into tiles every time it is painted, which for a sparkline in every
+//! row of a table, a chart or a window-sized ground with holes is most of
+//! what painting them costs, though most are the same shape as the frame
+//! before.
 //!
-//! [`build`] tessellates a path relative to its first point and keeps the
-//! triangles, keyed by that relative path and by how it is stroked or filled;
-//! a path of the same shape built again anywhere reuses them, moved to its
-//! first point. Every path is tessellated that way, kept or not, so a path
-//! drawn from kept triangles is exactly the path tessellating it again gives.
+//! [`build`] keeps a built [`Path`] keyed by the builder's events and style,
+//! so the same shape built again shares its curves; [`bin`] keeps the tiles
+//! a path's curves were binned into at a scale, keyed by those shared curves,
+//! so a path painted again unchanged is not binned again. Both give exactly
+//! what building and binning again would.
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, hash::Hash, rc::Rc, sync::Arc};
 
 use anyhow::Error;
 use collections::FxHashMap;
-use lyon::path::PathEvent;
+use lyon_path::Event;
 
-use crate::{Bounds, Path, PathBuilder, PathStyle, PathVertex, Pixels, Point, point, px};
+use crate::{Path, PathBuilder, PathCurve, PathStyle, PathTiles};
 
-/// How many shapes are kept before the least recently drawn is let go.
+/// How many shapes a generation keeps before the older one is let go.
 const KEPT: usize = 2048;
 
-/// How many bytes of keys and triangles (their weight: the memory they own,
-/// not what surrounds them) the kept shapes weigh before the least recently
-/// drawn is let go. A window-sized path is hundreds of kilobytes, a sparkline
-/// about ten.
-const KEPT_BYTES: usize = 16 * 1024 * 1024;
+/// How many bytes of curves and tiles a generation keeps before the older
+/// one is let go. A thread keeps at most two generations.
+const KEPT_BYTES: usize = 8 * 1024 * 1024;
 
-/// A link to no slot.
-const NONE: usize = usize::MAX;
+/// Two generations of entries: those used since the last turn, and those
+/// used before it. A hit in the older moves the entry to the newer; when the
+/// newer outgrows the limits it becomes the older and the older is let go,
+/// so an entry not used for a whole generation goes.
+struct Generations<K, V> {
+    newer: FxHashMap<K, (V, usize)>,
+    older: FxHashMap<K, (V, usize)>,
+    bytes: usize,
+}
+
+impl<K: Hash + Eq, V: Clone> Generations<K, V> {
+    fn new() -> Self {
+        Self {
+            newer: FxHashMap::default(),
+            older: FxHashMap::default(),
+            bytes: 0,
+        }
+    }
+
+    fn get(&mut self, key: &K) -> Option<V>
+    where
+        K: Clone,
+    {
+        if let Some((value, _)) = self.newer.get(key) {
+            return Some(value.clone());
+        }
+        let (key, (value, bytes)) = self.older.remove_entry(key)?;
+        self.insert(key, value.clone(), bytes);
+        Some(value)
+    }
+
+    fn insert(&mut self, key: K, value: V, bytes: usize) {
+        if self.newer.len() >= KEPT || self.bytes + bytes > KEPT_BYTES {
+            self.older = std::mem::take(&mut self.newer);
+            self.bytes = 0;
+        }
+        self.bytes += bytes;
+        self.newer.insert(key, (value, bytes));
+    }
+
+    #[cfg(test)]
+    fn clear(&mut self) {
+        self.newer.clear();
+        self.older.clear();
+        self.bytes = 0;
+    }
+}
+
+/// A path's curves, compared by identity: [`build`] shares the curves of
+/// every path of one shape, so the same shape has the same curves.
+#[derive(Clone)]
+struct CurvesKey(Arc<[PathCurve]>);
+
+impl PartialEq for CurvesKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for CurvesKey {}
+
+impl Hash for CurvesKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0) as *const PathCurve as usize).hash(state)
+    }
+}
 
 thread_local! {
-    static KEPT_PATHS: RefCell<KeptPaths> = RefCell::new(KeptPaths::new(KEPT_BYTES, KEPT));
+    static BUILT: RefCell<Generations<Rc<[u32]>, Path>> = RefCell::new(Generations::new());
+    static BINNED: RefCell<Generations<(CurvesKey, bool, u32), Rc<PathTiles>>> =
+        RefCell::new(Generations::new());
+    static MOVED: RefCell<Generations<Rc<[u32]>, (Rc<PathTiles>, crate::Point<f32>)>> =
+        RefCell::new(Generations::new());
 }
 
-/// Tessellated shapes, the least recently drawn let go first once more than
-/// `shapes` are kept or they weigh more than `limit`.
-///
-/// A shape stays kept until `shapes` other shapes, or other shapes weighing
-/// `limit` less its own weight, have been drawn since it last was. One
-/// exception: a shape heavier than `limit` is kept alone in a slot of its
-/// own, outside the rest, until the next such shape takes it. One drawn every
-/// frame lets go of none of the rest, but two drawn in turn each take the
-/// slot from the other and are tessellated every time. A thread keeps at most
-/// `limit` plus the one shape in its slot.
-struct KeptPaths {
-    /// Slots linked from the newest shape drawn to the oldest.
-    slots: Vec<Option<Slot>>,
-    /// The slots no shape is in.
-    vacant: Vec<usize>,
-    index: FxHashMap<Rc<[u32]>, usize>,
-    newest: usize,
-    oldest: usize,
-    /// The weight of the shapes in `slots`.
-    bytes: usize,
-    heavy: Option<(Rc<[u32]>, Rc<Path<Pixels>>)>,
-    limit: usize,
-    shapes: usize,
-    #[cfg(test)]
-    stats: PathCacheStats,
-}
-
-struct Slot {
-    key: Rc<[u32]>,
-    path: Rc<Path<Pixels>>,
-    bytes: usize,
-    newer: usize,
-    older: usize,
-}
-
-/// What a thread's kept shapes did since it began, and hold now, for
-/// benchmarks and tests. Counts are per thread.
-#[cfg(test)]
-#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PathCacheStats {
-    /// Paths built from kept triangles.
-    pub hits: u64,
-    /// Paths tessellated, and then kept.
-    pub misses: u64,
-    /// Shapes let go, to keep to the count or the weight.
-    pub evictions: u64,
-    /// The weight, in bytes, of the shapes tessellated, kept or since let go.
-    pub built_bytes: u64,
-    /// The weight, in bytes, of the shapes kept now.
-    pub held_bytes: usize,
-    /// How many shapes are kept now.
-    pub held_shapes: usize,
-}
-
-/// What keeping `path` under `key` weighs: the memory its key (exactly its
-/// length) and its triangles (their capacity) own, not the memory around them.
-fn weight(key: &[u32], path: &Path<Pixels>) -> usize {
-    std::mem::size_of_val(key)
-        + path.vertices.capacity() * std::mem::size_of::<PathVertex<Pixels>>()
-}
-
-impl KeptPaths {
-    fn new(limit: usize, shapes: usize) -> Self {
-        Self {
-            slots: Vec::new(),
-            vacant: Vec::new(),
-            index: FxHashMap::default(),
-            newest: NONE,
-            oldest: NONE,
-            bytes: 0,
-            heavy: None,
-            limit,
-            shapes,
-            #[cfg(test)]
-            stats: PathCacheStats::default(),
-        }
+/// Builds `builder` as [`PathBuilder::build`] does, sharing the curves of the
+/// path last built of the same shape.
+pub(crate) fn build(builder: PathBuilder) -> Result<Path, Error> {
+    let (lyon, style, dash_array) = builder.fast_into_parts();
+    let key: Rc<[u32]> = shape_key(&lyon, &style, dash_array.as_deref()).into();
+    if let Some(path) = BUILT.with_borrow_mut(|built| built.get(&key)) {
+        return Ok(path);
     }
+    let (curves, fill_rule) = PathBuilder::fast_from_parts(&lyon, style, dash_array).outline()?;
+    let path = Path::from_curves(curves, fill_rule);
+    let bytes = key.len() * 4 + std::mem::size_of_val(&**PathBuilder::fast_curves(&path));
+    BUILT.with_borrow_mut(|built| built.insert(key, path.clone(), bytes));
+    Ok(path)
+}
 
-    fn slot(&self, at: usize) -> &Slot {
-        self.slots[at].as_ref().expect("a linked slot is occupied")
+/// `path`'s curves binned into tiles at `scale`, as [`Path::bin`] gives
+/// them, shared with the last time the same curves were binned at it.
+pub(crate) fn bin(path: &Path, scale: f32) -> Rc<PathTiles> {
+    let key = (
+        CurvesKey(PathBuilder::fast_curves(&path).clone()),
+        path.even_odd(),
+        scale.to_bits(),
+    );
+    if let Some(tiles) = BINNED.with_borrow_mut(|binned| binned.get(&key)) {
+        return tiles;
     }
-
-    fn slot_mut(&mut self, at: usize) -> &mut Slot {
-        self.slots[at].as_mut().expect("a linked slot is occupied")
-    }
-
-    fn get(&mut self, key: &[u32]) -> Option<Rc<Path<Pixels>>> {
-        let found = match self.index.get(key) {
-            Some(&at) => {
-                if self.newest != at {
-                    self.unlink(at);
-                    self.link_newest(at);
-                }
-                Some(self.slot(at).path.clone())
-            }
-            None => match &self.heavy {
-                Some((heavy, path)) if **heavy == *key => Some(path.clone()),
-                _ => None,
-            },
-        };
-        #[cfg(test)]
-        if found.is_some() {
-            self.stats.hits += 1;
-        }
-        found
-    }
-
-    /// Keeps a shape just tessellated, letting go of the least recently drawn
-    /// until it fits.
-    fn insert(&mut self, key: Vec<u32>, path: Rc<Path<Pixels>>) {
-        let key: Rc<[u32]> = key.into();
-        let bytes = weight(&key, &path);
-        #[cfg(test)]
-        {
-            self.stats.misses += 1;
-            self.stats.built_bytes += bytes as u64;
-        }
-        if bytes > self.limit {
-            #[cfg(test)]
-            if self.heavy.is_some() {
-                self.stats.evictions += 1;
-            }
-            self.heavy = Some((key, path));
-            return;
-        }
-        while self.bytes + bytes > self.limit || self.index.len() >= self.shapes {
-            self.let_go_of_oldest();
-        }
-        let slot = Slot {
-            key: key.clone(),
-            path,
-            bytes,
-            newer: NONE,
-            older: NONE,
-        };
-        let at = match self.vacant.pop() {
-            Some(at) => {
-                self.slots[at] = Some(slot);
-                at
+    let tiles = match moved_key(&key.0.0, key.1, scale) {
+        Some((moved, at)) => match MOVED.with_borrow_mut(|kept| kept.get(&moved)) {
+            // The same shape at another whole device pixel: its tiles moved.
+            Some((tiles, was)) => {
+                Rc::new(tiles.translated(crate::point(at.x - was.x, at.y - was.y)))
             }
             None => {
-                self.slots.push(Some(slot));
-                self.slots.len() - 1
+                let tiles = Rc::new(path.bin(scale));
+                let bytes = moved.len() * 4 + tiles_bytes(&tiles);
+                MOVED.with_borrow_mut(|kept| kept.insert(moved, (tiles.clone(), at), bytes));
+                tiles
             }
-        };
-        self.index.insert(key, at);
-        self.link_newest(at);
-        self.bytes += bytes;
-    }
-
-    fn let_go_of_oldest(&mut self) {
-        let at = self.oldest;
-        self.unlink(at);
-        let slot = self.slots[at].take().expect("a linked slot is occupied");
-        self.index.remove(&slot.key);
-        self.bytes -= slot.bytes;
-        self.vacant.push(at);
-        #[cfg(test)]
-        {
-            self.stats.evictions += 1;
-        }
-    }
-
-    fn unlink(&mut self, at: usize) {
-        let Slot { newer, older, .. } = *self.slot(at);
-        match newer {
-            NONE => self.newest = older,
-            newer => self.slot_mut(newer).older = older,
-        }
-        match older {
-            NONE => self.oldest = newer,
-            older => self.slot_mut(older).newer = newer,
-        }
-    }
-
-    fn link_newest(&mut self, at: usize) {
-        let before = self.newest;
-        let slot = self.slot_mut(at);
-        slot.newer = NONE;
-        slot.older = before;
-        match before {
-            NONE => self.oldest = at,
-            before => self.slot_mut(before).newer = at,
-        }
-        self.newest = at;
-    }
+        },
+        None => Rc::new(path.bin(scale)),
+    };
+    let bytes = tiles_bytes(&tiles);
+    BINNED.with_borrow_mut(|binned| binned.insert(key, tiles.clone(), bytes));
+    tiles
 }
 
-/// What this thread's kept shapes did and hold.
+fn tiles_bytes(tiles: &PathTiles) -> usize {
+    std::mem::size_of_val(tiles.tiles()) + std::mem::size_of_val(tiles.curves())
+}
+
+/// The key a path's curves are kept by wherever they lie, with the whole
+/// device pixel their first point lies in: the curves relative to that
+/// point, the point's offset within its pixel, the fill rule and the scale.
+/// Paths of one key bin into tiles that differ only by the move between
+/// their pixels, as a scrolled sparkline or chart does every frame.
+fn moved_key(
+    curves: &[PathCurve],
+    even_odd: bool,
+    scale: f32,
+) -> Option<(Rc<[u32]>, crate::Point<f32>)> {
+    let first = curves.first()?.p0;
+    let device = crate::point(first.x * scale, first.y * scale);
+    let at = crate::point(device.x.floor(), device.y.floor());
+    // Far from the origin a move is no longer exact in f32.
+    if !(at.x.abs() < 65536. && at.y.abs() < 65536.) {
+        return None;
+    }
+    // On the 1/256 grid the binner snaps end points to.
+    let within = |v: f32| ((v * 256.).round() as i32) as u32;
+    let mut key = Vec::with_capacity(curves.len() * 9 + 4);
+    key.extend([
+        within(device.x - at.x),
+        within(device.y - at.y),
+        even_odd as u32,
+        scale.to_bits(),
+    ]);
+    for curve in curves {
+        key.extend([
+            (curve.p0.x - first.x).to_bits(),
+            (curve.p0.y - first.y).to_bits(),
+            (curve.p1.x - first.x).to_bits(),
+            (curve.p1.y - first.y).to_bits(),
+            curve.a.x.to_bits(),
+            curve.a.y.to_bits(),
+            curve.b.x.to_bits(),
+            curve.b.y.to_bits(),
+            curve.sign.to_bits(),
+        ]);
+    }
+    Some((key.into(), at))
+}
+
+/// `tiles` without those lying entirely outside `mask`, shared when none do.
+pub(crate) fn visible(
+    tiles: Rc<PathTiles>,
+    mask: crate::Bounds<crate::ScaledPixels>,
+) -> Rc<PathTiles> {
+    let visible = |tile: &crate::PathTile| {
+        tile.top_left.x < mask.right().0
+            && tile.top_left.y < mask.bottom().0
+            && tile.bottom_right.x > mask.origin.x.0
+            && tile.bottom_right.y > mask.origin.y.0
+    };
+    if tiles.tiles().iter().all(visible) {
+        return tiles;
+    }
+    // A copy: moving by nothing keeps every coordinate.
+    let mut tiles = tiles.translated(crate::point(0., 0.));
+    tiles.retain_visible(mask);
+    Rc::new(tiles)
+}
+
+/// Lets go of every kept path on this thread.
 #[cfg(test)]
-pub(crate) fn path_cache_stats() -> PathCacheStats {
-    KEPT_PATHS.with_borrow(|kept| {
-        let heavy = kept.heavy.as_ref();
-        PathCacheStats {
-            held_bytes: kept.bytes + heavy.map_or(0, |(key, path)| weight(key, path)),
-            held_shapes: kept.index.len() + heavy.is_some() as usize,
-            ..kept.stats
-        }
-    })
+pub(crate) fn clear() {
+    BUILT.with_borrow_mut(Generations::clear);
+    BINNED.with_borrow_mut(Generations::clear);
+    MOVED.with_borrow_mut(Generations::clear);
 }
 
-/// Builds `builder` as [`PathBuilder::build`] does, from triangles kept from
-/// an earlier path of the same shape where there is one.
-#[inline]
-pub(crate) fn build(builder: PathBuilder) -> Result<Path<Pixels>, Error> {
-    let path = match builder.transform {
-        Some(transform) => builder.raw.build().transformed(&transform),
-        None => builder.raw.build(),
-    };
-    let Some(origin) = path.iter().find_map(|event| match event {
-        PathEvent::Begin { at } => Some(at),
-        _ => None,
-    }) else {
-        return tessellate(&builder.style, builder.dash_array, &path);
-    };
-    let relative = path.transformed(&lyon::math::Transform::translation(-origin.x, -origin.y));
-    let offset = point(px(origin.x), px(origin.y));
-
-    let key = shape_key(&relative, &builder.style, builder.dash_array.as_deref());
-    if let Some(kept) = KEPT_PATHS.with_borrow_mut(|kept| kept.get(&key)) {
-        return Ok(moved(&kept, offset));
-    }
-    let tessellated = tessellate(&builder.style, builder.dash_array, &relative)?;
-    let tessellated = Rc::new(tessellated);
-    KEPT_PATHS.with_borrow_mut(|kept| kept.insert(key, tessellated.clone()));
-    Ok(moved(&tessellated, offset))
-}
-
-fn tessellate(
-    style: &PathStyle,
-    dash_array: Option<Vec<Pixels>>,
-    path: &lyon::path::Path,
-) -> Result<Path<Pixels>, Error> {
-    match style {
-        PathStyle::Stroke(options) => PathBuilder::tessellate_stroke(dash_array, path, options),
-        PathStyle::Fill(options) => PathBuilder::tessellate_fill(path, options),
-    }
-}
-
-/// `path`, tessellated at the origin, moved by `offset`, as tessellating it
-/// with `build_path` there gives it: starting at its first vertex.
-fn moved(path: &Path<Pixels>, offset: Point<Pixels>) -> Path<Pixels> {
-    let start = path
-        .vertices
-        .first()
-        .map_or(offset, |vertex| vertex.xy_position + offset);
-    let mut moved = Path::new(start);
-    moved.vertices = path
-        .vertices
-        .iter()
-        .map(|vertex| {
-            let mut vertex = vertex.clone();
-            vertex.xy_position = vertex.xy_position + offset;
-            vertex
-        })
-        .collect();
-    moved.bounds = Bounds {
-        origin: path.bounds.origin + offset,
-        size: path.bounds.size,
-    };
-    moved
-}
-
-/// The key a shape is kept by: its events at the origin, and how it is
-/// stroked or filled, as bits, so that only the same shape matches.
+/// The key a shape is kept by: its transformed events and how it is stroked
+/// or filled, as bits, so that only the same shape matches.
 fn shape_key(
-    path: &lyon::path::Path,
+    path: &lyon_path::Path,
     style: &PathStyle,
-    dash_array: Option<&[Pixels]>,
+    dash_array: Option<&[crate::Pixels]>,
 ) -> Vec<u32> {
     let mut key = Vec::with_capacity(64);
-    let point = |key: &mut Vec<u32>, point: lyon::math::Point| {
+    let point = |key: &mut Vec<u32>, point: lyon_path::math::Point| {
         key.push(point.x.to_bits());
         key.push(point.y.to_bits());
     };
     for event in path.iter() {
         match event {
-            PathEvent::Begin { at } => {
+            Event::Begin { at } => {
                 key.push(0);
                 point(&mut key, at);
             }
-            PathEvent::Line { to, .. } => {
+            Event::Line { to, .. } => {
                 key.push(1);
                 point(&mut key, to);
             }
-            PathEvent::Quadratic { ctrl, to, .. } => {
+            Event::Quadratic { ctrl, to, .. } => {
                 key.push(2);
                 point(&mut key, ctrl);
                 point(&mut key, to);
             }
-            PathEvent::Cubic {
+            Event::Cubic {
                 ctrl1, ctrl2, to, ..
             } => {
                 key.push(3);
@@ -333,300 +257,119 @@ fn shape_key(
                 point(&mut key, ctrl2);
                 point(&mut key, to);
             }
-            PathEvent::End { close, .. } => key.push(4 + close as u32),
+            Event::End { close, .. } => key.push(4 + close as u32),
         }
     }
-    // The options are small and seldom vary; their debug form covers every
-    // field without listing them.
-    let options = match style {
-        PathStyle::Stroke(options) => format!("s{options:?}"),
-        PathStyle::Fill(options) => format!("f{options:?}"),
-    };
     key.push(u32::MAX);
-    key.extend(options.bytes().map(u32::from));
+    match style {
+        PathStyle::Stroke(options) => {
+            key.push(0);
+            key.push(options.line_width.to_bits());
+            key.push(options.line_cap as u32);
+            key.push(options.line_join as u32);
+            key.push(options.miter_limit.to_bits());
+        }
+        PathStyle::Fill(options) => {
+            key.push(1);
+            key.push(options.fill_rule as u32);
+        }
+    }
     if let Some(dash_array) = dash_array {
-        key.push(u32::MAX - 1);
+        key.push(u32::MAX - 2);
         key.extend(dash_array.iter().map(|dash| dash.0.to_bits()));
     }
     key
 }
 
-/// The most this thread's kept shapes weigh when none is heavier than the limit.
-#[cfg(test)]
-pub(crate) const MOST_HELD_BYTES: usize = KEPT_BYTES;
-
 #[cfg(test)]
 mod tests {
-    use rand::{Rng as _, SeedableRng as _, rngs::StdRng};
+    use super::{Arc, Generations, KEPT, Path, PathBuilder, Rc, bin, build, clear};
+    use crate::{point, px};
 
-    use super::{KEPT, KeptPaths, NONE, Path, PathVertex, Pixels, Rc, point, px, weight};
-
-    /// A shape of `vertices` vertices, under a key of one word.
-    fn shape(id: u32, vertices: usize) -> (Vec<u32>, Rc<Path<Pixels>>) {
-        let mut path = Path::new(point(px(0.), px(0.)));
-        path.vertices = vec![
-            PathVertex {
-                xy_position: point(px(1.), px(2.)),
-                st_position: point(0., 1.),
-                content_mask: Default::default(),
-            };
-            vertices
-        ];
-        (vec![id], Rc::new(path))
-    }
-
-    /// What a shape of `vertices` vertices weighs.
-    fn weighs(vertices: usize) -> usize {
-        let (key, path) = shape(0, vertices);
-        weight(&key, &path)
-    }
-
-    /// Draws a shape as `build` does: kept triangles if there are, else a
-    /// shape tessellated and kept. Whether it was kept.
-    fn draw(kept: &mut KeptPaths, id: u32, vertices: usize) -> bool {
-        let (key, path) = shape(id, vertices);
-        if kept.get(&key).is_some() {
-            return true;
+    fn sparkline(x: f32) -> PathBuilder {
+        let mut builder = PathBuilder::stroke(px(1.5));
+        builder.move_to(point(px(x), px(10.)));
+        for step in 1..20 {
+            builder.line_to(point(
+                px(x + step as f32 * 1.5),
+                px(10. + ((step * 7) % 11) as f32),
+            ));
         }
-        kept.insert(key, path);
-        false
-    }
-
-    /// The links, the index and the weights agree, and the limits hold.
-    fn consistent(kept: &KeptPaths) {
-        let mut at = kept.newest;
-        let (mut linked, mut bytes, mut before) = (0, 0, NONE);
-        while at != NONE {
-            let slot = kept.slot(at);
-            assert_eq!(slot.newer, before);
-            assert_eq!(kept.index[&slot.key], at);
-            assert_eq!(slot.bytes, weight(&slot.key, &slot.path));
-            (linked, bytes, before, at) = (linked + 1, bytes + slot.bytes, at, slot.older);
-        }
-        assert_eq!(before, kept.oldest);
-        assert_eq!(linked, kept.index.len());
-        assert_eq!(bytes, kept.bytes);
-        assert!(kept.bytes <= kept.limit);
-        assert!(kept.index.len() <= kept.shapes);
-        assert_eq!(kept.slots.iter().flatten().count(), linked);
+        builder
     }
 
     #[test]
-    fn unique_shapes_never_weigh_more_than_the_limit() {
-        let mut kept = KeptPaths::new(20 * weighs(100), usize::MAX);
-        let mut built = 0;
-        for id in 0..500 {
-            assert!(!draw(&mut kept, id, 100));
-            built += weighs(100);
-            consistent(&kept);
-        }
-        assert!(built > 10 * kept.limit);
-        assert!(
-            kept.bytes > kept.limit - weighs(100),
-            "the newest stay kept"
-        );
+    fn the_same_shape_shares_its_curves_and_tiles() {
+        clear();
+        let a = build(sparkline(3.)).unwrap();
+        let b = build(sparkline(3.)).unwrap();
+        assert!(Arc::ptr_eq(
+            PathBuilder::fast_curves(&a),
+            PathBuilder::fast_curves(&b)
+        ));
+        assert!(Rc::ptr_eq(&bin(&a, 2.), &bin(&b, 2.)));
+        assert!(!Rc::ptr_eq(&bin(&a, 2.), &bin(&b, 1.)));
+        let c = build(sparkline(4.)).unwrap();
+        assert!(!Arc::ptr_eq(
+            PathBuilder::fast_curves(&a),
+            PathBuilder::fast_curves(&c)
+        ));
     }
 
     #[test]
-    fn unique_shapes_never_outnumber_the_count() {
-        let mut kept = KeptPaths::new(usize::MAX, 30);
-        for id in 0..500 {
-            assert!(!draw(&mut kept, id, 1));
-            consistent(&kept);
-        }
-        assert_eq!(kept.index.len(), 30);
+    fn kept_paths_bin_as_paths_built_again_do() {
+        clear();
+        build(sparkline(3.25)).unwrap();
+        let kept = build(sparkline(3.25)).unwrap();
+        let fresh = sparkline(3.25).outline().unwrap();
+        let fresh = Path::from_curves(fresh.0, fresh.1);
+        let (kept, fresh) = (bin(&kept, 1.5), fresh.bin(1.5));
+        assert_eq!(kept.tiles(), fresh.tiles());
+        assert_eq!(kept.curves(), fresh.curves());
     }
 
+    /// A shape moved by whole device pixels reuses the tiles it was binned
+    /// into, moved; they match binning it again where it now lies.
     #[test]
-    fn a_shape_drawn_again_stays_kept_among_unique_large_ones() {
-        let mut kept = KeptPaths::new(20 * weighs(100), usize::MAX);
-        assert!(!draw(&mut kept, u32::MAX, 10));
-        for id in 0..500 {
-            assert!(
-                draw(&mut kept, u32::MAX, 10),
-                "drawn again after {id} others"
-            );
-            draw(&mut kept, id, 100);
-            consistent(&kept);
-        }
-    }
-
-    /// A set drawn every frame, heavier than half the limit and lighter than
-    /// the limit, is kept.
-    #[test]
-    fn a_set_drawn_every_frame_between_half_the_limit_and_the_limit_is_kept() {
-        let mut kept = KeptPaths::new(100 * weighs(100), 2048);
-        for frame in 0..10 {
-            for id in 0..75 {
-                let hit = draw(&mut kept, id, 100);
-                assert_eq!(hit, frame > 0, "shape {id} in frame {frame}");
-            }
-            consistent(&kept);
-        }
-    }
-
-    #[test]
-    fn a_set_drawn_every_frame_is_kept_among_unique_shapes() {
-        let mut kept = KeptPaths::new(100 * weighs(100), 2048);
-        for frame in 0..300 {
-            for id in 0..75 {
-                assert_eq!(
-                    draw(&mut kept, id, 100),
-                    frame > 0,
-                    "shape {id}, frame {frame}"
-                );
-            }
-            draw(&mut kept, 1000 + frame, 100);
-            consistent(&kept);
-        }
-    }
-
-    #[test]
-    fn a_shape_over_the_limit_is_kept_alone_while_it_is_drawn_again() {
-        let mut kept = KeptPaths::new(weighs(300) / 2, usize::MAX);
-        draw(&mut kept, u32::MAX, 300);
-        for id in 0..500 {
-            assert!(
-                draw(&mut kept, u32::MAX, 300),
-                "drawn again after {id} others"
-            );
-            draw(&mut kept, id, 10);
-            consistent(&kept);
-        }
-        assert_eq!(kept.stats.hits, 500);
-    }
-
-    /// Two shapes over the limit drawn in turn share the one slot, so each is
-    /// tessellated every time.
-    #[test]
-    fn two_shapes_over_the_limit_drawn_in_turn_are_tessellated_every_time() {
-        let mut kept = KeptPaths::new(weighs(300) / 2, usize::MAX);
-        for turn in 0..20 {
-            assert!(!draw(&mut kept, turn % 2, 300), "draw {turn}");
-        }
-        assert_eq!(kept.stats.hits, 0);
-        assert_eq!(kept.stats.evictions, 19);
-    }
-
-    #[test]
-    fn a_frame_with_a_shape_over_the_limit_keeps_the_set_drawn_every_frame() {
-        let mut kept = KeptPaths::new(100 * weighs(100), 2048);
-        for frame in 0..50 {
-            for id in 0..75 {
-                assert_eq!(
-                    draw(&mut kept, id, 100),
-                    frame > 0,
-                    "shape {id}, frame {frame}"
-                );
-                if id % 25 == 0 {
-                    // Alternating, so that it is let go of and built again.
-                    draw(&mut kept, u32::MAX - frame % 2, 20_000);
+    fn moved_shapes_bin_as_shapes_binned_where_they_lie() {
+        clear();
+        for (scale, step) in [(1.0, 1.0), (2.0, 0.5), (1.5, 2.0)] {
+            for i in 0..4 {
+                let x = 3.25 + i as f32 * step * 7.;
+                let kept = bin(&build(sparkline(x)).unwrap(), scale);
+                let fresh = sparkline(x).outline().unwrap();
+                let fresh = Path::from_curves(fresh.0, fresh.1).bin(scale);
+                assert_eq!(kept.tiles().len(), fresh.tiles().len());
+                let near = |a: crate::Point<f32>, b: crate::Point<f32>| {
+                    (a.x - b.x).abs() <= 1. / 128. && (a.y - b.y).abs() <= 1. / 128.
+                };
+                for (k, f) in kept.tiles().iter().zip(fresh.tiles()) {
+                    assert!(near(k.top_left, f.top_left) && near(k.reference, f.reference));
+                    assert_eq!(
+                        (k.curve_start, k.curve_count, k.backdrop),
+                        (f.curve_start, f.curve_count, f.backdrop)
+                    );
                 }
-            }
-            consistent(&kept);
-        }
-        // The set once, and the shape over the limit once a frame.
-        assert_eq!(kept.stats.misses, 75 + 50);
-    }
-
-    #[test]
-    fn unique_shapes_over_the_limit_are_held_one_at_a_time() {
-        let mut kept = KeptPaths::new(weighs(300) / 2, usize::MAX);
-        for id in 0..50 {
-            assert!(!draw(&mut kept, id, 300));
-            consistent(&kept);
-        }
-        assert_eq!(kept.index.len(), 0);
-        assert!(kept.get(&[49]).is_some());
-        assert!(kept.get(&[48]).is_none());
-        assert_eq!(kept.stats.evictions, 49);
-    }
-
-    #[test]
-    fn the_links_and_weights_follow_every_insert_hit_and_let_go() {
-        let mut rng = StdRng::seed_from_u64(5);
-        let mut kept = KeptPaths::new(50 * weighs(40), 30);
-        for _ in 0..5000 {
-            let id = rng.random_range(0..400);
-            draw(&mut kept, id, rng.random_range(1..80));
-            consistent(&kept);
-        }
-    }
-
-    /// The count rule's reference: two generations of `size` shapes, the
-    /// older dropped whenever the recent fills, a shape drawn from the older
-    /// moved to the recent.
-    #[derive(Default)]
-    struct Generations {
-        size: usize,
-        recent: std::collections::HashSet<u32>,
-        older: std::collections::HashSet<u32>,
-    }
-
-    impl Generations {
-        fn draw(&mut self, id: u32) -> bool {
-            let hit = self.recent.contains(&id) || self.older.remove(&id);
-            if !self.recent.contains(&id) {
-                if self.recent.len() >= self.size {
-                    self.older = std::mem::take(&mut self.recent);
-                }
-                self.recent.insert(id);
-            }
-            hit
-        }
-    }
-
-    /// Draws `ids` through the reference of `size` shapes a generation and a
-    /// cache of twice that, and counts the draws the reference hits and the
-    /// cache does not.
-    fn lost(size: usize, ids: impl Iterator<Item = u32>) -> usize {
-        let mut reference = Generations {
-            size,
-            ..Default::default()
-        };
-        let mut kept = KeptPaths::new(usize::MAX, 2 * size);
-        let mut lost = 0;
-        for id in ids {
-            let (reference, ours) = (reference.draw(id), draw(&mut kept, id, 1));
-            lost += (reference && !ours) as usize;
-        }
-        lost
-    }
-
-    /// A reused set of `reused` shapes drawn every frame, and per frame
-    /// `churn` new shapes, of which each is drawn again `gap` frames later.
-    fn reuse_and_churn(reused: u32, churn: u32, gap: u32, frames: u32) -> Vec<u32> {
-        let mut ids = Vec::new();
-        for frame in 0..frames {
-            ids.extend(0..reused);
-            for n in 0..churn {
-                ids.push(1_000_000 + frame * churn + n);
-                if frame >= gap {
-                    ids.push(1_000_000 + (frame - gap) * churn + n);
+                for (k, f) in kept.curves().iter().zip(fresh.curves()) {
+                    assert!(near(k.p0, f.p0) && near(k.p1, f.p1));
                 }
             }
         }
-        ids
     }
 
-    /// The cache hits every draw the reference hits, at small sizes on random
-    /// sequences and at `KEPT / 2` on a reused set among churn.
     #[test]
-    fn every_shape_two_generations_keep_is_kept() {
-        let mut rng = StdRng::seed_from_u64(7);
-        for size in [1, 2, 3, 4, 8] {
-            for _ in 0..1000 {
-                let span = rng.random_range(2..6 * size as u32);
-                let ids: Vec<u32> = (0..60).map(|_| rng.random_range(0..span)).collect();
-                assert_eq!(lost(size, ids.iter().copied()), 0, "size {size}: {ids:?}");
-            }
+    fn generations_let_go_of_what_was_not_used_for_a_whole_generation() {
+        let mut kept = Generations::<u32, u32>::new();
+        for i in 0..KEPT as u32 {
+            kept.insert(i, i, 1);
         }
-        for reused in [700, 1500] {
-            for churn in [1, 10] {
-                let ids = reuse_and_churn(reused, churn, 100, 250);
-                let n = lost(KEPT / 2, ids.into_iter());
-                assert_eq!(n, 0, "{reused} reused, {churn} new a frame");
-            }
+        assert_eq!(kept.get(&0), Some(0));
+        kept.insert(u32::MAX, 0, 1);
+        assert_eq!(kept.get(&1), Some(1));
+        for i in 0..KEPT as u32 {
+            kept.insert(KEPT as u32 + i, i, 1);
         }
+        kept.insert(u32::MAX - 1, 0, 1);
+        assert_eq!(kept.get(&2), None);
     }
 }

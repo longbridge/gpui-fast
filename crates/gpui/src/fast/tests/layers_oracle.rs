@@ -305,18 +305,20 @@ fn framed(id: u64) -> impl IntoElement {
                         (bounds.top_right(), -1., 1.),
                         (bounds.bottom_right(), -1., -1.),
                     ] {
-                        let mut path = crate::Path::new(corner);
+                        let mut path = crate::PathBuilder::fill();
+                        path.move_to(corner);
                         path.line_to(corner + point(px(3. * x), px(0.)));
                         path.curve_to(corner + point(px(0.), px(3. * y)), corner);
                         path.line_to(corner);
-                        window.paint_path(path, PALETTE[4]);
+                        window.paint_path(path.build().expect("path"), PALETTE[4]);
                     }
                     if id % 8 == 1 {
                         let origin = bounds.origin + point(px(8.), px(2.));
-                        let mut path = crate::Path::new(origin);
+                        let mut path = crate::PathBuilder::fill();
+                        path.move_to(origin);
                         path.line_to(origin + point(px(6.), px(0.)));
                         path.line_to(origin + point(px(0.), px(5.)));
-                        window.paint_path(path, PALETTE[2]);
+                        window.paint_path(path.build().expect("path"), PALETTE[2]);
                     }
                 },
             )

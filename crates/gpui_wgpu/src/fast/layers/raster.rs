@@ -10,10 +10,8 @@
 
 use gpui::{Rgba, Scene, SceneLayers, TileCoord};
 
-use crate::fast::frame::{
-    DrawGraph, FrameState, FrameTarget, PathBatch, PathTargets, PathUpload, SceneDraw, SceneUpload,
-    draw_scene,
-};
+use crate::fast::frame::{DrawGraph, FrameState, FrameTarget, SceneDraw, draw_scene};
+use crate::wgpu_renderer::GlobalParams;
 
 /// A tile to rasterize this frame, with the part of its layer's content
 /// that covers it.
@@ -47,48 +45,34 @@ pub(crate) fn clear_color(background: Rgba) -> wgpu::Color {
     }
 }
 
-/// Records the passes that rasterize `tile` into its texture, whose scene's
-/// instance data is `upload` and whose paths are `path_batches` of `paths`.
+/// Records the pass that rasterizes `tile` into its texture: the frame's
+/// planned scene `scene_index`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rasterize(
     target: &FrameTarget,
     state: &FrameState,
+    globals: &[GlobalParams],
     encoder: &mut wgpu::CommandEncoder,
     layers: &SceneLayers,
     tile: &TileRaster,
-    upload: &SceneUpload,
-    paths: &PathUpload,
-    path_batches: &[PathBatch],
+    scene_index: usize,
     graph: &DrawGraph,
 ) {
     let layer = &layers.frames[tile.layer];
-    let cache = &state.layers;
-    let (Some(view), Some(globals), Some(tile_paths)) = (
-        cache.texture(layer.key, tile.tile),
-        cache.globals(layer.tile_size),
-        cache.paths(layer.tile_size),
-    ) else {
+    let Some(view) = state.layers.texture(layer.key, tile.tile) else {
         debug_assert!(false, "a planned tile was not prepared");
         return;
     };
     draw_scene(
         target,
         state,
+        globals,
         encoder,
         &SceneDraw {
-            scene: &tile.scene,
-            upload,
-            paths,
-            path_batches,
+            scene: scene_index,
             view,
-            clear: Some(clear_color(layer.background)),
+            clear: clear_color(layer.background),
             label: "layer_tile_pass",
-            globals: &globals.globals,
-            path_targets: PathTargets {
-                globals: &globals.path_globals,
-                intermediate: Some(&tile_paths.intermediate),
-                msaa: tile_paths.msaa.as_ref(),
-            },
             graph,
         },
     );

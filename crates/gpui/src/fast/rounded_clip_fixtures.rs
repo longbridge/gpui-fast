@@ -1,7 +1,7 @@
 //! Identical real-div pixel regressions run by each GPU renderer.
 
 use super::{assert_same_pixels, pixel, render_div_fixture};
-use gpui::{Path, px};
+use gpui::px;
 
 /// The command-palette regression from zed#37480: a rounded palette has a
 /// header above the input and list. Its radius belongs only to the palette's
@@ -29,7 +29,9 @@ fn rounded_overflow_command_palette_rows_keep_square_corners(cx: &mut gpui::Test
                 .child(row(16., gpui::red()))
                 .child(row(8., gpui::blue()))
                 .child(row(8., gpui::black()))
-                .child(row(16., gpui::green())),
+                // Not `gpui::green()`, whose green channel is 127.5 of 255:
+                // renderers round it either way.
+                .child(row(16., gpui::rgb(0x00ff00).into())),
         )
     });
     let sample = |x, y| pixel(&pixels, side, x * side / 64, y * side / 64);
@@ -53,7 +55,7 @@ fn rounded_overflow_command_palette_rows_keep_square_corners(cx: &mut gpui::Test
         assert_eq!(sample(x, 63), [255, 255, 255, 255]);
     }
     assert_eq!(sample(32, 0), [0, 0, 0, 255]);
-    assert_eq!(sample(32, 63), [0, 128, 0, 255]);
+    assert_eq!(sample(32, 63), [0, 255, 0, 255]);
 }
 
 #[gpui::test]
@@ -481,12 +483,13 @@ fn rounded_overflow_clips_paths(cx: &mut gpui::TestAppContext) {
                     gpui::canvas(
                         |_, _, _| (),
                         |bounds, (), window, _| {
-                            let mut path = Path::new(bounds.origin);
+                            let mut path = gpui::PathBuilder::fill();
+                            path.move_to(bounds.origin);
                             path.line_to(bounds.top_right());
                             path.line_to(bounds.bottom_right());
                             path.line_to(bounds.bottom_left());
                             path.line_to(bounds.origin);
-                            window.paint_path(path, gpui::black());
+                            window.paint_path(path.build().expect("path"), gpui::black());
                         },
                     )
                     .size(px(64.)),
@@ -514,12 +517,13 @@ fn rounded_overflow_between_path_batches_restores_path_pixels(cx: &mut gpui::Tes
                     |_, _, _| (),
                     |bounds, (), window, _| {
                         let start = bounds.origin;
-                        let mut path = Path::new(start);
+                        let mut path = gpui::PathBuilder::fill();
+                        path.move_to(start);
                         path.line_to(start + gpui::point(px(16.), px(0.)));
                         path.line_to(start + gpui::point(px(16.), px(16.)));
                         path.line_to(start + gpui::point(px(0.), px(16.)));
                         path.line_to(start);
-                        window.paint_path(path, gpui::rgb(0xff0000));
+                        window.paint_path(path.build().expect("path"), gpui::rgb(0xff0000));
                     },
                 )
                 .absolute()
@@ -538,12 +542,13 @@ fn rounded_overflow_between_path_batches_restores_path_pixels(cx: &mut gpui::Tes
                     |_, _, _| (),
                     |bounds, (), window, _| {
                         let start = bounds.origin + gpui::point(px(48.), px(0.));
-                        let mut path = Path::new(start);
+                        let mut path = gpui::PathBuilder::fill();
+                        path.move_to(start);
                         path.line_to(start + gpui::point(px(16.), px(0.)));
                         path.line_to(start + gpui::point(px(16.), px(16.)));
                         path.line_to(start + gpui::point(px(0.), px(16.)));
                         path.line_to(start);
-                        window.paint_path(path, gpui::rgb(0x00ff00));
+                        window.paint_path(path.build().expect("path"), gpui::rgb(0x00ff00));
                     },
                 )
                 .absolute()
