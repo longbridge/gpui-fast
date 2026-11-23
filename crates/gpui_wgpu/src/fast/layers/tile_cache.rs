@@ -100,9 +100,7 @@ impl TileCache {
 
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
-        self.tiles.is_empty()
-            && self.layers.is_empty()
-            && self.pool.is_empty()
+        self.tiles.is_empty() && self.layers.is_empty() && self.pool.is_empty()
     }
 
     /// Starts a frame that composites the tiles `composited` of the layers in

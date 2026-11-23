@@ -11,10 +11,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use gpui::{
     AtlasKey, AtlasTile, Bounds, ContentMask, Corners, DevicePixels, Edges, FontId, GlyphId, Hsla,
-    ImageId, LayerFrame, LayerKey, MonochromeSprite, PaintedPath, PathBuilder, PlatformAtlas, PolychromeSprite, Quad,
-    RenderGlyphParams, RenderImageParams, Rgba, ScaledPixels, Scene, SceneLayers, Shadow, Size,
-    SubpixelSprite, TileCoord, TransformationMatrix, Underline, layer_tile_id,
-    layer_tile_texture_id, linear_color_stop, linear_gradient, point, px, rgba, size,
+    ImageId, LayerFrame, LayerKey, MonochromeSprite, PaintedPath, PathBuilder, PlatformAtlas,
+    PolychromeSprite, Quad, RenderGlyphParams, RenderImageParams, Rgba, ScaledPixels, Scene,
+    SceneLayers, Shadow, Size, SubpixelSprite, TileCoord, TransformationMatrix, Underline,
+    layer_tile_id, layer_tile_texture_id, linear_color_stop, linear_gradient, point, px, rgba,
+    size,
 };
 
 use crate::WgpuAtlas;
@@ -700,7 +701,7 @@ fn add_covered_paths(
     ] {
         let corner = point(px(x + ox), px(y + oy));
         let mut path = PathBuilder::fill();
-    path.move_to(corner);
+        path.move_to(corner);
         path.line_to(corner + point(px(9. * dx), px(0.)));
         path.curve_to(corner + point(px(0.), px(9. * dy)), corner);
         path.line_to(corner);
