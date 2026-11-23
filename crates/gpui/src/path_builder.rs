@@ -285,35 +285,52 @@ impl PathBuilder {
         crate::fast::path_cache::build(self)
     }
 
-    /// The closed contours to fill, and the rule to fill them by.
-    #[cfg(test)]
-    pub(crate) fn outline(self) -> Result<(Vec<PathCurve>, FillRule), Error> {
-        let (path, style, dash_array) = self.into_parts();
-        Self::outline_of(&path, &style, dash_array.as_deref())
+    /// The transformed path, its style and dash array, for
+    /// crate::fast::path_cache's key, and back.
+    pub(crate) fn fast_into_parts(self) -> (lyon_path::Path, PathStyle, Option<Vec<Pixels>>) {
+        let path = match self.transform {
+            Some(transform) => self.raw.build().transformed(&transform),
+            None => self.raw.build(),
+        };
+        (path, self.style, self.dash_array)
     }
 
-    /// The transformed path, its style and dash array (gpui-fast path cache).
-    pub(crate) fn into_parts(self) -> (lyon_path::Path, PathStyle, Option<Vec<Pixels>>) {
+    pub(crate) fn fast_from_parts(
+        path: &lyon_path::Path,
+        style: PathStyle,
+        dash_array: Option<Vec<Pixels>>,
+    ) -> Self {
+        let mut raw = lyon_path::Path::builder();
+        for event in path.iter() {
+            raw.path_event(event);
+        }
+        Self {
+            raw: raw.with_svg(),
+            transform: None,
+            style,
+            dash_array,
+        }
+    }
+
+    /// The curves a path shares with others of its shape (crate::fast::path_cache).
+    pub(crate) fn fast_curves(path: &Path) -> &Arc<[PathCurve]> {
+        &path.curves
+    }
+
+    /// The closed contours to fill, and the rule to fill them by.
+    pub(crate) fn outline(self) -> Result<(Vec<PathCurve>, FillRule), Error> {
         let path = if let Some(transform) = self.transform {
             self.raw.build().transformed(&transform)
         } else {
             self.raw.build()
         };
-        (path, self.style, self.dash_array)
-    }
 
-    /// The closed contours to fill, and the rule to fill them by.
-    pub(crate) fn outline_of(
-        path: &lyon_path::Path,
-        style: &PathStyle,
-        dash_array: Option<&[Pixels]>,
-    ) -> Result<(Vec<PathCurve>, FillRule), Error> {
-        Ok(match style {
+        Ok(match self.style {
             PathStyle::Stroke(options) => (
-                Self::stroke_outline(path, options, dash_array)?,
+                Self::stroke_outline(&path, &options, self.dash_array.as_deref())?,
                 FillRule::NonZero,
             ),
-            PathStyle::Fill(options) => (Self::fill_outline(path)?, options.fill_rule),
+            PathStyle::Fill(options) => (Self::fill_outline(&path)?, options.fill_rule),
         })
     }
 
@@ -410,10 +427,6 @@ impl Path {
             curves: curves.into(),
             even_odd: matches!(fill_rule, FillRule::EvenOdd),
         }
-    }
-
-    pub(crate) fn curves(&self) -> &Arc<[PathCurve]> {
-        &self.curves
     }
 
     pub(crate) fn even_odd(&self) -> bool {

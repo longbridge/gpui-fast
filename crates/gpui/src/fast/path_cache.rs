@@ -103,14 +103,14 @@ thread_local! {
 /// Builds `builder` as [`PathBuilder::build`] does, sharing the curves of the
 /// path last built of the same shape.
 pub(crate) fn build(builder: PathBuilder) -> Result<Path, Error> {
-    let (lyon, style, dash_array) = builder.into_parts();
+    let (lyon, style, dash_array) = builder.fast_into_parts();
     let key: Rc<[u32]> = shape_key(&lyon, &style, dash_array.as_deref()).into();
     if let Some(path) = BUILT.with_borrow_mut(|built| built.get(&key)) {
         return Ok(path);
     }
-    let (curves, fill_rule) = PathBuilder::outline_of(&lyon, &style, dash_array.as_deref())?;
+    let (curves, fill_rule) = PathBuilder::fast_from_parts(&lyon, style, dash_array).outline()?;
     let path = Path::from_curves(curves, fill_rule);
-    let bytes = key.len() * 4 + std::mem::size_of_val(&**path.curves());
+    let bytes = key.len() * 4 + std::mem::size_of_val(&**PathBuilder::fast_curves(&path));
     BUILT.with_borrow_mut(|built| built.insert(key, path.clone(), bytes));
     Ok(path)
 }
@@ -118,7 +118,11 @@ pub(crate) fn build(builder: PathBuilder) -> Result<Path, Error> {
 /// `path`'s curves binned into tiles at `scale`, as [`Path::bin`] gives
 /// them, shared with the last time the same curves were binned at it.
 pub(crate) fn bin(path: &Path, scale: f32) -> Rc<PathTiles> {
-    let key = (CurvesKey(path.curves().clone()), path.even_odd(), scale.to_bits());
+    let key = (
+        CurvesKey(PathBuilder::fast_curves(&path).clone()),
+        path.even_odd(),
+        scale.to_bits(),
+    );
     if let Some(tiles) = BINNED.with_borrow_mut(|binned| binned.get(&key)) {
         return tiles;
     }
@@ -129,11 +133,21 @@ pub(crate) fn bin(path: &Path, scale: f32) -> Rc<PathTiles> {
 }
 
 /// `tiles` without those lying entirely outside `mask`, shared when none do.
-pub(crate) fn visible(tiles: Rc<PathTiles>, mask: crate::Bounds<crate::ScaledPixels>) -> Rc<PathTiles> {
-    if tiles.all_visible(mask) {
+pub(crate) fn visible(
+    tiles: Rc<PathTiles>,
+    mask: crate::Bounds<crate::ScaledPixels>,
+) -> Rc<PathTiles> {
+    let visible = |tile: &crate::PathTile| {
+        tile.top_left.x < mask.right().0
+            && tile.top_left.y < mask.bottom().0
+            && tile.bottom_right.x > mask.origin.x.0
+            && tile.bottom_right.y > mask.origin.y.0
+    };
+    if tiles.tiles().iter().all(visible) {
         return tiles;
     }
-    let mut tiles = (*tiles).clone();
+    // A copy: moving by nothing keeps every coordinate.
+    let mut tiles = tiles.translated(crate::point(0., 0.));
     tiles.retain_visible(mask);
     Rc::new(tiles)
 }
@@ -206,7 +220,7 @@ fn shape_key(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Arc, Generations, KEPT, Path, PathBuilder, Rc, bin, build, clear};
     use crate::{point, px};
 
     fn sparkline(x: f32) -> PathBuilder {
@@ -226,11 +240,17 @@ mod tests {
         clear();
         let a = build(sparkline(3.)).unwrap();
         let b = build(sparkline(3.)).unwrap();
-        assert!(Arc::ptr_eq(a.curves(), b.curves()));
+        assert!(Arc::ptr_eq(
+            PathBuilder::fast_curves(&a),
+            PathBuilder::fast_curves(&b)
+        ));
         assert!(Rc::ptr_eq(&bin(&a, 2.), &bin(&b, 2.)));
         assert!(!Rc::ptr_eq(&bin(&a, 2.), &bin(&b, 1.)));
         let c = build(sparkline(4.)).unwrap();
-        assert!(!Arc::ptr_eq(a.curves(), c.curves()));
+        assert!(!Arc::ptr_eq(
+            PathBuilder::fast_curves(&a),
+            PathBuilder::fast_curves(&c)
+        ));
     }
 
     #[test]
@@ -238,8 +258,7 @@ mod tests {
         clear();
         build(sparkline(3.25)).unwrap();
         let kept = build(sparkline(3.25)).unwrap();
-        let (lyon, style, dash_array) = sparkline(3.25).into_parts();
-        let fresh = PathBuilder::outline_of(&lyon, &style, dash_array.as_deref()).unwrap();
+        let fresh = sparkline(3.25).outline().unwrap();
         let fresh = Path::from_curves(fresh.0, fresh.1);
         let (kept, fresh) = (bin(&kept, 1.5), fresh.bin(1.5));
         assert_eq!(kept.tiles(), fresh.tiles());
