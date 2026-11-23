@@ -1468,11 +1468,7 @@ fn build_pipeline_state(
     color_attachment.setSourceAlphaBlendFactor(MTLBlendFactor::One);
     color_attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
     color_attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-    if label == "native_views" {
-        // The fast fragment emits hole coverage for destination-out blending.
-        color_attachment.setSourceRGBBlendFactor(MTLBlendFactor::Zero);
-        color_attachment.setSourceAlphaBlendFactor(MTLBlendFactor::Zero);
-    }
+    crate::fast::rounded_clip::configure_native_hole_blend(label, &color_attachment);
     descriptor.setDepthAttachmentPixelFormat(MTLPixelFormat::Depth32Float);
 
     device

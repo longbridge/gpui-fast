@@ -9,7 +9,10 @@ use gpui::{AtlasTextureId, DevicePixels, LayerFrame, Scene, Size};
 use objc2::runtime::ProtocolObject;
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::CVMetalTexture;
-use objc2_metal::{MTLDevice, MTLRenderCommandEncoder, MTLResourceOptions};
+use objc2_metal::{
+    MTLBlendFactor, MTLDevice, MTLRenderCommandEncoder, MTLRenderPipelineColorAttachmentDescriptor,
+    MTLResourceOptions,
+};
 
 use crate::metal_renderer::{InstanceBufferWriter, MetalRenderer, write_instances};
 
@@ -35,6 +38,17 @@ fn group(scene: &Scene, texture: AtlasTextureId) -> Option<&LayerFrame> {
         .frames
         .iter()
         .find(|frame| frame.key.0 == key && frame.tile_size == 0)
+}
+
+/// Scale the destination by the uncovered fraction of each native view pixel.
+pub(crate) fn configure_native_hole_blend(
+    label: &str,
+    attachment: &MTLRenderPipelineColorAttachmentDescriptor,
+) {
+    if label == "native_views" {
+        attachment.setSourceRGBBlendFactor(MTLBlendFactor::Zero);
+        attachment.setSourceAlphaBlendFactor(MTLBlendFactor::Zero);
+    }
 }
 
 pub(crate) fn default_mask(encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>) {
