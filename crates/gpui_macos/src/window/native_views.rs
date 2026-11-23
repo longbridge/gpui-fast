@@ -825,6 +825,13 @@ extern "C" fn hit_test(this: &AnyObject, _: Sel, point: NSPoint) -> *mut AnyObje
     }
 }
 
+impl MacWindowState {
+    /// The fast composition path defers this button's drag and release to AppKit.
+    pub(crate) fn native_view_tracks_button(&self, button: isize) -> bool {
+        self.native_views.buttons_pressed_in_view.contains(&button)
+    }
+}
+
 /// Notes which native view a mouse-down is headed for while AppKit delivers it,
 /// which is the only time a native view may take first responder on its own, and
 /// offers GPUI a key press ahead of the native view that would receive it.
@@ -894,6 +901,9 @@ extern "C" fn send_event(this: &AnyObject, _: Sel, event: *mut AnyObject) {
         } else {
             None
         };
+        if crate::fast::composition::send_event(this, event, superclass, &window_state, clicked) {
+            return;
+        }
         if clicked.is_none() {
             let is_release = matches!(
                 event_type,
