@@ -53,6 +53,10 @@ pub fn new_renderer(
     MetalRenderer::new(context, transparent, use_display_p3)
 }
 
+pub fn new_overlay_renderer(context: self::Context, base: &Renderer) -> Result<Renderer> {
+    crate::fast::composition::new_overlay_renderer(context, base)
+}
+
 pub struct InstanceBufferPool {
     buffer_size: usize,
     buffers: Vec<InstanceBuffer>,
@@ -121,8 +125,8 @@ enum DisplayLinkMode {
 }
 
 pub struct MetalRenderer {
-    device: Retained<ProtocolObject<dyn MTLDevice>>,
-    layer: Option<Retained<CAMetalLayer>>,
+    pub(crate) device: Retained<ProtocolObject<dyn MTLDevice>>,
+    pub(crate) layer: Option<Retained<CAMetalLayer>>,
     is_apple_gpu: bool,
     is_unified_memory: bool,
     presents_with_transaction: bool,
@@ -145,7 +149,7 @@ pub struct MetalRenderer {
     depth_test_state: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     depth_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
-    sprite_atlas: Arc<MetalAtlas>,
+    pub(crate) sprite_atlas: Arc<MetalAtlas>,
     core_video_texture_cache: CFRetained<CVMetalTextureCache>,
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
@@ -180,7 +184,7 @@ impl MetalRenderer {
         Self::new_internal(device, Some(layer), !transparent, instance_buffer_pool)
     }
 
-    fn configure_layer(
+    pub(crate) fn configure_layer(
         layer: &CAMetalLayer,
         device: &ProtocolObject<dyn MTLDevice>,
         transparent: bool,
@@ -256,7 +260,7 @@ impl MetalRenderer {
         MTLCreateSystemDefaultDevice().context("accessing a compatible Metal device")
     }
 
-    fn new_internal(
+    pub(crate) fn new_internal(
         device: Retained<ProtocolObject<dyn MTLDevice>>,
         layer: Option<Retained<CAMetalLayer>>,
         opaque: bool,
