@@ -454,3 +454,22 @@ pub fn painted_path_key(path: &PaintedPath) -> (DrawOrder, u64) {
     (path.paint.even_odd == true.into()).hash(&mut hasher);
     (path.order, hasher.finish())
 }
+
+/// Sets the draw order of `primitive`, as the scene keeps it in its paint
+/// operations: upstream assigns orders only to the primitives it batches,
+/// while `fast::layers` reads them from the paint operations (baking a
+/// layer's background, ordering its tiles).
+pub(crate) fn set_draw_order(primitive: &mut crate::scene::Primitive, order: DrawOrder) {
+    use crate::scene::Primitive;
+    match primitive {
+        Primitive::Shadow(p) => p.order = order,
+        Primitive::Quad(p) => p.order = order,
+        Primitive::Path(p) => p.order = order,
+        Primitive::Underline(p) => p.order = order,
+        Primitive::MonochromeSprite(p) => p.order = order,
+        Primitive::SubpixelSprite(p) => p.order = order,
+        Primitive::PolychromeSprite(p) => p.order = order,
+        Primitive::Surface(p) => p.order = order,
+        Primitive::NativeView(p) => p.order = order,
+    }
+}

@@ -95,7 +95,9 @@ fn paint(scene: &mut Scene, rng: &mut StdRng) -> Vec<Painted> {
     let mut content_mask = window_mask;
     let mut painted = Vec::new();
     let mut layers = 0;
-    let mut layer: Option<(usize, DrawOrder)> = None;
+    // The layer being painted, and the primitives painted into it: upstream
+    // orders a layer when it is popped, by the bounds of what it painted.
+    let mut layer: Option<(usize, Vec<usize>)> = None;
     for _ in 0..rng.random_range(1..120) {
         match rng.random_range(0..10) {
             0..3 => {
@@ -135,17 +137,20 @@ fn paint(scene: &mut Scene, rng: &mut StdRng) -> Vec<Painted> {
                 painted.push(Painted {
                     kind: Kind::Quad,
                     bounds: clipped,
-                    layer: layer.map(|(layer, _)| layer),
-                    expected_order: match layer {
-                        Some((_, order)) => order,
+                    layer: layer.as_ref().map(|(layer, _)| *layer),
+                    expected_order: match &mut layer {
+                        Some((_, members)) => {
+                            members.push(id);
+                            0
+                        }
                         None => reference.insert(clipped),
                     },
                 });
             }
             3 => {
-                if layer.is_some() {
+                if let Some((_, members)) = layer.take() {
                     scene.pop_layer();
-                    layer = None;
+                    order_layer(&mut reference, &mut painted, &members);
                     content_mask = window_mask;
                 } else {
                     // A text line's layer, which may reach past the window.
@@ -156,7 +161,7 @@ fn paint(scene: &mut Scene, rng: &mut StdRng) -> Vec<Painted> {
                         rng.random_range(0.0..40.),
                     );
                     scene.push_layer(content_mask.bounds);
-                    layer = Some((layers, reference.insert(content_mask.bounds)));
+                    layer = Some((layers, Vec::new()));
                     layers += 1;
                 }
             }
@@ -221,9 +226,12 @@ fn paint(scene: &mut Scene, rng: &mut StdRng) -> Vec<Painted> {
                     painted.push(Painted {
                         kind,
                         bounds: clipped,
-                        layer: layer.map(|(layer, _)| layer),
-                        expected_order: match layer {
-                            Some((_, order)) => order,
+                        layer: layer.as_ref().map(|(layer, _)| *layer),
+                        expected_order: match &mut layer {
+                            Some((_, members)) => {
+                                members.push(id);
+                                0
+                            }
                             None => reference.insert(clipped),
                         },
                     });
@@ -231,10 +239,27 @@ fn paint(scene: &mut Scene, rng: &mut StdRng) -> Vec<Painted> {
             }
         }
     }
-    if layer.is_some() {
+    if let Some((_, members)) = layer {
         scene.pop_layer();
+        order_layer(&mut reference, &mut painted, &members);
     }
     painted
+}
+
+/// Gives the primitives painted into a popped layer its draw order: one
+/// place for all of them, over the bounds of what they painted.
+fn order_layer(reference: &mut Reference, painted: &mut [Painted], members: &[usize]) {
+    let Some(bounds) = members
+        .iter()
+        .map(|&ix| painted[ix].bounds)
+        .reduce(|a, b| a.union(&b))
+    else {
+        return;
+    };
+    let order = reference.insert(bounds);
+    for &ix in members {
+        painted[ix].expected_order = order;
+    }
 }
 
 /// Where each painted primitive is drawn, by its index in painting order —

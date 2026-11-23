@@ -5214,6 +5214,8 @@ impl Window {
         } else {
             Self::largest_border_interior(&quad)
         };
+        // fast: on a grid, so a quad moved into a scroll layer splits as it would where it is.
+        let inner_bounds = crate::fast::layers::paint::snap_inside(inner_bounds);
 
         // A plain border's strips can be plain rectangles of the border color.
         // Otherwise, each strip is the whole quad masked to the strip, so the

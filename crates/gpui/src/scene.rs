@@ -170,7 +170,9 @@ impl Scene {
         }
         let order = self.primitive_bounds.insert(layer.bounds);
         for index in layer.primitives.into_iter().flatten() {
-            if let PaintOperation::Primitive(primitive) = &self.paint_operations[index] {
+            // fast: the painted primitive keeps its draw order too (fast::layers reads it).
+            if let PaintOperation::Primitive(primitive) = &mut self.paint_operations[index] {
+                crate::fast::scene::set_draw_order(primitive, order);
                 let primitive = primitive.clone();
                 self.push_primitive(primitive, order);
             }
@@ -189,8 +191,8 @@ impl Scene {
             let PaintOperation::Primitive(primitive) = &self.paint_operations[index] else {
                 continue;
             };
-            let primitive = primitive.clone();
-            if primitive.kind() == PrimitiveKind::NativeView {
+            let primitive = (index, primitive.clone()); // fast: with its index
+            if primitive.1.kind() == PrimitiveKind::NativeView {
                 self.insert_layer_part(std::mem::take(&mut part));
                 self.insert_layer_part(vec![primitive]);
             } else {
@@ -200,21 +202,25 @@ impl Scene {
         self.insert_layer_part(part);
     }
 
-    fn insert_layer_part(&mut self, primitives: Vec<Primitive>) {
-        let Some(first) = primitives.first() else {
+    fn insert_layer_part(&mut self, primitives: Vec<(usize, Primitive)>) {
+        let Some((_, first)) = primitives.first() else {
             return;
         };
         let mut bounds = first.clipped_bounds();
         let mut max_kind = PrimitiveKind::Shadow;
         let mut max_shared_kind = PrimitiveKind::NativeView;
-        for primitive in &primitives {
+        for (_, primitive) in &primitives {
             let kind = primitive.kind();
             bounds = bounds.join(&primitive.clipped_bounds());
             max_kind = max_kind.max(kind);
             max_shared_kind = max_shared_kind.min(kind.max_shared_kind());
         }
         let order = self.primitive_bounds.insert(bounds);
-        for primitive in primitives {
+        for (index, primitive) in primitives {
+            // fast: the painted primitive keeps its draw order too (fast::layers reads it).
+            if let PaintOperation::Primitive(painted) = &mut self.paint_operations[index] {
+                crate::fast::scene::set_draw_order(painted, order);
+            }
             self.push_primitive(primitive, order);
         }
     }
@@ -224,7 +230,7 @@ impl Scene {
     }
 
     /// Returns whether the primitive was kept, rather than clipped away.
-    fn try_insert_primitive(&mut self, primitive: Primitive) -> bool {
+    fn try_insert_primitive(&mut self, mut primitive: Primitive) -> bool {
         let clipped_bounds = primitive.clipped_bounds();
         if clipped_bounds.is_empty() {
             return false;
@@ -245,6 +251,8 @@ impl Scene {
             }
         } else {
             let order = self.primitive_bounds.insert(clipped_bounds);
+            // fast: the painted primitive keeps its draw order too (fast::layers reads it).
+            crate::fast::scene::set_draw_order(&mut primitive, order);
             self.push_primitive(primitive.clone(), order);
         }
         self.paint_operations
@@ -1225,7 +1233,8 @@ impl PaintedPath {
         content_mask: ContentMask<Pixels>,
         color: Background,
     ) -> Self {
-        let content_mask = content_mask.scale(scale_factor);
+        // fast: on the grid fast::layers draws a path moved into a layer on.
+        let content_mask = crate::fast::layers::paint::snap_mask(content_mask.scale(scale_factor));
         let tiles = crate::fast::path_cache::bin(&path, scale_factor);
         let tiles = crate::fast::path_cache::visible(tiles, content_mask.bounds);
         let paint = PathPaint {

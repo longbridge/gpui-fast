@@ -261,7 +261,8 @@ impl Binner {
         let mut length = 0.0;
         self.input.clear();
         self.input.extend(curves.iter().map(|curve| {
-            let curve = curve.scaled(scale);
+            // fast: end points on the grid fast::layers moves paths into layers on.
+            let curve = crate::fast::layers::paint::snap_curve(curve.scaled(scale));
             // The extents of a monotone curve can be computed from its endpoints.
             min.x = min.x.fast_min(curve.min_x());
             max.x = max.x.fast_max(curve.max_x());

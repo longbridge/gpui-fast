@@ -146,7 +146,8 @@ fn a_tile_scene_keeps_layers_sharing_one_draw_order() {
     content.insert_primitive(quad(sp(10., 10., 10., 10.)));
     content.insert_primitive(quad(sp(600., 10., 10., 10.)));
     content.pop_layer();
-    content.insert_primitive(quad(sp(20., 20., 10., 10.)));
+    // Over the layer's first quad: upstream orders a layer by what it painted.
+    content.insert_primitive(quad(sp(15., 15., 10., 10.)));
     content.finish();
     let layer = layer(content);
 
