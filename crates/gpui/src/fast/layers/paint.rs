@@ -605,26 +605,105 @@ fn viewports(window: &Window) -> Viewports {
 /// as fine as a GPU rasterizer resolves a vertex's position.
 const PATH_GRID: f32 = 256.;
 
-/// `path`, in device pixels, with its vertices and bounds moved to the
-/// nearest 1/256 of a device pixel where layers are compiled.
+/// `curve`, scaled to device pixels, with its end and control points on the
+/// grid of [`PATH_GRID`] steps a device pixel where layers are compiled.
 ///
 /// A path painted into a layer is drawn moved by whole device pixels, while
 /// drawn without a layer it is painted where it is now: at a fractional
 /// scale factor the two differ by rounding error in the last bits of each
 /// position (a snapped scroll offset is not a whole number of logical
-/// pixels). On the grid they land on the same positions.
-pub(crate) fn snap_path(mut path: crate::Path<ScaledPixels>) -> crate::Path<ScaledPixels> {
+/// pixels). On the grid they land on the same positions, as the curve's
+/// coefficients worked out from them again do.
+pub(crate) fn snap_curve(curve: crate::PathCurve) -> crate::PathCurve {
     if !COMPILED {
-        return path;
+        return curve;
     }
-    for vertex in &mut path.vertices {
-        vertex.xy_position = snap_point(vertex.xy_position);
+    let snap_f32 = |p: Point<f32>| Point {
+        x: snap(ScaledPixels(p.x)).0,
+        y: snap(ScaledPixels(p.y)).0,
+    };
+    // `PathCurve::new`: a = p0 - 2·ctrl + p1, b = 2·(ctrl - p0).
+    let (p0, p1) = (snap_f32(curve.p0), snap_f32(curve.p1));
+    if curve.a.x == 0. && curve.a.y == 0. {
+        // A line stays one: its control point is halfway, off the grid.
+        return crate::PathCurve {
+            p0,
+            p1,
+            b: Point {
+                x: p1.x - p0.x,
+                y: p1.y - p0.y,
+            },
+            ..curve
+        };
     }
-    path.bounds = snap_bounds(path.bounds);
-    // Its mask too: a layer's overlay clips the path to the viewport where
-    // it is drawn, which must come out as the mask painted there.
-    path.content_mask.bounds = snap_bounds(path.content_mask.bounds);
-    path
+    let ctrl = snap_f32(Point {
+        x: curve.p0.x + curve.b.x / 2.,
+        y: curve.p0.y + curve.b.y / 2.,
+    });
+    crate::PathCurve {
+        p0,
+        p1,
+        a: Point {
+            x: p0.x - 2. * ctrl.x + p1.x,
+            y: p0.y - 2. * ctrl.y + p1.y,
+        },
+        b: Point {
+            x: 2. * (ctrl.x - p0.x),
+            y: 2. * (ctrl.y - p0.y),
+        },
+        ..curve
+    }
+}
+
+/// A path's content mask, in device pixels, on the grid of [`PATH_GRID`]
+/// steps a device pixel where layers are compiled.
+///
+/// A path painted into a layer is drawn moved by whole device pixels, while
+/// drawn without a layer it is painted where it is now: at a fractional
+/// scale factor the two masks differ by rounding error in the last bits (a
+/// snapped scroll offset is not a whole number of logical pixels), and a
+/// layer's overlay clips the path to the viewport where it is drawn, which
+/// must come out as the mask painted there. On the grid they agree.
+pub(crate) fn snap_mask(
+    mask: crate::ContentMask<ScaledPixels>,
+) -> crate::ContentMask<ScaledPixels> {
+    if !COMPILED {
+        return mask;
+    }
+    crate::ContentMask {
+        bounds: snap_bounds(mask.bounds),
+    }
+}
+
+/// `bounds`, the interior a quad's border is split around, shrunk to the
+/// grid of [`PATH_GRID`] steps a device pixel where layers are compiled.
+///
+/// The interior is worked out from the quad's position: a quad painted into
+/// a layer and moved by whole device pixels would otherwise split a rounding
+/// error away from the same quad painted where it is now. Shrinking keeps
+/// the interior inside the border; the strips around it still cover the rest.
+pub(crate) fn snap_inside(bounds: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
+    if !COMPILED || bounds.is_empty() {
+        return bounds;
+    }
+    let on_grid = |value: ScaledPixels, round: fn(f32) -> f32| {
+        let steps = value.0 * PATH_GRID;
+        if steps.abs() < 4_194_304. {
+            ScaledPixels(round(steps) / PATH_GRID)
+        } else {
+            value
+        }
+    };
+    let origin = Point {
+        x: on_grid(bounds.origin.x, f32::ceil),
+        y: on_grid(bounds.origin.y, f32::ceil),
+    };
+    let corner = bounds.bottom_right();
+    let corner = Point {
+        x: on_grid(corner.x, f32::floor),
+        y: on_grid(corner.y, f32::floor),
+    };
+    Bounds::from_corners(origin, corner)
 }
 
 /// `value` on the grid of [`PATH_GRID`] steps a device pixel.
@@ -688,7 +767,18 @@ pub(crate) fn draw_into_frame<'a>(
     let viewports = viewports(window);
     let viewport = viewports.snapped;
     let scene = &mut window.next_frame.scene;
+    // A split quad's pieces are inserted together, as they were painted.
+    let mut quads = crate::fast::scene::QuadRun::default();
     for operation in operations {
+        if let PaintOperation::Primitive(primitive @ Primitive::Quad(_)) = operation {
+            let mut primitive = translate_primitive(primitive, delta);
+            clip_primitive(&mut primitive, viewports);
+            if let Primitive::Quad(quad) = primitive {
+                quads.push(scene, quad);
+            }
+            continue;
+        }
+        quads.flush(scene);
         match operation {
             PaintOperation::Primitive(primitive) => {
                 let mut primitive = translate_primitive(primitive, delta);
@@ -708,6 +798,7 @@ pub(crate) fn draw_into_frame<'a>(
             }
         }
     }
+    quads.flush(scene);
 }
 
 /// Narrows every content mask `primitive` carries to `viewports`.
@@ -722,19 +813,13 @@ fn clip_primitive(primitive: &mut Primitive, viewports: Viewports) {
     match primitive {
         Primitive::Shadow(p) => clip(&mut p.content_mask),
         Primitive::Quad(p) => clip(&mut p.content_mask),
-        Primitive::Path(p) => {
-            clip(&mut p.content_mask);
-            for vertex in &mut p.vertices {
-                if !vertex.content_mask.bounds.is_empty() {
-                    clip(&mut vertex.content_mask);
-                }
-            }
-        }
+        Primitive::Path(p) => p.clip_content_mask(mask),
         Primitive::Underline(p) => clip(&mut p.content_mask),
         Primitive::MonochromeSprite(p) => clip(&mut p.content_mask),
         Primitive::SubpixelSprite(p) => clip(&mut p.content_mask),
         Primitive::PolychromeSprite(p) => clip(&mut p.content_mask),
         Primitive::Surface(p) => clip(&mut p.content_mask),
+        Primitive::NativeView(p) => clip(&mut p.content_mask),
     }
 }
 

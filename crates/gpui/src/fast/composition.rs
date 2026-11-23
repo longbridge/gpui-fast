@@ -489,6 +489,7 @@ impl Scene {
             && self.subpixel_sprites.is_empty()
             && self.polychrome_sprites.is_empty()
             && self.surfaces.is_empty()
+            && self.native_views.is_empty()
     }
 
     /// Replays a range as a self-contained scene, restoring any layers that
@@ -619,6 +620,13 @@ pub(crate) fn input_surface(window: &Window) -> Option<CompositionSurfaceId> {
 /// be stacked with its host either.
 pub(crate) fn surfaces_placed(window: &Window) -> u64 {
     window.fast_composition.0.borrow().placements.get()
+}
+
+/// Native views move with their GPUI elements each frame, like composition
+/// surfaces. A scrolling container must keep prepainting their placements.
+pub(crate) fn note_native_view_placement(window: &Window) {
+    let state = window.fast_composition.0.borrow();
+    state.placements.set(state.placements.get() + 1);
 }
 
 pub(crate) fn record_input(window: &mut Window, id: HitboxId) {

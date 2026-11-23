@@ -24,13 +24,9 @@
 //! occluder's rectangle, and which is painted before it (a lower draw
 //! order), changes no pixel the frame shows: it is skipped.
 //!
-//! A quad that is only partly covered is cut instead, when that cannot
-//! change a pixel: a *plain* quad (a solid background, square corners,
-//! no border) looks the same through any content mask within its bounds,
-//! so it is drawn as the pieces of its rectangle that no later occluder
-//! covers ([`Occlusion::pieces`]), each a copy of it masked to the piece.
-//! Nested backgrounds (a window, its content area, the page in it) then
-//! shade each pixel once.
+//! A quad that is only partly covered is drawn whole: upstream's depth
+//! buffer, filled by the opaque pre-pass, keeps it from shading the pixels
+//! later opaque rectangles cover.
 //!
 //! Only the largest few occluders are kept ([`MAX_OCCLUDERS`]). Quads,
 //! shadows, images and untransformed glyphs are culled; a culled batch is
@@ -54,8 +50,6 @@ const EDGE_EPSILON: f32 = 1.0 / 64.0;
 const MAX_OCCLUDERS: usize = 16;
 /// Smaller opaque quads hide too little to be worth testing against.
 const MIN_OCCLUDER_AREA: f32 = 64.0 * 64.0;
-/// A quad cut into more pieces than this is drawn whole.
-const MAX_PIECES: usize = 16;
 
 /// Whether `desc` is a software adapter: flagged as one, or the Microsoft
 /// Basic Render Driver (WARP behind DXGI), which is also enumerated without
@@ -141,67 +135,6 @@ impl Rect {
         !(self.x1 > self.x0 && self.y1 > self.y0)
     }
 
-    fn intersects(&self, other: &Rect) -> bool {
-        self.x0 < other.x1 && other.x0 < self.x1 && self.y0 < other.y1 && other.y0 < self.y1
-    }
-
-    /// This rectangle without `hole`: up to four rectangles (the bands
-    /// above and below the hole, and left and right of it between them).
-    fn minus(&self, hole: &Rect, out: &mut Vec<Rect>) {
-        if !self.intersects(hole) {
-            out.push(*self);
-            return;
-        }
-        let (y0, y1) = (hole.y0.max(self.y0), hole.y1.min(self.y1));
-        let bands = [
-            Rect {
-                x0: self.x0,
-                y0: self.y0,
-                x1: self.x1,
-                y1: y0,
-            },
-            Rect {
-                x0: self.x0,
-                y0: y1,
-                x1: self.x1,
-                y1: self.y1,
-            },
-            Rect {
-                x0: self.x0,
-                y0,
-                x1: hole.x0.max(self.x0),
-                y1,
-            },
-            Rect {
-                x0: hole.x1.min(self.x1),
-                y0,
-                x1: self.x1,
-                y1,
-            },
-        ];
-        out.extend(bands.into_iter().filter(|r| !r.is_empty()));
-    }
-
-    /// This rectangle within `other`.
-    fn within(&self, other: &Rect) -> Rect {
-        Rect {
-            x0: self.x0.max(other.x0),
-            y0: self.y0.max(other.y0),
-            x1: self.x1.min(other.x1),
-            y1: self.y1.min(other.y1),
-        }
-    }
-
-    pub(crate) fn bounds(&self) -> Bounds<ScaledPixels> {
-        Bounds {
-            origin: gpui::point(ScaledPixels(self.x0), ScaledPixels(self.y0)),
-            size: gpui::size(
-                ScaledPixels(self.x1 - self.x0),
-                ScaledPixels(self.y1 - self.y0),
-            ),
-        }
-    }
-
     /// Whether `inner` lies within this rectangle (NaN never does).
     fn contains(&self, inner: &Rect) -> bool {
         inner.x0 >= self.x0 && inner.y0 >= self.y0 && inner.x1 <= self.x1 && inner.y1 <= self.y1
@@ -233,14 +166,6 @@ fn square(c: &Corners<ScaledPixels>) -> bool {
 /// path tests (a negative width takes its antialiased path).
 fn borderless(w: &Edges<ScaledPixels>) -> bool {
     w.top.is_zero() && w.right.is_zero() && w.bottom.is_zero() && w.left.is_zero()
-}
-
-/// Whether `quad` looks the same through any content mask within its
-/// bounds: a solid background, square corners and no border.
-fn is_plain(quad: &Quad) -> bool {
-    square(&quad.corner_radii)
-        && borderless(&quad.border_widths)
-        && quad.background.as_solid().is_some()
 }
 
 /// Whether `quad` paints every pixel of its rectangle opaquely.
@@ -361,60 +286,11 @@ impl Occlusion {
         self.hides(quad.order, &Rect::reached(&quad.bounds, &quad.content_mask))
     }
 
-    /// The pieces of a plain `quad` that no later occluder covers, when
-    /// some occluder covers part of it; `None` when it is drawn whole.
-    ///
-    /// The quad is cut by what it reaches ([`Rect::reached`]), as
-    /// [`Self::hides_quad`] tests it: an occluder ending exactly on a clip
-    /// edge leaves a sliver thinner than a pixel, and a quad left with one is
-    /// drawn whole rather than masked to it. The pieces are then kept within
-    /// the quad's own clip.
-    pub(crate) fn pieces(&self, quad: &Quad) -> Option<Vec<Rect>> {
-        if !is_plain(quad) {
-            return None;
-        }
-        let clip = Rect::of(&quad.bounds, &quad.content_mask);
-        let reach = Rect::reached(&quad.bounds, &quad.content_mask);
-        let mut pieces = vec![reach];
-        let mut cut = false;
-        let mut next = Vec::new();
-        for o in self
-            .occluders
-            .iter()
-            .filter(|o| o.order > quad.order && o.rect.intersects(&reach))
-        {
-            next.clear();
-            for piece in &pieces {
-                piece.minus(&o.rect, &mut next);
-            }
-            std::mem::swap(&mut pieces, &mut next);
-            cut = true;
-            if pieces.len() > MAX_PIECES {
-                return None;
-            }
-        }
-        if !cut {
-            return None;
-        }
-        let sliver =
-            |p: &Rect| p.x1 - p.x0 <= 2.0 * EDGE_EPSILON || p.y1 - p.y0 <= 2.0 * EDGE_EPSILON;
-        if pieces.iter().any(sliver) {
-            return None;
-        }
-        Some(
-            pieces
-                .iter()
-                .map(|p| p.within(&clip))
-                .filter(|p| !p.is_empty())
-                .collect(),
-        )
-    }
-
     pub(crate) fn hides_shadow(&self, shadow: &gpui::Shadow) -> bool {
         // As the shadow vertex shader: an inset shadow stays in its
         // element; a drop shadow's tail reaches 3 blur radii out.
-        let rect = if shadow.inset != 0 {
-            Rect::reached(&shadow.element_bounds, &shadow.content_mask)
+        let rect = if shadow.inset == true.into() {
+            Rect::reached(&shadow.shape_bounds, &shadow.content_mask)
         } else {
             Rect::reached(&shadow.bounds, &shadow.content_mask)
                 .outset(3.0 * shadow.blur_radius.0.max(0.0))
@@ -473,7 +349,7 @@ mod tests {
         solid_background,
     };
 
-    use super::{Occlusion, Rect, is_plain, visible_runs};
+    use super::{Occlusion, visible_runs};
 
     fn quad(order: u32, x: f32, y: f32, w: f32, h: f32, alpha: f32) -> Quad {
         Quad {
@@ -553,64 +429,6 @@ mod tests {
         assert!(visible_runs(0..3, |_| true).is_empty());
     }
 
-    fn total(rects: &[Rect]) -> f32 {
-        rects.iter().map(Rect::area).sum()
-    }
-
-    #[test]
-    fn a_partly_covered_plain_quad_keeps_only_its_uncovered_pieces() {
-        // Window, then a content area covering all but a 40 px top bar.
-        let window = quad(1, 0.0, 0.0, 1000.0, 800.0, 1.0);
-        let content = quad(2, 0.0, 40.0, 1000.0, 760.0, 1.0);
-        let occlusion = Occlusion::of_quads(&[window, content]);
-        let pieces = occlusion.pieces(&window).unwrap();
-        assert_eq!(
-            pieces,
-            vec![Rect {
-                x0: 0.0,
-                y0: 0.0,
-                x1: 1000.0,
-                y1: 40.0
-            }]
-        );
-        // The topmost one is not cut.
-        assert!(occlusion.pieces(&content).is_none());
-    }
-
-    #[test]
-    fn a_hole_in_the_middle_leaves_four_pieces_that_tile_the_rest() {
-        let under = quad(1, 0.0, 0.0, 1000.0, 800.0, 0.5);
-        let over = quad(2, 100.0, 100.0, 200.0, 300.0, 1.0);
-        let pieces = Occlusion::of_quads(&[under, over]).pieces(&under).unwrap();
-        assert_eq!(pieces.len(), 4);
-        assert_eq!(total(&pieces), 1000.0 * 800.0 - 200.0 * 300.0);
-        for (i, a) in pieces.iter().enumerate() {
-            assert!(!a.intersects(&Rect::of(&over.bounds, &over.content_mask)));
-            for b in &pieces[i + 1..] {
-                assert!(!a.intersects(b));
-            }
-        }
-    }
-
-    #[test]
-    fn rounded_or_bordered_quads_are_not_cut() {
-        let mut rounded = quad(1, 0.0, 0.0, 1000.0, 800.0, 1.0);
-        rounded.corner_radii.top_left = ScaledPixels(8.0);
-        let mut bordered = quad(1, 0.0, 0.0, 1000.0, 800.0, 1.0);
-        bordered.border_widths.left = ScaledPixels(1.0);
-        let over = quad(2, 0.0, 40.0, 1000.0, 760.0, 1.0);
-        assert!(
-            Occlusion::of_quads(&[rounded, over])
-                .pieces(&rounded)
-                .is_none()
-        );
-        assert!(
-            Occlusion::of_quads(&[bordered, over])
-                .pieces(&bordered)
-                .is_none()
-        );
-    }
-
     #[test]
     fn negative_radii_or_borders_are_not_square_or_borderless() {
         // The quad shader's fast path tests for exactly zero: anything else,
@@ -624,7 +442,6 @@ mod tests {
         bordered.border_color = hsla(0.0, 0.0, 1.0, 1.0);
         // Inset by a pixel like any bordered occluder: no longer covers `under`.
         assert!(!Occlusion::of_quads(&[under, bordered]).hides_quad(&under));
-        assert!(!is_plain(&bordered));
     }
 
     #[test]

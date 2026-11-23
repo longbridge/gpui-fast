@@ -27,7 +27,7 @@ fn collect(
         scene
             .paths
             .iter()
-            .map(|path| clipped(path.bounds, &path.content_mask)),
+            .map(|path| clipped(path.painted_bounds(), path.content_mask())),
     );
     rectangles.extend(
         scene
@@ -163,9 +163,9 @@ mod tests {
             corner_radii: Default::default(),
             content_mask: ContentMask { bounds: everything },
             color: Default::default(),
-            element_bounds: scaled(500., 500., 100., 100.),
-            element_corner_radii: Default::default(),
-            inset: 0,
+            shape_bounds: scaled(500., 500., 100., 100.),
+            shape_corner_radii: Default::default(),
+            inset: false.into(),
             pad: 0,
         });
         scene.insert_primitive(quad(scaled(10., 10., 100., 50.), everything));

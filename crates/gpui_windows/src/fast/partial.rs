@@ -479,11 +479,11 @@ pub(crate) fn signatures(
             .f(s.blur_radius.0)
             .corners(&s.corner_radii)
             .color(&s.color)
-            .f(s.element_bounds.origin.x.0 - s.bounds.origin.x.0)
-            .f(s.element_bounds.origin.y.0 - s.bounds.origin.y.0)
-            .size(&s.element_bounds)
-            .corners(&s.element_corner_radii)
-            .u(s.inset as u64)
+            .f(s.shape_bounds.origin.x.0 - s.bounds.origin.x.0)
+            .f(s.shape_bounds.origin.y.0 - s.bounds.origin.y.0)
+            .size(&s.shape_bounds)
+            .corners(&s.shape_corner_radii)
+            .u((s.inset == true.into()) as u64)
             .done();
         let grow = 3.0 * s.blur_radius.0.max(0.0) + 1.0;
         out.push(sig(key, s.order, &s.bounds, &s.content_mask, grow));
@@ -570,16 +570,10 @@ pub(crate) fn signatures(
         out.push(s);
     }
     for p in &scene.paths {
-        // A path is its vertices where they are: one that moved is new.
-        let mut key = Key::new(7).background(&p.color);
-        for v in &p.vertices {
-            key = key
-                .f(v.xy_position.x.0)
-                .f(v.xy_position.y.0)
-                .f(v.st_position.x)
-                .f(v.st_position.y);
-        }
-        out.push(sig(key.done(), p.order, &p.bounds, &p.content_mask, 1.0));
+        // A path is its tiles where they are: one that moved is new.
+        let (order, key) = gpui::painted_path_key(p);
+        let key = Key::new(7).u(key).done();
+        out.push(sig(key, order, &p.painted_bounds(), p.content_mask(), 1.0));
     }
     Some(out)
 }
@@ -1186,6 +1180,12 @@ struct RendererDrawer<'a> {
     window: Option<Option<ID3D11RenderTargetView>>,
 }
 
+impl RendererDrawer<'_> {
+    fn depth_scale(&self) -> f32 {
+        gpui::quad_depth_scale(self.scene.quads.len())
+    }
+}
+
 impl Drawer for RendererDrawer<'_> {
     fn clear(&self) -> [f32; 4] {
         self.clear
@@ -1207,7 +1207,7 @@ impl Drawer for RendererDrawer<'_> {
             .context("resources missing")?;
         let window = std::mem::replace(&mut resources.render_target_view, target.clone());
         self.window.get_or_insert(window);
-        self.renderer.pre_draw(&self.clear)
+        self.renderer.pre_draw(&self.clear, self.depth_scale())
     }
 
     fn upload(&mut self) -> Result<()> {

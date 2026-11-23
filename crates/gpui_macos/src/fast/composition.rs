@@ -224,31 +224,22 @@ fn ivar<'a>(object: &'a AnyObject, name: &CStr) -> &'a objc2::runtime::Ivar {
         .expect("composition instance variable")
 }
 
-/// Native pointer input runs GPUI capture before AppKit delivers it.
-/// No handlers are run from hitTest, and no process-wide event monitor is installed.
-pub(crate) unsafe fn register_window_input(decl: &mut ClassBuilder, superclass: &AnyClass) {
-    extern "C" fn window(this: &AnyObject, _: Sel, event: Id) {
-        send_window_event(this, event, class!(NSWindow));
-    }
-    extern "C" fn panel(this: &AnyObject, _: Sel, event: Id) {
-        send_window_event(this, event, class!(NSPanel));
-    }
-    unsafe {
-        decl.add_ivar::<Bool>(NATIVE_INPUT_IVAR);
-        if superclass == class!(NSPanel) {
-            decl.add_method(sel!(sendEvent:), panel as extern "C" fn(_, Sel, _));
-        } else {
-            decl.add_method(sel!(sendEvent:), window as extern "C" fn(_, Sel, _));
-        }
-    }
+/// An inactive window takes the regular NativeView/AppKit event path without
+/// locking its state. Both integrations share the window's sendEvent: method.
+pub(crate) fn register_window_input(decl: &mut ClassBuilder) {
+    decl.add_ivar::<Bool>(NATIVE_INPUT_IVAR);
 }
 
-fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
+/// Returns true only when composition delivered or consumed the event.
+pub(crate) fn send_event(
+    this: &AnyObject,
+    event: Id,
+    superclass: &AnyClass,
+    state: &Rc<Mutex<MacWindowState>>,
+    clicked_native_view: Option<gpui::NativeViewId>,
+) -> bool {
     if !unsafe { *ivar(this, NATIVE_INPUT_IVAR).load::<Bool>(this) }.as_bool() {
-        unsafe {
-            let _: () = msg_send![super(this, superclass), sendEvent: event];
-        }
-        return;
+        return false;
     }
     let kind: NSEventType = unsafe { msg_send![event, type] };
     let observe = matches!(
@@ -269,29 +260,37 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
     );
     let pointer = observe || wheel || dragged || kind == NSEventType::MouseMoved;
     if !pointer {
-        unsafe {
-            let _: () = msg_send![super(this, superclass), sendEvent: event];
-        }
-        return;
+        return false;
     }
-    let button = if observe {
-        let number: NSInteger = unsafe { msg_send![event, buttonNumber] };
-        1u64.checked_shl(number as u32).unwrap_or(0)
+    let number: NSInteger = if observe || dragged {
+        unsafe { msg_send![event, buttonNumber] }
     } else {
         0
     };
+    let button = 1u64.checked_shl(number as u32).unwrap_or(0);
     let up = matches!(
         kind,
         NSEventType::LeftMouseUp | NSEventType::RightMouseUp | NSEventType::OtherMouseUp
     );
-    let state = unsafe { get_window_state(this) };
     let (root, native_views, captured, has_forwarders, follows_cursor) = {
-        let mut state = state.lock();
+        // AppKit can re-enter event delivery during a window state update.
+        let Some(mut state) = state.try_lock() else {
+            return false;
+        };
         if observe && !up {
             state
                 .fast_composition
                 .pointer_capture
                 .reconcile_down(button);
+        }
+        // The AppKit view owns the continuation of its press, also when a
+        // drag crosses a composition surface. A held GPUI chord retains new
+        // downs over a view until its last button goes up.
+        if ((up || dragged) && state.native_view_tracks_button(number))
+            || (clicked_native_view.is_some()
+                && state.fast_composition.pointer_capture.owner() != Some(PointerOwner::Gpui))
+        {
+            return false;
         }
         let composition = &state.fast_composition;
         (
@@ -307,13 +306,10 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
     let under = (follows_cursor && (kind == NSEventType::MouseMoved || up))
         .then(|| unsafe { native_under(root.as_ptr(), event, &native_views) });
     if let Some(native) = under {
-        follow_native_cursor(&state, native);
+        follow_native_cursor(state, native);
     }
     if kind == NSEventType::MouseMoved && !has_forwarders {
-        unsafe {
-            let _: () = msg_send![super(this, superclass), sendEvent: event];
-        }
-        return;
+        return false;
     }
     // A press on the window's own chrome (the resize border, the titlebar
     // buttons) belongs to AppKit, as in a window without composition.
@@ -325,10 +321,7 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
     // that does reach `sendEvent:` still takes the path below, which clears
     // the owner.
     if observe && !up && unsafe { hits_window_chrome(this, root.as_ptr(), event) } {
-        unsafe {
-            let _: () = msg_send![super(this, superclass), sendEvent: event];
-        }
-        return;
+        return false;
     }
     if up {
         let mut state = state.lock();
@@ -359,7 +352,7 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
         || handle_view_event(unsafe { root.as_ref() }, sel!(sendEvent:), event),
         || under.unwrap_or_else(|| unsafe { native_under(root.as_ptr(), event, &native_views) }),
     ) {
-        PointerRoute::Delivered => return,
+        PointerRoute::Delivered => return true,
         PointerRoute::AppKit(native) => native,
     };
     let forward =
@@ -403,7 +396,7 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
                 let mut state = state.lock();
                 state.fast_composition.pointer_capture.press(button, None);
             }
-            return;
+            return true;
         }
     }
     if native.is_none() {
@@ -414,10 +407,7 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
                 .pointer_capture
                 .press(button, None);
         }
-        unsafe {
-            let _: () = msg_send![super(this, superclass), sendEvent: event];
-        }
-        return;
+        return false;
     }
     let previous = {
         let mut state = state.lock();
@@ -432,6 +422,7 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
         let _: () = msg_send![super(this, superclass), sendEvent: event];
     }
     state.lock().fast_composition.native_event = previous;
+    true
 }
 
 /// Whether AppKit hit-tests `event` outside the window's view `root`: to the

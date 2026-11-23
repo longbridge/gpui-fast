@@ -245,7 +245,7 @@ pub(crate) fn visible_bounds(primitive: &Primitive) -> Bounds<ScaledPixels> {
 /// content mask aside. See [`visible_bounds`].
 pub(crate) fn drawn_bounds(primitive: &Primitive) -> Bounds<ScaledPixels> {
     match primitive {
-        Primitive::Shadow(shadow) if shadow.inset != 0 => shadow.element_bounds,
+        Primitive::Shadow(shadow) if shadow.inset.as_bool() => shadow.shape_bounds,
         Primitive::Shadow(shadow) => {
             let margin = ScaledPixels(3. * shadow.blur_radius.0.max(0.));
             Bounds {
@@ -317,25 +317,14 @@ pub(crate) fn move_primitive(primitive: &mut Primitive, delta: Point<ScaledPixel
     match primitive {
         Primitive::Shadow(shadow) => {
             mv(&mut shadow.bounds);
-            mv(&mut shadow.element_bounds);
+            mv(&mut shadow.shape_bounds);
             mv(&mut shadow.content_mask.bounds);
         }
         Primitive::Quad(quad) => {
             mv(&mut quad.bounds);
             mv(&mut quad.content_mask.bounds);
         }
-        Primitive::Path(path) => {
-            mv(&mut path.bounds);
-            mv(&mut path.content_mask.bounds);
-            for vertex in &mut path.vertices {
-                vertex.xy_position = vertex.xy_position + delta;
-                // `Window::paint_path` leaves vertices' masks empty, at the
-                // origin, and no renderer reads them: they stay so.
-                if !vertex.content_mask.bounds.is_empty() {
-                    mv(&mut vertex.content_mask.bounds);
-                }
-            }
-        }
+        Primitive::Path(path) => path.translate(delta),
         Primitive::Underline(underline) => {
             mv(&mut underline.bounds);
             mv(&mut underline.content_mask.bounds);
@@ -358,6 +347,10 @@ pub(crate) fn move_primitive(primitive: &mut Primitive, delta: Point<ScaledPixel
             mv(&mut surface.bounds);
             mv(&mut surface.content_mask.bounds);
         }
+        Primitive::NativeView(native_view) => {
+            mv(&mut native_view.bounds);
+            mv(&mut native_view.content_mask.bounds);
+        }
     }
 }
 
@@ -371,3 +364,6 @@ fn translate_transformation(matrix: &mut TransformationMatrix, delta: Point<Scal
     matrix.translation[0] += dx - (r[0][0] * dx + r[0][1] * dy);
     matrix.translation[1] += dy - (r[1][0] * dx + r[1][1] * dy);
 }
+
+/// Exported with the layer types (`gpui::painted_path_key`).
+pub use crate::fast::scene::painted_path_key;

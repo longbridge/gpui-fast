@@ -8,7 +8,7 @@
 
 use std::{mem, ops::Range, ptr};
 
-use gpui::{AtlasTextureId, DevicePixels, Size, TileId, decode_layer_tile, size};
+use gpui::{AtlasTextureId, DevicePixels, TileId, decode_layer_tile, size};
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLPrimitiveType, MTLRenderCommandEncoder, MTLTexture};
 
@@ -24,7 +24,6 @@ pub(crate) fn draw_tiles(
     texture_id: AtlasTextureId,
     sprites: &Range<usize>,
     instance_bindings: &InstanceBindings,
-    viewport_size: Size<DevicePixels>,
     command_encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
 ) -> bool {
     let Some((layer, _)) = decode_layer_tile(texture_id, TileId(0)) else {
@@ -40,24 +39,13 @@ pub(crate) fn draw_tiles(
         if !pipeline_set {
             pipeline_set = true;
             command_encoder.setRenderPipelineState(&renderer.polychrome_sprites_pipeline_state);
-            // SAFETY: Six unit vertices and the scene's sprites match the shader
-            // layouts and slots. Metal retains the buffers, `writer.finish`
-            // publishes their writes, and the viewport bytes are copied.
+            // SAFETY: Both shader stages read the scene's polychrome sprites
+            // from this instance binding. Metal retains the buffer for the draw.
             unsafe {
-                command_encoder.setVertexBuffer_offset_atIndex(
-                    Some(&renderer.unit_vertices),
-                    0,
-                    SpriteInputIndex::Vertices as usize,
-                );
                 command_encoder.setVertexBuffer_offset_atIndex(
                     Some(&polychrome_sprites.buffer),
                     polychrome_sprites.offset,
                     SpriteInputIndex::Sprites as usize,
-                );
-                command_encoder.setVertexBytes_length_atIndex(
-                    ptr::NonNull::from(&viewport_size).cast(),
-                    mem::size_of_val(&viewport_size),
-                    SpriteInputIndex::ViewportSize as usize,
                 );
                 command_encoder.setFragmentBuffer_offset_atIndex(
                     Some(&polychrome_sprites.buffer),
@@ -82,9 +70,9 @@ pub(crate) fn draw_tiles(
             command_encoder
                 .setFragmentTexture_atIndex(Some(texture), SpriteInputIndex::AtlasTexture as usize);
             command_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
-                MTLPrimitiveType::Triangle,
+                MTLPrimitiveType::TriangleStrip,
                 0,
-                6,
+                4,
                 run.len(),
                 run.start,
             );
