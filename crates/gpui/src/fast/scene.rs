@@ -473,3 +473,105 @@ pub(crate) fn set_draw_order(primitive: &mut crate::scene::Primitive, order: Dra
         Primitive::NativeView(p) => p.order = order,
     }
 }
+
+/// Starts collecting the pieces upstream's `Window::insert_quad` splits a
+/// quad into, to insert them together at [`end_quad_pieces`].
+pub(crate) fn begin_quad_pieces(scene: &mut Scene) {
+    scene.fast_quad_pieces = Some(smallvec::SmallVec::new());
+}
+
+pub(crate) fn end_quad_pieces(scene: &mut Scene) {
+    if let Some(pieces) = scene.fast_quad_pieces.take() {
+        insert_quad_pieces(scene, &pieces);
+    }
+}
+
+/// Keeps `primitive` as a piece while pieces are collected, or hands it back.
+pub(crate) fn quad_piece(
+    scene: &mut Scene,
+    primitive: crate::scene::Primitive,
+) -> Option<crate::scene::Primitive> {
+    match (&mut scene.fast_quad_pieces, primitive) {
+        (Some(pieces), crate::scene::Primitive::Quad(quad)) => {
+            pieces.push(quad);
+            None
+        }
+        (_, primitive) => Some(primitive),
+    }
+}
+
+/// Inserts the pieces a quad was split into (upstream's `Window::insert_quad`
+/// splits a bordered or rounded quad into its interior and four strips).
+///
+/// The pieces don't overlap, so they can share one place in the drawing
+/// order: the one the quad as a whole would get. That is one insert into the
+/// bounds tree instead of five, and the same insert from one frame to the
+/// next, which the tree replays. Inside a layer the pieces already share the
+/// layer's place, so they are inserted as they are.
+pub(crate) fn insert_quad_pieces(scene: &mut Scene, pieces: &[Quad]) {
+    use crate::scene::{PaintOperation, Primitive};
+    if pieces.len() < 2 || !scene.fast_top_level() {
+        for piece in pieces {
+            scene.insert_primitive(*piece);
+        }
+        return;
+    }
+    let mut union = None::<crate::Bounds<crate::ScaledPixels>>;
+    for piece in pieces {
+        let bounds = Primitive::Quad(*piece).clipped_bounds();
+        if !bounds.is_empty() {
+            union = Some(match union {
+                Some(union) => union.join(&bounds),
+                None => bounds,
+            });
+        }
+    }
+    let Some(union) = union else {
+        return;
+    };
+    let order = scene.primitive_bounds.insert(union);
+    for piece in pieces {
+        let mut primitive = Primitive::Quad(*piece);
+        if primitive.clipped_bounds().is_empty() {
+            continue;
+        }
+        set_draw_order(&mut primitive, order);
+        scene.fast_push_primitive(primitive.clone(), order);
+        scene
+            .paint_operations
+            .push(PaintOperation::Primitive(primitive));
+    }
+}
+
+/// Consecutive quads being replayed that can be inserted as the pieces of
+/// one, see [`insert_quad_pieces`]: they have the same bounds (a split quad's
+/// pieces keep the bounds of the whole) and don't overlap.
+#[derive(Default)]
+pub(crate) struct QuadRun {
+    pieces: smallvec::SmallVec<[Quad; 5]>,
+}
+
+impl QuadRun {
+    pub(crate) fn push(&mut self, scene: &mut Scene, quad: Quad) {
+        use crate::scene::Primitive;
+        if let Some(first) = self.pieces.first() {
+            let bounds = Primitive::Quad(quad).clipped_bounds();
+            if first.bounds != quad.bounds
+                || self
+                    .pieces
+                    .iter()
+                    .any(|piece| Primitive::Quad(*piece).clipped_bounds().intersects(&bounds))
+            {
+                self.flush(scene);
+            }
+        }
+        self.pieces.push(quad);
+    }
+
+    pub(crate) fn flush(&mut self, scene: &mut Scene) {
+        if !self.pieces.is_empty() {
+            insert_quad_pieces(scene, &self.pieces);
+            self.pieces.clear();
+        }
+    }
+}

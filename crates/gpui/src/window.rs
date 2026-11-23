@@ -5235,6 +5235,7 @@ impl Window {
             return;
         }
 
+        crate::fast::scene::begin_quad_pieces(&mut self.next_frame.scene);
         if has_background {
             self.next_frame.scene.insert_primitive(Quad {
                 content_mask: ContentMask {
@@ -5277,6 +5278,7 @@ impl Window {
                 ..strip_quad
             });
         }
+        crate::fast::scene::end_quad_pieces(&mut self.next_frame.scene);
     }
 
     /// Paint the given `Path` into the scene for the next frame at the current z-index.

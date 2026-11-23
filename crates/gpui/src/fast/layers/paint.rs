@@ -767,7 +767,18 @@ pub(crate) fn draw_into_frame<'a>(
     let viewports = viewports(window);
     let viewport = viewports.snapped;
     let scene = &mut window.next_frame.scene;
+    // A split quad's pieces are inserted together, as they were painted.
+    let mut quads = crate::fast::scene::QuadRun::default();
     for operation in operations {
+        if let PaintOperation::Primitive(primitive @ Primitive::Quad(_)) = operation {
+            let mut primitive = translate_primitive(primitive, delta);
+            clip_primitive(&mut primitive, viewports);
+            if let Primitive::Quad(quad) = primitive {
+                quads.push(scene, quad);
+            }
+            continue;
+        }
+        quads.flush(scene);
         match operation {
             PaintOperation::Primitive(primitive) => {
                 let mut primitive = translate_primitive(primitive, delta);
@@ -787,6 +798,7 @@ pub(crate) fn draw_into_frame<'a>(
             }
         }
     }
+    quads.flush(scene);
 }
 
 /// Narrows every content mask `primitive` carries to `viewports`.

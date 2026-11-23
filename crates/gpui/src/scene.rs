@@ -67,6 +67,7 @@ pub struct Scene {
     animations: Vec<SpriteAnimation>,
     pub(crate) sort_scratch: crate::fast::scene::SortScratch,
     pub(crate) fast_rounded_clip: crate::fast::rounded_clip::SceneClips,
+    pub(crate) fast_quad_pieces: Option<smallvec::SmallVec<[Quad; 5]>>,
     pub layers: crate::fast::layers::scene::SceneLayers,
 }
 
@@ -226,7 +227,10 @@ impl Scene {
     }
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
-        self.try_insert_primitive(primitive.into());
+        let Some(primitive) = crate::fast::scene::quad_piece(self, primitive.into()) else {
+            return;
+        };
+        self.try_insert_primitive(primitive);
     }
 
     /// Returns whether the primitive was kept, rather than clipped away.
@@ -258,6 +262,15 @@ impl Scene {
         self.paint_operations
             .push(PaintOperation::Primitive(primitive));
         true
+    }
+
+    // fast: fast::scene::insert_quad_pieces gives a split quad one place in the drawing order.
+    pub(crate) fn fast_top_level(&self) -> bool {
+        self.layer_stack.is_empty()
+    }
+
+    pub(crate) fn fast_push_primitive(&mut self, primitive: Primitive, order: DrawOrder) {
+        self.push_primitive(primitive, order)
     }
 
     fn push_primitive(&mut self, primitive: Primitive, order: DrawOrder) {
@@ -293,7 +306,13 @@ impl Scene {
 
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
         crate::fast::layers::paint::replay_layers(self, range.clone(), prev_scene);
+        let mut quads = crate::fast::scene::QuadRun::default(); // fast: split quads insert together
         for operation in &prev_scene.paint_operations[range] {
+            if let PaintOperation::Primitive(Primitive::Quad(quad)) = operation {
+                quads.push(self, *quad); // fast
+                continue;
+            }
+            quads.flush(self); // fast
             match operation {
                 PaintOperation::Primitive(primitive) => {
                     // Animation ids index the scene they were inserted into.
@@ -313,6 +332,7 @@ impl Scene {
                 }
             }
         }
+        quads.flush(self); // fast
     }
 
     pub fn finish(&mut self) {
@@ -502,7 +522,8 @@ impl Primitive {
         }
     }
 
-    fn clipped_bounds(&self) -> Bounds<ScaledPixels> {
+    pub(crate) fn clipped_bounds(&self) -> Bounds<ScaledPixels> {
+        // fast: read by fast::scene
         self.transformation()
             .transform_bounds(*self.bounds())
             .intersect(&self.content_mask().bounds)

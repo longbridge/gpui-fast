@@ -173,6 +173,9 @@ pub(crate) struct SceneClips {
     active: Vec<usize>,
     pub(crate) compiled: bool,
     pub(crate) native_batches: Option<Box<super::rounded_clip_scene::NativeBatches>>,
+    /// The bounds trees `compile` orders the clip scenes with, kept from one
+    /// frame to the next so each is replayed rather than built from scratch.
+    pub(crate) trees: super::rounded_clip_scene::ClipTrees,
 }
 
 impl SceneClips {
