@@ -102,10 +102,9 @@ impl Shape {
         })
     }
 
-    /// CPU reference for testing the geometric intersection independently of
+    /// Tests the geometric intersection independently of
     /// antialiasing. Check every corner: an unusually thick opposite border
     /// can cut through a corner's quarter ellipse.
-    #[cfg(test)]
     fn contains(&self, position: crate::Point<ScaledPixels>) -> bool {
         let b = self.bounds;
         if b.is_empty() || !b.contains(&position) {
@@ -130,6 +129,35 @@ impl Shape {
     }
 }
 
+/// Hitboxes use rectangular bounds. A native view under a rounded clip only
+/// receives a pointer where its opening was painted, including ancestor clips.
+pub(crate) fn hit_native_view(
+    scene: &Scene,
+    hitbox: crate::HitboxId,
+    position: crate::Point<ScaledPixels>,
+) -> Option<crate::NativeViewId> {
+    let view = scene
+        .native_views
+        .iter()
+        .find(|view| view.hitbox_id == hitbox)?;
+    if scene.fast_rounded_clip.native_batches.is_none() {
+        return Some(view.id);
+    }
+    let index = scene.paint_operations.iter().position(|op| {
+        matches!(op,
+            crate::scene::PaintOperation::Primitive(crate::Primitive::NativeView(painted))
+                if painted.hitbox_id == hitbox
+        )
+    })?;
+    scene
+        .fast_rounded_clip
+        .scopes
+        .iter()
+        .filter(|scope| scope.operations.contains(&index))
+        .all(|scope| scope.shape.contains(position))
+        .then_some(view.id)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Scope {
     pub(crate) operations: Range<usize>,
@@ -144,6 +172,7 @@ pub(crate) struct SceneClips {
     pub(crate) scopes: Vec<Scope>,
     active: Vec<usize>,
     pub(crate) compiled: bool,
+    pub(crate) native_batches: Option<Box<super::rounded_clip_scene::NativeBatches>>,
 }
 
 impl SceneClips {
@@ -166,6 +195,7 @@ impl SceneClips {
 }
 
 pub(crate) fn clear(scene: &mut Scene) {
+    scene.fast_rounded_clip.native_batches = None;
     scene.fast_rounded_clip.scopes.clear();
     scene.fast_rounded_clip.active.clear();
     scene.fast_rounded_clip.compiled = false;
@@ -272,6 +302,61 @@ mod tests {
             content_mask: crate::ContentMask { bounds },
             ..Default::default()
         }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn clipped_native_views_preserve_placements_and_draw_each_hole_once() {
+        let bounds = shape().bounds;
+        let view = |id, hitbox_id| crate::PaintNativeView {
+            order: 0,
+            id: crate::NativeViewId::for_test(id),
+            hitbox_id,
+            bounds,
+            content_mask: crate::ContentMask { bounds },
+            background: Default::default(),
+        };
+        let first = crate::HitboxId::placeholder();
+        let second = first.next();
+        let repeated = second.next();
+        let mut scene = Scene::default();
+        record(&mut scene, ClipOperation::Begin(shape()));
+        scene.insert_primitive(view(1, first));
+        record(&mut scene, ClipOperation::End);
+        scene.insert_primitive(view(2, second));
+        scene.insert_primitive(view(1, repeated));
+        scene.finish();
+
+        let drawn_views = |s: &Scene| {
+            s.batches()
+                .flat_map(|batch| match batch {
+                    crate::PrimitiveBatch::NativeViews(range) => &s.native_views[range],
+                    _ => &[],
+                })
+                .map(|view| view.hitbox_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            scene
+                .native_views
+                .iter()
+                .map(|v| v.hitbox_id)
+                .collect::<Vec<_>>(),
+            [first, second]
+        );
+        assert_eq!(drawn_views(&scene), [second]);
+        let child = scene.layers.frames[0].content.scene().unwrap();
+        assert_eq!(drawn_views(child), [first]);
+        assert_eq!(
+            hit_native_view(&scene, first, at(32., 32.)),
+            Some(crate::NativeViewId::for_test(1))
+        );
+        assert_eq!(hit_native_view(&scene, first, at(1., 1.)), None);
+        assert_eq!(
+            hit_native_view(&scene, second, at(1., 1.)),
+            Some(crate::NativeViewId::for_test(2))
+        );
+        assert_eq!(hit_native_view(&scene, repeated, at(32., 32.)), None);
     }
 
     #[test]

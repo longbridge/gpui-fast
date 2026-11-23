@@ -232,6 +232,7 @@ impl Element for NativeViewElement {
         };
         let hitbox = window.insert_hitbox(bounds, behavior);
         if shows_view {
+            crate::fast::composition::note_native_view_placement(window);
             state.shown_hitbox.set(Some(hitbox.id));
         }
         Some(hitbox)
@@ -313,12 +314,11 @@ impl Window {
     pub(super) fn hit_test_native_view(&self, position: Point<Pixels>) -> Option<NativeViewId> {
         let hit_test = self.rendered_frame.hit_test(position);
         let topmost = hit_test.ids.first()?;
-        self.rendered_frame
-            .scene
-            .native_views
-            .iter()
-            .find(|native_view| native_view.hitbox_id == *topmost)
-            .map(|native_view| native_view.id)
+        crate::fast::rounded_clip::hit_native_view(
+            &self.rendered_frame.scene,
+            *topmost,
+            position.scale(self.scale_factor()),
+        )
     }
 
     /// Dispatches a key press that the focused native view has not seen yet, if

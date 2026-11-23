@@ -330,7 +330,7 @@ impl Scene {
     /// That is the occurrence whose hitbox takes the view's mouse input. It
     /// isn't always the first in the drawing order, which depends on what each
     /// occurrence overlaps.
-    fn keep_first_painted_native_views(&mut self) {
+    pub(crate) fn keep_first_painted_native_views(&mut self) {
         let native_views = &self.native_views;
         let is_repeated = native_views.iter().enumerate().any(|(index, native_view)| {
             native_views[..index]
@@ -360,6 +360,8 @@ impl Scene {
         allow(dead_code)
     )]
     pub fn batches(&self) -> impl Iterator<Item = PrimitiveBatch> + '_ {
+        let (native_views, fast_native_indices) =
+            crate::fast::rounded_clip_scene::native_batches(self);
         BatchIterator {
             shadows_start: 0,
             shadows_iter: self.shadows.iter().peekable(),
@@ -378,7 +380,8 @@ impl Scene {
             surfaces_start: 0,
             surfaces_iter: self.surfaces.iter().peekable(),
             native_views_start: 0,
-            native_views_iter: self.native_views.iter().peekable(),
+            native_views_iter: native_views.iter().peekable(),
+            fast_native_indices,
         }
     }
 }
@@ -538,6 +541,7 @@ struct BatchIterator<'a> {
     surfaces_iter: Peekable<slice::Iter<'a, PaintSurface>>,
     native_views_start: usize,
     native_views_iter: Peekable<slice::Iter<'a, PaintNativeView>>,
+    fast_native_indices: Option<&'a [usize]>,
 }
 
 impl<'a> Iterator for BatchIterator<'a> {
@@ -729,6 +733,11 @@ impl<'a> Iterator for BatchIterator<'a> {
                 let native_views_start = self.native_views_start;
                 let mut native_views_end = native_views_start + 1;
                 self.native_views_iter.next();
+                if let Some(indices) = self.fast_native_indices {
+                    self.native_views_start = native_views_end;
+                    let index = indices[native_views_start];
+                    return Some(PrimitiveBatch::NativeViews(index..index + 1));
+                }
                 while self
                     .native_views_iter
                     .next_if(|native_view| (native_view.order, batch_kind) < max_order_and_kind)

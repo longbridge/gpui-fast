@@ -621,6 +621,13 @@ pub(crate) fn surfaces_placed(window: &Window) -> u64 {
     window.fast_composition.0.borrow().placements.get()
 }
 
+/// Native views move with their GPUI elements each frame, like composition
+/// surfaces. A scrolling container must keep prepainting their placements.
+pub(crate) fn note_native_view_placement(window: &Window) {
+    let state = window.fast_composition.0.borrow();
+    state.placements.set(state.placements.get() + 1);
+}
+
 pub(crate) fn record_input(window: &mut Window, id: HitboxId) {
     let input = &mut window.next_frame.fast_composition_input;
     if let (Some(base), Some(surface)) = (input.base, input.scope) {
