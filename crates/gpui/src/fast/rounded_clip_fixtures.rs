@@ -29,7 +29,9 @@ fn rounded_overflow_command_palette_rows_keep_square_corners(cx: &mut gpui::Test
                 .child(row(16., gpui::red()))
                 .child(row(8., gpui::blue()))
                 .child(row(8., gpui::black()))
-                .child(row(16., gpui::green())),
+                // Not `gpui::green()`, whose green channel is 127.5 of 255:
+                // renderers round it either way.
+                .child(row(16., gpui::rgb(0x00ff00).into())),
         )
     });
     let sample = |x, y| pixel(&pixels, side, x * side / 64, y * side / 64);
@@ -53,7 +55,7 @@ fn rounded_overflow_command_palette_rows_keep_square_corners(cx: &mut gpui::Test
         assert_eq!(sample(x, 63), [255, 255, 255, 255]);
     }
     assert_eq!(sample(32, 0), [0, 0, 0, 255]);
-    assert_eq!(sample(32, 63), [0, 128, 0, 255]);
+    assert_eq!(sample(32, 63), [0, 255, 0, 255]);
 }
 
 #[gpui::test]
