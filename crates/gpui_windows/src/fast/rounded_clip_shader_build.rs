@@ -24,7 +24,10 @@ pub fn stage() {
 }
 
 pub fn source(original: &str, alpha: &str) -> String {
-    let mut source = original.replace("#include \"alpha_correction.hlsl\"", alpha);
+    // Windows checkouts may use CRLF; the patterns below are written with LF.
+    let original = original.replace("\r\n", "\n");
+    let alpha = alpha.replace("\r\n", "\n");
+    let mut source = original.replace("#include \"alpha_correction.hlsl\"", &alpha);
     // Scenes drawn without the opaque pre-pass (rounded clip content, layer
     // tiles) set `global_pad.x`: their quad pass draws opaque rectangles too.
     let cull = "    if (is_opaque_rectangle(quad)) {\n        QuadFragmentInput culled";
