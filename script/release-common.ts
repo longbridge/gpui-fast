@@ -40,5 +40,7 @@ export function run(args: string[], capture = false): string {
 }
 
 export function fastName(name: string): string {
-  return name === "gpui" ? "gpui-fast" : name.replace(/^gpui_/, "gpui-fast-").replaceAll("_", "-");
+  if (name === "gpui") return "gpui-fast";
+  // Non-gpui crates we patch (scheduler) get the prefix too, never their bare name.
+  return (name.startsWith("gpui_") ? name.replace(/^gpui_/, "gpui-fast-") : "gpui-fast-" + name).replaceAll("_", "-");
 }
