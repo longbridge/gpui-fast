@@ -482,7 +482,7 @@ fn rounded_overflow_clips_paths(cx: &mut gpui::TestAppContext) {
                         |_, _, _| (),
                         |bounds, (), window, _| {
                             let mut path = gpui::PathBuilder::fill();
-                        path.move_to(bounds.origin);
+                            path.move_to(bounds.origin);
                             path.line_to(bounds.top_right());
                             path.line_to(bounds.bottom_right());
                             path.line_to(bounds.bottom_left());

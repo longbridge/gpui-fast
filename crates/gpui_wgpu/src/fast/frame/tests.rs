@@ -1,8 +1,8 @@
 //! Paths drawn as path tiles, among quads, in a fast frame.
 
 use gpui::{
-    Bounds, ContentMask, DevicePixels, Hsla, PaintedPath, PathBuilder, PlatformHeadlessRenderer as _, Quad,
-    ScaledPixels, Scene, point, px, size,
+    Bounds, ContentMask, DevicePixels, Hsla, PaintedPath, PathBuilder,
+    PlatformHeadlessRenderer as _, Quad, ScaledPixels, Scene, point, px, size,
 };
 
 use crate::WgpuHeadlessRenderer;

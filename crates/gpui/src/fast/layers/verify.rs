@@ -191,10 +191,7 @@ fn describe(primitive: &Primitive) -> String {
     match primitive {
         Primitive::Shadow(p) => format!("{:?}", crate::Shadow { order: 0, ..*p }),
         Primitive::Quad(p) => format!("{:?}", Quad { order: 0, ..*p }),
-        Primitive::Path(p) => format!(
-            "path {:?} {:?} {:?}",
-            p.bounds, p.paint, p.tiles
-        ),
+        Primitive::Path(p) => format!("path {:?} {:?} {:?}", p.bounds, p.paint, p.tiles),
         Primitive::Underline(p) => format!("{:?}", crate::Underline { order: 0, ..*p }),
         Primitive::MonochromeSprite(p) => format!(
             "{:?}",

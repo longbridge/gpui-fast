@@ -3,9 +3,9 @@
 use crate::AppContext as _;
 use crate::{
     AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, ContentMask, DevicePixels, Hsla,
-    LayerFrame, LayerKey, MonochromeSprite, Pixels, Point, PolychromeSprite, Quad,
-    ScaledPixels, Scene, Shadow, SubpixelSprite, TileCoord, TileId, TransformationMatrix,
-    Underline, decode_layer_tile, fast::layers::scene::translate_primitive, layer_tile_id,
+    LayerFrame, LayerKey, MonochromeSprite, Pixels, Point, PolychromeSprite, Quad, ScaledPixels,
+    Scene, Shadow, SubpixelSprite, TileCoord, TileId, TransformationMatrix, Underline,
+    decode_layer_tile, fast::layers::scene::translate_primitive, layer_tile_id,
     layer_tile_texture_id, point, px, scene::Primitive, size,
 };
 
@@ -344,7 +344,11 @@ fn translation_moves_every_position_a_primitive_carries() {
     assert_eq!(moved.bounds.size, bounds.size);
     assert_eq!(moved.content_mask().bounds, moved_mask);
     let expected = tiles.translated(point(delta.x.0, delta.y.0));
-    assert_eq!(moved.tiles.tiles(), expected.tiles(), "tiles moved with the path");
+    assert_eq!(
+        moved.tiles.tiles(),
+        expected.tiles(),
+        "tiles moved with the path"
+    );
     assert_eq!(moved.tiles.curves(), expected.curves());
 
     let underline = Underline {

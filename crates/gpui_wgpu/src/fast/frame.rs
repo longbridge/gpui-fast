@@ -892,10 +892,7 @@ pub(crate) fn draw_scene(
                 bound.set_bind_group(&mut pass, 0, scene_globals);
                 bound.set_bind_group(&mut pass, 1, group);
                 let first = graph.paths.tiles_first;
-                pass.draw(
-                    0..4,
-                    (first + step.tiles.start)..(first + step.tiles.end),
-                );
+                pass.draw(0..4, (first + step.tiles.start)..(first + step.tiles.end));
             }
             PrimitiveBatch::Underlines(range) => draw_batch(
                 &mut pass,
