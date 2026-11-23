@@ -489,6 +489,7 @@ impl Scene {
             && self.subpixel_sprites.is_empty()
             && self.polychrome_sprites.is_empty()
             && self.surfaces.is_empty()
+            && self.native_views.is_empty()
     }
 
     /// Replays a range as a self-contained scene, restoring any layers that

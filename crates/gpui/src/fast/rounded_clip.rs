@@ -268,6 +268,8 @@ impl Window {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "test-support")]
+    use super::hit_native_view;
     use super::{ClipOperation, SceneClips, Shape, record};
     use crate::{
         Bounds, Corners, Edges, Overflow, Quad, ScaledPixels, Scene, Style, point, px, size,
