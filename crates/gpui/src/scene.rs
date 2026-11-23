@@ -1217,8 +1217,8 @@ impl PaintedPath {
         color: Background,
     ) -> Self {
         let content_mask = content_mask.scale(scale_factor);
-        let mut tiles = path.bin(scale_factor);
-        tiles.retain_visible(content_mask.bounds);
+        let tiles = crate::fast::path_cache::bin(&path, scale_factor);
+        let tiles = crate::fast::path_cache::visible(tiles, content_mask.bounds);
         let paint = PathPaint {
             bounds: tiles.bounds(),
             content_mask,
@@ -1229,7 +1229,7 @@ impl PaintedPath {
         Self {
             order: 0,
             bounds: tiles.painted_bounds(),
-            tiles: Rc::new(tiles),
+            tiles,
             paint,
         }
     }

@@ -59,7 +59,7 @@ impl FastFloat for f32 {
 }
 
 /// A path's curves binned into tiles for one display scale.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct PathTiles {
     bounds: Bounds<ScaledPixels>,
     tiles: Vec<PathTile>,
@@ -122,6 +122,16 @@ impl PathTiles {
                 })
                 .collect(),
         }
+    }
+
+    /// Whether no tile lies entirely outside `mask` (gpui-fast path cache).
+    pub(crate) fn all_visible(&self, mask: Bounds<ScaledPixels>) -> bool {
+        self.tiles.iter().all(|tile| {
+            tile.top_left.x < mask.right().0
+                && tile.top_left.y < mask.bottom().0
+                && tile.bottom_right.x > mask.origin.x.0
+                && tile.bottom_right.y > mask.origin.y.0
+        })
     }
 
     /// Drops the tiles that lie entirely outside `mask`.

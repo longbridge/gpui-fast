@@ -282,24 +282,38 @@ impl PathBuilder {
 
     /// Builds into a [`Path`].
     pub fn build(self) -> Result<Path, Error> {
-        let (curves, fill_rule) = self.outline()?;
-        Ok(Path::from_curves(curves, fill_rule))
+        crate::fast::path_cache::build(self)
     }
 
     /// The closed contours to fill, and the rule to fill them by.
+    #[cfg(test)]
     pub(crate) fn outline(self) -> Result<(Vec<PathCurve>, FillRule), Error> {
+        let (path, style, dash_array) = self.into_parts();
+        Self::outline_of(&path, &style, dash_array.as_deref())
+    }
+
+    /// The transformed path, its style and dash array (gpui-fast path cache).
+    pub(crate) fn into_parts(self) -> (lyon_path::Path, PathStyle, Option<Vec<Pixels>>) {
         let path = if let Some(transform) = self.transform {
             self.raw.build().transformed(&transform)
         } else {
             self.raw.build()
         };
+        (path, self.style, self.dash_array)
+    }
 
-        Ok(match self.style {
+    /// The closed contours to fill, and the rule to fill them by.
+    pub(crate) fn outline_of(
+        path: &lyon_path::Path,
+        style: &PathStyle,
+        dash_array: Option<&[Pixels]>,
+    ) -> Result<(Vec<PathCurve>, FillRule), Error> {
+        Ok(match style {
             PathStyle::Stroke(options) => (
-                Self::stroke_outline(&path, &options, self.dash_array.as_deref())?,
+                Self::stroke_outline(path, options, dash_array)?,
                 FillRule::NonZero,
             ),
-            PathStyle::Fill(options) => (Self::fill_outline(&path)?, options.fill_rule),
+            PathStyle::Fill(options) => (Self::fill_outline(path)?, options.fill_rule),
         })
     }
 
@@ -396,6 +410,10 @@ impl Path {
             curves: curves.into(),
             even_odd: matches!(fill_rule, FillRule::EvenOdd),
         }
+    }
+
+    pub(crate) fn curves(&self) -> &Arc<[PathCurve]> {
+        &self.curves
     }
 
     pub(crate) fn even_odd(&self) -> bool {
