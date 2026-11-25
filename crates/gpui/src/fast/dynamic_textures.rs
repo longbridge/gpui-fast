@@ -20,6 +20,7 @@
 //! [`crate::Window::refresh_dynamic_texture`].
 
 use anyhow::{Context as _, Result};
+use collections::FxHashMap;
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -29,10 +30,11 @@ use std::{
     },
 };
 
-use crate::fast::layers::scene::LAYER_TILE_TEXTURE_BASE;
+use crate::fast::layers::{Layer, scene::LAYER_TILE_TEXTURE_BASE};
+use crate::scene::{PaintOperation, Primitive};
 use crate::{
-    AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, DevicePixels, Pixels, PolychromeSprite,
-    TileId, Window, point,
+    AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, DevicePixels, GlobalElementId, Pixels,
+    PolychromeSprite, Scene, TileId, Window, point,
 };
 
 /// Bytes per pixel of a dynamic texture: BGRA8, matching the scene's
@@ -391,6 +393,64 @@ pub(crate) fn remove(texture: DynamicTexture) {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct TextureDependencies(FxHashMap<DynamicTextureId, TextureUse>);
+
+#[derive(Default)]
+struct TextureUse {
+    direct: bool,
+    tiled: bool,
+    cached_layers: Vec<GlobalElementId>,
+}
+
+impl TextureDependencies {
+    fn rebuild(&mut self, scene: &Scene, layers: &FxHashMap<GlobalElementId, Layer>) {
+        self.0.clear();
+        for texture in painted_textures(&scene.paint_operations) {
+            self.0.entry(texture).or_default().direct = true;
+        }
+        for layer in scene
+            .layers
+            .frames
+            .iter()
+            .filter(|layer| layer.tile_size != 0)
+        {
+            for texture in painted_textures(layer.content.operations()) {
+                self.0.entry(texture).or_default().tiled = true;
+            }
+        }
+        for (id, layer) in layers {
+            if let Some(record) = &layer.record {
+                for texture in painted_textures(record.content.operations()) {
+                    let cached = &mut self.0.entry(texture).or_default().cached_layers;
+                    if cached.last() != Some(id) {
+                        cached.push(id.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn painted_textures<'a>(
+    operations: impl IntoIterator<Item = &'a PaintOperation>,
+) -> impl Iterator<Item = DynamicTextureId> {
+    operations
+        .into_iter()
+        .filter_map(|operation| match operation {
+            PaintOperation::Primitive(Primitive::PolychromeSprite(sprite)) => {
+                DynamicTextureId::from_atlas_texture_id(sprite.tile.texture_id)
+            }
+            _ => None,
+        })
+}
+
+pub(crate) fn finish_frame(window: &mut Window) {
+    if let Some(dependencies) = &mut window.fast_layers.texture_dependencies {
+        dependencies.rebuild(&window.next_frame.scene, &window.fast_layers.layers);
+    }
+}
+
 impl Window {
     /// Allocates a mutable BGRA8 texture for content that changes every
     /// frame, such as a stream of video or remote desktop frames.
@@ -442,12 +502,37 @@ impl Window {
     /// Records that a GPU producer wrote new contents into `texture`.
     ///
     /// Like [`Window::update_dynamic_texture`], this advances the version the
-    /// next paint carries and, called outside a frame, marks the window for a
-    /// full redraw, so cached views and scroll-layer tiles showing the
-    /// texture render again. A removed texture is refused.
+    /// next paint carries. A removed texture is refused.
     pub fn refresh_dynamic_texture(&mut self, texture: DynamicTexture) -> Result<()> {
         mark_written(texture)?;
-        self.refresh();
+        if !self.invalidator.not_drawing() {
+            return Ok(());
+        }
+
+        let layers = &mut self.fast_layers;
+        let dependencies = layers.texture_dependencies.get_or_insert_with(|| {
+            let mut dependencies = TextureDependencies::default();
+            dependencies.rebuild(&self.rendered_frame.scene, &layers.layers);
+            dependencies
+        });
+        let Some(usage) = dependencies.0.get(&texture.id) else {
+            self.refresh();
+            return Ok(());
+        };
+
+        for id in &usage.cached_layers {
+            if let Some(layer) = layers.layers.get_mut(id) {
+                layer.invalidate_content();
+            }
+        }
+
+        if usage.direct && !usage.tiled && usage.cached_layers.is_empty() {
+            self.needs_present.set(true);
+            self.platform_window.schedule_frame();
+            self.invalidator.wake_platform();
+        } else {
+            self.refresh();
+        }
         Ok(())
     }
 
@@ -937,6 +1022,58 @@ mod tests {
             ),
             unchanged,
         );
+    }
+
+    #[crate::test]
+    fn refresh_dynamic_texture_invalidates_content_without_discarding_the_layer(
+        cx: &mut crate::TestAppContext,
+    ) {
+        use crate::fast::layers::{paint::layer_mut, record::LayerRecord};
+        use crate::{GlobalElementId, LayerFrame, LayerKey};
+
+        let window = cx.add_window(|_, _| crate::Empty);
+        window
+            .update(cx, |_, window, _| {
+                let texture = DynamicTexture::new_gpu(size_of(4, 4)).unwrap();
+                let direct = scene_with_texture(texture, painted_version(texture.id));
+                let content = scene_with_texture(texture, painted_version(texture.id)).into();
+                window.rendered_frame.scene = direct;
+
+                let layer_id = GlobalElementId::new(&[]);
+                let layer = layer_mut(window, &layer_id);
+                let key = layer.key;
+                layer.generation = 7;
+                layer.record = Some(LayerRecord {
+                    content,
+                    ..Default::default()
+                });
+
+                window.invalidator.set_dirty(false);
+                window.needs_present.set(false);
+                window.refresh_dynamic_texture(texture).unwrap();
+                assert!(window.invalidator.is_dirty());
+                assert!(!window.needs_present.get());
+                let layer = &window.fast_layers.layers[&layer_id];
+                assert_eq!(layer.key, key);
+                assert_eq!(layer.generation, 7);
+                assert!(layer.record.is_none());
+
+                window.next_frame.scene = scene_with_texture(texture, painted_version(texture.id));
+                window.next_frame.scene.layers.frames.push(LayerFrame {
+                    key: LayerKey(0),
+                    generation: 8,
+                    background: Default::default(),
+                    tile_size: 64,
+                    content: scene_with_texture(texture, painted_version(texture.id)).into(),
+                    dirty_tiles: Vec::new(),
+                });
+                super::finish_frame(window);
+                window.invalidator.set_dirty(false);
+                window.refresh_dynamic_texture(texture).unwrap();
+                assert!(window.invalidator.is_dirty());
+                texture.remove();
+            })
+            .unwrap();
     }
 
     #[test]

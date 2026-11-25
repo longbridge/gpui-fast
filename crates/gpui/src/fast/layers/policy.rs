@@ -657,6 +657,14 @@ pub(crate) fn defer_unbaked(window: &mut Window, id: &GlobalElementId) {
     }
 }
 
+impl Layer {
+    pub(crate) fn invalidate_content(&mut self) {
+        self.record = None;
+        self.rows = lists::LayerRows::default();
+        self.policy.painted_in = None;
+    }
+}
+
 fn new_layer(key: LayerKey, frame: u64) -> Layer {
     Layer {
         key,

@@ -42,6 +42,7 @@ pub(crate) const COMPILED: bool = cfg!(any(
 )]
 pub(crate) struct WindowLayers {
     pub(crate) layers: FxHashMap<GlobalElementId, Layer>,
+    pub(crate) texture_dependencies: Option<crate::fast::dynamic_textures::TextureDependencies>,
     /// The key the next layer gets, so keys stay unique in the window.
     pub(crate) next_key: u32,
     /// Off in tests that compare against today's path, and where
@@ -69,6 +70,7 @@ impl Default for WindowLayers {
     fn default() -> Self {
         Self {
             layers: FxHashMap::default(),
+            texture_dependencies: None,
             next_key: 0,
             enabled: COMPILED
                 && std::env::var("GPUI_SCROLL_LAYERS").map_or(true, |value| value != "0"),
