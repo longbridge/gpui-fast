@@ -1318,6 +1318,55 @@ fn switch_surface(window: &mut Window, surface: CompositionSurfaceId) {
         .switch_to(surface, scene_len);
 }
 
+/// What a view built again on its own, inside a view drawn from last frame,
+/// was drawn on, put back for it by [`enter_gap`], and what [`leave_gap`]
+/// restores after it.
+pub(crate) enum GapSurface {
+    /// Nothing was put back.
+    Kept,
+    /// It is prepainted under its surface; the input scope before it.
+    Input(Option<CompositionSurfaceId>),
+    /// It is painted onto its surface; the surface before it.
+    Paint(CompositionSurfaceId),
+}
+
+/// Puts back `surface`, the surface a view was drawn on last frame, for the
+/// view built again on its own where it was. What chose it, a
+/// [`Window::with_composition_surface`] around the view, is drawn from last
+/// frame and does not run again, so the view would otherwise take its input
+/// regions and paint to whatever surface the frame is on there.
+pub(crate) fn enter_gap(window: &mut Window, surface: Option<CompositionSurfaceId>) -> GapSurface {
+    let Some(surface) = surface else {
+        return GapSurface::Kept;
+    };
+    if window.fast_layers.painting.is_some() {
+        return GapSurface::Kept;
+    }
+    if window.invalidator.inner.borrow().draw_phase == crate::window::DrawPhase::Paint {
+        let Some(previous) = window.next_frame.fast_composition_starts.current() else {
+            return GapSurface::Kept;
+        };
+        switch_surface(window, surface);
+        return GapSurface::Paint(previous);
+    }
+    GapSurface::Input(
+        window
+            .next_frame
+            .fast_composition_input
+            .scope
+            .replace(surface),
+    )
+}
+
+/// Restores what [`enter_gap`] put back.
+pub(crate) fn leave_gap(window: &mut Window, surface: GapSurface) {
+    match surface {
+        GapSurface::Kept => {}
+        GapSurface::Input(previous) => window.next_frame.fast_composition_input.scope = previous,
+        GapSurface::Paint(previous) => switch_surface(window, previous),
+    }
+}
+
 /// Stacks what the root view positions, as it prepaints, below the overlay
 /// surface.
 pub(crate) fn begin_base_prepaint(window: &mut Window) {
@@ -2389,5 +2438,170 @@ pub(crate) mod tests {
             assert_eq!(ids, [base]);
         }
         assert_eq!(builds.get(), 1, "the badge is drawn again from last frame");
+    }
+
+    /// Lays what it holds onto `surface` as it is prepainted and painted, as
+    /// an application lays its interface over a native surface.
+    struct OnSurface {
+        surface: CompositionSurfaceId,
+        child: crate::AnyElement,
+    }
+
+    impl crate::Element for OnSurface {
+        type RequestLayoutState = ();
+        type PrepaintState = ();
+
+        fn id(&self) -> Option<crate::ElementId> {
+            None
+        }
+
+        fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+            None
+        }
+
+        fn request_layout(
+            &mut self,
+            _: Option<&crate::GlobalElementId>,
+            _: Option<&crate::InspectorElementId>,
+            window: &mut Window,
+            cx: &mut crate::App,
+        ) -> (crate::LayoutId, ()) {
+            (self.child.request_layout(window, cx), ())
+        }
+
+        fn prepaint(
+            &mut self,
+            _: Option<&crate::GlobalElementId>,
+            _: Option<&crate::InspectorElementId>,
+            _: Bounds<crate::Pixels>,
+            (): &mut (),
+            window: &mut Window,
+            cx: &mut crate::App,
+        ) {
+            let child = &mut self.child;
+            window
+                .with_composition_surface(self.surface, |window| child.prepaint(window, cx))
+                .unwrap();
+        }
+
+        fn paint(
+            &mut self,
+            _: Option<&crate::GlobalElementId>,
+            _: Option<&crate::InspectorElementId>,
+            _: Bounds<crate::Pixels>,
+            (): &mut (),
+            (): &mut (),
+            window: &mut Window,
+            cx: &mut crate::App,
+        ) {
+            let child = &mut self.child;
+            window
+                .with_composition_surface(self.surface, |window| child.paint(window, cx))
+                .unwrap();
+        }
+    }
+
+    /// A square that takes the pointer, counting its builds.
+    struct Button {
+        builds: Rc<Cell<usize>>,
+    }
+
+    impl Render for Button {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.builds.set(self.builds.get() + 1);
+            div()
+                .size(px(20.))
+                .bg(crate::red())
+                .cursor(crate::CursorStyle::PointingHand)
+        }
+    }
+
+    /// A native surface hosted from the root view, and the button laid over it
+    /// on the overlay surface.
+    struct Interface {
+        native: Rc<dyn PlatformSurfaceAttachment>,
+        overlay: CompositionSurfaceId,
+        button: Entity<Button>,
+        builds: Rc<Cell<usize>>,
+    }
+
+    impl Render for Interface {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.builds.set(self.builds.get() + 1);
+            div()
+                .size_full()
+                .child(native_host(self.native.clone()))
+                .child(div().absolute().top_0().left_0().child(OnSurface {
+                    surface: self.overlay,
+                    child: self.button.clone().into_any_element(),
+                }))
+        }
+    }
+
+    /// A view on the overlay surface, built again on its own inside a view
+    /// drawn from last frame, stays on the overlay surface: its pointer target
+    /// stays above the native surface under it, and so does what it paints.
+    #[crate::test]
+    fn views_built_on_their_own_keep_the_surface_around_them(cx: &mut TestAppContext) {
+        let interface_builds = Rc::new(Cell::new(0));
+        let button_builds = Rc::new(Cell::new(0));
+        let mut button = None;
+        let window = cx.add_window(|window, cx| {
+            let mut state = window.fast_composition.0.borrow_mut();
+            state.enabled = true;
+            let overlay = state.overlay_surface;
+            let id = state
+                .tree
+                .insert(CompositionSurfaceKind::Native, None)
+                .unwrap();
+            state.tree.place_below(id, overlay).unwrap();
+            let native = Rc::new(ManagedPlatformSurface::new(test_platform_surface(), &state));
+            state.platform_surfaces.insert(id, native.clone());
+            // What handing the platform its order records, bottom to top.
+            state.input_order = state.tree.flattened();
+            drop(state);
+            let entity = cx.new(|_| Button {
+                builds: button_builds.clone(),
+            });
+            button = Some(entity.clone());
+            Interface {
+                native,
+                overlay,
+                button: entity,
+                builds: interface_builds.clone(),
+            }
+        });
+        let button = button.unwrap();
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+                let overlay = window.fast_composition.0.borrow().overlay_surface;
+                let hit = super::hit_test(&window.rendered_frame, crate::point(px(10.), px(10.)))
+                    .unwrap();
+                let painted = surface_of_each_operation(window)
+                    .into_iter()
+                    .filter(|surface| *surface == overlay)
+                    .count();
+                (hit.ids.len(), painted)
+            })
+            .unwrap()
+        };
+
+        let first = draw(cx);
+        assert_eq!(
+            first,
+            (1, 1),
+            "the button takes the pointer and paints on the overlay"
+        );
+
+        button.update(cx, |_, cx| cx.notify());
+        let again = draw(cx);
+        assert_eq!(button_builds.get(), 2, "the button is built again");
+        assert_eq!(
+            interface_builds.get(),
+            1,
+            "the view around it is drawn from last frame"
+        );
+        assert_eq!(again, first, "the button keeps its surface");
     }
 }
