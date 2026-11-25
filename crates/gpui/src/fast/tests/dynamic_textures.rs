@@ -156,14 +156,11 @@ fn window(
     (window, paints, created)
 }
 
-/// An update, or a recorded GPU write, marks the window for a full redraw, so
-/// a cached view showing the texture renders again — and carries the new
-/// contents — even though nothing it read changed and it would otherwise draw
-/// nothing again.
 #[test]
-fn a_write_renders_a_cached_view_showing_the_texture_again() {
+fn an_upload_redraws_but_a_gpu_write_presents_the_cached_view() {
     let mut cx = TestAppContext::single();
     let (window, paints, created) = window(&mut cx);
+    let platform = cx.test_window(window.into());
 
     cx.update_window(window.into(), |_, window, cx| {
         window.draw(cx).clear(cx);
@@ -199,20 +196,26 @@ fn a_write_renders_a_cached_view_showing_the_texture_again() {
         "the cached view must be rendered again after an update"
     );
 
-    // A GPU producer's write is recorded the same way.
     cx.update_window(window.into(), |_, window, _| {
+        window.needs_present.set(false);
+        let scene = &window.rendered_frame.scene;
+        let sprite = scene.polychrome_sprites[0];
         window
             .refresh_dynamic_texture(texture)
             .expect("the texture is live");
+        assert!(window.needs_present.get());
+        assert!(!window.invalidator.is_dirty());
+        assert_eq!(
+            window.rendered_frame.scene.polychrome_sprites[0].pad,
+            sprite.pad
+        );
     })
     .unwrap();
-    cx.update_window(window.into(), |_, window, cx| {
-        window.draw(cx).clear(cx);
+    assert!(platform.simulate_scheduled_frame());
+    cx.update_window(window.into(), |_, window, _| {
+        assert!(!window.needs_present.get());
+        texture.remove();
     })
     .unwrap();
-    assert_eq!(
-        paints.get(),
-        3,
-        "the cached view must be rendered again after a GPU write"
-    );
+    assert_eq!(paints.get(), 2);
 }

@@ -1376,6 +1376,7 @@ pub(crate) fn finish_retained_frame(window: &mut Window) {
     window.next_frame.retained.finish_frame();
     crate::fast::layers::paint::finish_frame(window);
     crate::fast::layers::finish_frame(window);
+    crate::fast::dynamic_textures::finish_frame(window);
 }
 
 // These reach into the window's layout state, for views drawn again at the
