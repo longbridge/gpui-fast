@@ -41,6 +41,10 @@ required-features = ["fast"]
 name = "windows_manifest_coexistence"
 required-features = ["fast", "upstream"]
 
+[[example]]
+name = "window_zoom"
+required-features = ["fast"]
+
 [features]
 default = ["fast"]
 # Build against this repository's GPUI: the showcase, `--headless` and the

@@ -98,6 +98,15 @@ only hold the hooks that call into it.
    content mask within the viewport of the layer being painted, as hitboxes
    are clipped (`fast::layers::input::hitbox_mask`), and the content mask
    outside one. Only elements that call it are clipped.
+   A fifth exception is `Window::zoom` and `Window::set_zoom` (in
+   `fast::zoom`): a window drawn larger as a whole, as a browser's page zoom
+   draws a page, so that a person who needs larger text and controls can have
+   them. `Window::set_rem_size` scales only what is sized in rems, while
+   borders, paddings, icons, images and shadows are usually sized in pixels,
+   so a window enlarged that way comes apart; and an application cannot scale
+   a window itself, because the scale factor its scene is rasterized at and
+   the coordinates of the platform's input are GPUI's. The addition is the two
+   methods; at a zoom of 1, the default, nothing GPUI does changes.
 6. **New files only inside `fast/`, or in our own crates** such as
    `crates/gpui_perf` (benchmarks, examples and the frame-measuring app) and
    `compat/` (the `gpui-pre-*` stand-ins GPUI Kit applications patch in).
@@ -278,6 +287,12 @@ No application-specific timeline policy belongs here.
   well as native wgpu. The existing Metal upload backend and its installer
   are unchanged; CPU updates refuse GPU-written metadata. A native Metal
   producer interface is outside this extension.
+
+- `Window` gains `zoom` and `set_zoom` (`fast::zoom`, rule 5's fifth
+  exception). While a window is zoomed, `Window::scale_factor` is the
+  display's times the zoom, `viewport_size`, `insets` and
+  `visual_viewport_bounds` are divided by it, and so are the positions of
+  the input it dispatches; at a zoom of 1 all of them are upstream's.
 
 - `scheduler`'s `Clock::utc_now` and `TestClock::set_utc_now` use
   `SystemTime` (exported next to `Instant`, both from `web_time`) instead of

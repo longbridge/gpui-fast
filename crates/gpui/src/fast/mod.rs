@@ -48,6 +48,7 @@ pub(crate) mod text;
 pub(crate) mod text_style;
 pub(crate) mod tracked_entities;
 pub(crate) mod truncation;
+pub(crate) mod zoom;
 
 #[cfg(test)]
 mod tests;

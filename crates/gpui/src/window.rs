@@ -1305,7 +1305,8 @@ pub struct Window {
     pub(crate) fast_pointer_outside: bool,
     modifiers: Modifiers,
     capslock: Capslock,
-    scale_factor: f32,
+    pub(crate) scale_factor: f32,
+    pub(crate) fast_zoom: crate::fast::zoom::Zoom,
     pub(crate) bounds_observers: SingleSubscriberSet<AnyObserver>,
     appearance: WindowAppearance,
     pub(crate) appearance_observers: SingleSubscriberSet<AnyObserver>,
@@ -2350,7 +2351,7 @@ impl Window {
                 // updated, in which case the event stays with GPUI.
                 handle
                     .update(&mut cx, |_, window, _| {
-                        window.hit_test_native_view(position)
+                        window.hit_test_native_view(crate::fast::zoom::point_in(position, window))
                     })
                     .ok()
                     .flatten()
@@ -2505,6 +2506,7 @@ impl Window {
             modifiers,
             capslock,
             scale_factor,
+            fast_zoom: crate::fast::zoom::Zoom::default(),
             bounds_observers: SingleSubscriberSet::new(),
             appearance,
             appearance_observers: SingleSubscriberSet::new(),
@@ -2905,7 +2907,7 @@ impl Window {
     /// - `Some(&[])` is an empty region, so the window receives no pointer or touch input.
     /// - `None` resets the region to the default, so the whole window receives input again.
     pub fn set_input_region(&self, region: Option<&[Bounds<Pixels>]>) {
-        self.platform_window.set_input_region(region);
+        crate::fast::zoom::set_input_region(self, region);
     }
 
     /// Return the `WindowBounds` to indicate that how a window should be opened
@@ -3191,9 +3193,11 @@ impl Window {
     pub fn bounds_changed(&mut self, cx: &mut App) {
         self.scale_factor = self.platform_window.scale_factor();
         self.viewport_size = self.platform_window.content_size();
+        crate::fast::zoom::apply_to_viewport(self);
         self.last_window_bounds = self.platform_window.window_bounds();
         cx.sync_window_update_entry(self);
         self.mouse_position = self.platform_window.mouse_position();
+        crate::fast::zoom::apply_to_mouse_position(self);
 
         self.refresh();
 
@@ -3275,7 +3279,7 @@ impl Window {
 
     /// Returns the regions of this window obscured by system UI and the keyboard.
     pub fn insets(&self) -> WindowInsets {
-        self.platform_window.insets()
+        crate::fast::zoom::insets(self)
     }
 
     /// Renders the current frame's scene to a texture and returns the pixel data as an RGBA image.
@@ -3356,7 +3360,7 @@ impl Window {
     /// During drawing this is a consistent frame snapshot. Outside drawing it
     /// reflects the latest platform sample, not a synchronous geometry query.
     pub fn visual_viewport_bounds(&self) -> Bounds<Pixels> {
-        self.platform_window.visual_viewport_bounds()
+        crate::fast::zoom::visual_viewport_bounds(self)
     }
 
     /// Returns a conservative rectangle avoiding platform-known obscured content.
@@ -3364,7 +3368,7 @@ impl Window {
     /// Intersects the visual viewport with the full layout area inset by system
     /// safe areas and keyboard occlusion. Unknown overlays cannot be excluded.
     pub fn fully_visible_bounds(&self) -> Bounds<Pixels> {
-        let insets = self.platform_window.insets().effective();
+        let insets = crate::fast::zoom::insets(self).effective();
         let viewport = self.viewport_size();
         let left = insets.left.max(Pixels::ZERO).min(viewport.width);
         let top = insets.top.max(Pixels::ZERO).min(viewport.height);
@@ -3417,7 +3421,8 @@ impl Window {
 
     /// Opens the native title bar context menu, useful when implementing client side decorations (Wayland and X11)
     pub fn show_window_menu(&self, position: Point<Pixels>) {
-        self.platform_window.show_window_menu(position)
+        self.platform_window
+            .show_window_menu(crate::fast::zoom::point_out(position, self))
     }
 
     /// Handle window movement for Linux and macOS.
@@ -7264,6 +7269,7 @@ impl Window {
         self.on_next_frame(|window, cx| {
             if let Some(mut input_handler) = window.platform_window.take_input_handler() {
                 if let Some(bounds) = input_handler.selected_bounds(window, cx) {
+                    let bounds = crate::fast::zoom::bounds_out(bounds, window);
                     window.platform_window.update_ime_position(bounds);
                 }
                 window.platform_window.set_input_handler(input_handler);

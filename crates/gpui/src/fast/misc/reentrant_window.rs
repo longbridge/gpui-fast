@@ -193,6 +193,7 @@ impl ReentrantWindowCallbacks {
         }
         let event = event.expect("event is only taken when deferred");
         this.update_window("dispatching input", |window, cx| {
+            let event = crate::fast::zoom::input_in(event, window);
             window.dispatch_event(event, cx)
         })
         .unwrap_or_default()
@@ -252,6 +253,7 @@ impl ReentrantWindowCallbacks {
             } else if let Some(event) = pending.input.pop_front() {
                 drop(pending);
                 self.update_window("dispatching input", |window, cx| {
+                    let event = crate::fast::zoom::input_in(event, window);
                     window.dispatch_event(event, cx);
                 });
             } else {

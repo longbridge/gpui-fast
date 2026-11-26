@@ -2135,8 +2135,8 @@ impl From<TileId> for etagere::AllocId {
 
 #[expect(missing_docs)]
 pub struct PlatformInputHandler {
-    cx: AsyncWindowContext,
-    handler: Box<dyn InputHandler>,
+    pub(crate) cx: AsyncWindowContext,
+    pub(crate) handler: Box<dyn InputHandler>,
     focus_id: Option<crate::FocusId>,
 }
 
@@ -2248,19 +2248,11 @@ impl PlatformInputHandler {
     }
 
     pub fn bounds_for_range(&mut self, range_utf16: Range<usize>) -> Option<Bounds<Pixels>> {
-        self.cx
-            .update(|window, cx| self.handler.bounds_for_range(range_utf16, window, cx))
-            .ok()
-            .flatten()
+        crate::fast::zoom::bounds_for_range(self, range_utf16)
     }
 
     pub fn selection_bounds_for_range(&mut self, range_utf16: Range<usize>) -> Vec<Bounds<Pixels>> {
-        self.cx
-            .update(|window, cx| {
-                self.handler
-                    .selection_bounds_for_range(range_utf16, window, cx)
-            })
-            .unwrap_or_default()
+        crate::fast::zoom::selection_bounds_for_range(self, range_utf16)
     }
 
     #[allow(dead_code)]
@@ -2331,10 +2323,7 @@ impl PlatformInputHandler {
 
     #[allow(unused)]
     pub fn character_index_for_point(&mut self, point: Point<Pixels>) -> Option<usize> {
-        self.cx
-            .update(|window, cx| self.handler.character_index_for_point(point, window, cx))
-            .ok()
-            .flatten()
+        crate::fast::zoom::character_index_for_point(self, point)
     }
 
     /// See [`InputHandler::set_selected_text_range`].
@@ -2349,10 +2338,7 @@ impl PlatformInputHandler {
 
     /// See [`InputHandler::element_bounds`].
     pub fn element_bounds(&mut self) -> Option<Bounds<Pixels>> {
-        self.cx
-            .update(|window, cx| self.handler.element_bounds(window, cx))
-            .ok()
-            .flatten()
+        crate::fast::zoom::element_bounds(self)
     }
 
     /// See [`InputHandler::text_length_utf16`].
