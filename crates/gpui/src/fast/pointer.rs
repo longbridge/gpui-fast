@@ -5,7 +5,7 @@
 //! bar buttons on X11). Hit testing ignores the last position from the exit
 //! until the next pointer event, so those hitboxes stop showing as hovered.
 
-use crate::{FileDropEvent, Frame, HitTest, PlatformInput, Window};
+use crate::{DispatchPhase, FileDropEvent, Frame, HitTest, MouseExitEvent, PlatformInput, Window};
 
 /// Records whether `event` moves the pointer out of the window or back in.
 pub(crate) fn note_input(window: &mut Window, event: &PlatformInput) {
@@ -33,14 +33,22 @@ pub(crate) fn hit_test(window: &Window, frame: &Frame) -> HitTest {
 /// what is on screen. An element can become hovered without a mouse move (an occluding overlay
 /// closes under a still pointer); if the move that leaves it compared against a stale `false`,
 /// nothing would be redrawn and the hover style would stay (gpui-kit#4072).
+///
+/// The pointer can also leave the window straight from a hovered element, with no mouse move
+/// outside it first (macOS only sends `MouseExited`). Upstream only updates hover styles on
+/// mouse moves, so `hover` and `group_hover` stayed on; clear them on the exit too
+/// (gpui-kit#3552).
 pub(crate) fn note_painted_hover(
     state: &Option<std::rc::Rc<std::cell::RefCell<crate::ElementHoverState>>>,
     group: bool,
     hitbox: &crate::HitboxId,
-    window: &Window,
+    window: &mut Window,
 ) {
-    if let Some(state) = state {
-        let hovered = !window.last_input_was_touch() && hitbox.is_hovered(window);
+    let Some(state) = state else {
+        return;
+    };
+    let hovered = !window.last_input_was_touch() && hitbox.is_hovered(window);
+    {
         let mut state = state.borrow_mut();
         if group {
             state.group = hovered;
@@ -48,4 +56,26 @@ pub(crate) fn note_painted_hover(
             state.element = hovered;
         }
     }
+
+    let state = state.clone();
+    let current_view = window.current_view();
+    let subtrees = crate::fast::retained::enclosing_retained_subtrees(window);
+    window.on_mouse_event(move |_: &MouseExitEvent, phase, window, cx| {
+        if phase != DispatchPhase::Capture {
+            return;
+        }
+        let was_hovered = {
+            let mut state = state.borrow_mut();
+            let hovered = if group {
+                &mut state.group
+            } else {
+                &mut state.element
+            };
+            std::mem::replace(hovered, false)
+        };
+        if was_hovered {
+            crate::fast::retained::invalidate_retained_subtrees(window, &subtrees);
+            cx.notify(current_view);
+        }
+    });
 }

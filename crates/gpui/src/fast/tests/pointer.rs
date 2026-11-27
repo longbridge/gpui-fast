@@ -173,3 +173,105 @@ mod hover_style_after_overlay {
         assert_eq!(width.get(), px(10.));
     }
 }
+
+// gpui-kit#3552: `group_hover` and `hover` styles clear when the pointer leaves
+// the window straight from inside the group, with no mouse move outside it.
+mod hover_style_after_window_exit {
+    use crate::{
+        AnyWindowHandle, AppContext, Context, InputEvent, InteractiveElement, IntoElement,
+        MouseExitEvent, ParentElement, Pixels, Render, Styled, TestAppContext, Window, canvas, div,
+        point, px,
+    };
+    use std::{cell::Cell, rc::Rc};
+
+    struct GroupHoverView {
+        group_width: Rc<Cell<Pixels>>,
+        hover_width: Rc<Cell<Pixels>>,
+    }
+
+    impl Render for GroupHoverView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let group_width = self.group_width.clone();
+            let hover_width = self.hover_width.clone();
+            div().size_full().child(
+                div()
+                    .id("viewport")
+                    .group("viewport")
+                    .relative()
+                    .size(px(50.))
+                    .child(
+                        div()
+                            .id("group-target")
+                            .absolute()
+                            .size(px(10.))
+                            .group_hover("viewport", |style| style.size(px(20.)))
+                            .child(canvas(
+                                move |bounds, _, _| group_width.set(bounds.size.width),
+                                |_, _, _, _| {},
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("hover-target")
+                            .absolute()
+                            .top(px(30.))
+                            .size(px(10.))
+                            .hover(|style| style.size(px(20.)))
+                            .child(canvas(
+                                move |bounds, _, _| hover_width.set(bounds.size.width),
+                                |_, _, _, _| {},
+                            )),
+                    ),
+            )
+        }
+    }
+
+    #[crate::test]
+    fn mouse_exit_clears_group_hover_and_hover(cx: &mut TestAppContext) {
+        let group_width = Rc::new(Cell::new(px(0.)));
+        let hover_width = Rc::new(Cell::new(px(0.)));
+        let window = cx.add_window({
+            let group_width = group_width.clone();
+            let hover_width = hover_width.clone();
+            move |_, _| GroupHoverView {
+                group_width,
+                hover_width,
+            }
+        });
+        let window = AnyWindowHandle::from(window);
+        let inside = point(px(5.), px(35.));
+
+        // Each update ends with an effect flush, which redraws the window only when a view was
+        // notified, like a platform frame would.
+        cx.update_window(window, |_, window, cx| {
+            window.hovered.set(true);
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        assert_eq!(group_width.get(), px(10.));
+        assert_eq!(hover_width.get(), px(10.));
+
+        cx.update_window(window, |_, window, cx| {
+            window.simulate_mouse_move(inside, cx);
+        })
+        .unwrap();
+        assert_eq!(group_width.get(), px(20.));
+        assert_eq!(hover_width.get(), px(20.));
+
+        // No refresh: the exit itself has to redraw the styles.
+        cx.update_window(window, |_, window, cx| {
+            window.hovered.set(false);
+            window.dispatch_event(
+                MouseExitEvent {
+                    position: inside,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        assert_eq!(group_width.get(), px(10.));
+        assert_eq!(hover_width.get(), px(10.));
+    }
+}
