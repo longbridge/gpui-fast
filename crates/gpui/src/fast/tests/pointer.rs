@@ -241,6 +241,7 @@ mod hover_style_after_window_exit {
         let inside = point(px(5.), px(35.));
 
         cx.update_window(window, |_, window, cx| {
+            window.hovered.set(true);
             window.draw(cx).clear(cx);
             assert_eq!(group_width.get(), px(10.));
             assert_eq!(hover_width.get(), px(10.));
@@ -258,6 +259,7 @@ mod hover_style_after_window_exit {
             assert_eq!(hover_width.get(), px(20.));
 
             // No refresh: the exit itself has to redraw the styles.
+            window.hovered.set(false);
             window.dispatch_event(
                 MouseExitEvent {
                     position: inside,
