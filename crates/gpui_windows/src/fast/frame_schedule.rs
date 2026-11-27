@@ -130,6 +130,30 @@ pub(crate) fn take_request(hwnd: HWND, request: &FrameRequest) -> bool {
     request.take() && unsafe { IsWindow(Some(hwnd)) }.as_bool()
 }
 
+/// A gap longer than this between frames means the worker woke from idle.
+const IDLE_GAP: std::time::Duration = std::time::Duration::from_millis(40);
+
+thread_local! {
+    static LAST_FRAME: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Waits for the VSync that paces the next frame on the VSync worker thread.
+///
+/// A worker woken from idle draws at once: DWM has nothing queued for the window, so the
+/// Present lands at the next composition anyway, while `DwmFlush` after an idle period tends
+/// to return early and fall back to sleeping a full interval. Frames that follow closely stay
+/// on VSync, so continuous animation cannot spin.
+pub(crate) fn next(vsync: &crate::vsync::VSyncProvider) -> gpui::FrameRequestSource {
+    let idle = LAST_FRAME.get().is_none_or(|at| at.elapsed() > IDLE_GAP);
+    let source = if idle {
+        gpui::FrameRequestSource::LocalSchedule
+    } else {
+        vsync.wait_for_vsync()
+    };
+    LAST_FRAME.set(Some(Instant::now()));
+    source
+}
+
 pub(crate) fn stop_vsync(stop: Arc<AtomicBool>, coordinator: &DrawCoordinator) {
     // Joining here would deadlock a worker sending a synchronous window message.
     stop.store(true, Ordering::Release);
