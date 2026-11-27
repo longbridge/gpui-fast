@@ -179,8 +179,8 @@ mod hover_style_after_overlay {
 mod hover_style_after_window_exit {
     use crate::{
         AnyWindowHandle, AppContext, Context, InputEvent, InteractiveElement, IntoElement,
-        MouseExitEvent, MouseMoveEvent, ParentElement, Pixels, Render, Styled, TestAppContext,
-        Window, canvas, div, point, px,
+        MouseExitEvent, ParentElement, Pixels, Render, Styled, TestAppContext, Window, canvas, div,
+        point, px,
     };
     use std::{cell::Cell, rc::Rc};
 
@@ -201,6 +201,7 @@ mod hover_style_after_window_exit {
                     .size(px(50.))
                     .child(
                         div()
+                            .id("group-target")
                             .absolute()
                             .size(px(10.))
                             .group_hover("viewport", |style| style.size(px(20.)))
@@ -240,25 +241,25 @@ mod hover_style_after_window_exit {
         let window = AnyWindowHandle::from(window);
         let inside = point(px(5.), px(35.));
 
+        // Each update ends with an effect flush, which redraws the window only when a view was
+        // notified, like a platform frame would.
         cx.update_window(window, |_, window, cx| {
             window.hovered.set(true);
             window.draw(cx).clear(cx);
-            assert_eq!(group_width.get(), px(10.));
-            assert_eq!(hover_width.get(), px(10.));
+        })
+        .unwrap();
+        assert_eq!(group_width.get(), px(10.));
+        assert_eq!(hover_width.get(), px(10.));
 
-            window.dispatch_event(
-                MouseMoveEvent {
-                    position: inside,
-                    ..Default::default()
-                }
-                .to_platform_input(),
-                cx,
-            );
-            window.draw(cx).clear(cx);
-            assert_eq!(group_width.get(), px(20.));
-            assert_eq!(hover_width.get(), px(20.));
+        cx.update_window(window, |_, window, cx| {
+            window.simulate_mouse_move(inside, cx);
+        })
+        .unwrap();
+        assert_eq!(group_width.get(), px(20.));
+        assert_eq!(hover_width.get(), px(20.));
 
-            // No refresh: the exit itself has to redraw the styles.
+        // No refresh: the exit itself has to redraw the styles.
+        cx.update_window(window, |_, window, cx| {
             window.hovered.set(false);
             window.dispatch_event(
                 MouseExitEvent {
@@ -268,10 +269,9 @@ mod hover_style_after_window_exit {
                 .to_platform_input(),
                 cx,
             );
-            window.draw(cx).clear(cx);
-            assert_eq!(group_width.get(), px(10.));
-            assert_eq!(hover_width.get(), px(10.));
         })
         .unwrap();
+        assert_eq!(group_width.get(), px(10.));
+        assert_eq!(hover_width.get(), px(10.));
     }
 }
