@@ -686,3 +686,89 @@ fn an_autoscroll_retry_does_not_push_a_row_s_nodes_twice(cx: &mut TestAppContext
     .unwrap();
     assert!(state.logical_scroll_top().offset_in_item > px(0.));
 }
+
+/// A header above a scrolled list of buttons, recording which one a click
+/// reached.
+struct ScrolledUnderHeader {
+    handle: crate::ScrollHandle,
+    clicked: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
+}
+
+impl Render for ScrolledUnderHeader {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let button = |name: &'static str| {
+            let clicked = self.clicked.clone();
+            div()
+                .id(name)
+                .role(Role::Button)
+                .aria_label(name)
+                .h(px(20.))
+                .on_click(move |_, _, _| clicked.borrow_mut().push(name))
+        };
+        div().size_full().child(button("header")).child(
+            div()
+                .id("list")
+                .h(px(40.))
+                .overflow_y_scroll()
+                .track_scroll(&self.handle)
+                .children(["row-0", "row-1", "row-2", "row-3", "row-4"].map(button)),
+        )
+    }
+}
+
+/// A synthesized accessibility click goes to the part of the node its scroll
+/// container shows, and to nothing when no part is shown, instead of to
+/// whatever is drawn at the centre of its unclipped bounds (gpui-kit#3658).
+#[crate::test]
+fn a11y_click_reaches_only_the_visible_part_of_a_scrolled_node(cx: &mut TestAppContext) {
+    let clicked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let handle = crate::ScrollHandle::new();
+    let window = cx.add_window({
+        let clicked = clicked.clone();
+        let handle = handle.clone();
+        move |_, _| ScrolledUnderHeader { handle, clicked }
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.set_a11y_active_for_tests(true);
+        window.draw(cx).clear(cx);
+        // The list starts at y = 20. Scrolled by 30, row 0 lies at -10..10, all
+        // of it under the header, and row 1 at 10..30, half of it shown.
+        handle.set_offset(crate::point(px(0.), px(-30.)));
+        window.refresh();
+        window.draw(cx).clear(cx);
+
+        let node = |window: &Window, name: &str| {
+            crate::fast::a11y::last_tree(window)
+                .expect("accessibility is active")
+                .nodes
+                .iter()
+                .find(|(_, node)| node.label() == Some(name))
+                .map(|(id, _)| *id)
+                .expect("a node with this label")
+        };
+        let click = |window: &mut Window, cx: &mut crate::App, name: &str| {
+            let target_node = node(window, name);
+            window.handle_a11y_action(
+                accesskit::ActionRequest {
+                    action: accesskit::Action::Click,
+                    target_tree: accesskit::TreeId::ROOT,
+                    target_node,
+                    data: None,
+                },
+                cx,
+            );
+        };
+
+        click(window, cx, "row-0");
+        assert!(
+            clicked.borrow().is_empty(),
+            "clicked {:?}",
+            clicked.borrow()
+        );
+        click(window, cx, "row-1");
+        assert_eq!(*clicked.borrow(), ["row-1"]);
+        click(window, cx, "header");
+        assert_eq!(*clicked.borrow(), ["row-1", "header"]);
+    })
+    .unwrap();
+}

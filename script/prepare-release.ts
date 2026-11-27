@@ -47,7 +47,7 @@ export function dependency(key: string, input: any, workspace: Manifest, config:
       : { package: snapshotName(key), version: "=" + config.snapshot_version });
   }
   if ("git" in value) {
-    if (key === "wgpu") value.version = config.wgpu_version;
+    if (key === "wgpu") value.version = compatible(config.wgpu_version);
     if (!value.version) {
       if (key !== "proptest") throw new Error(`${key}: Git dependency has no registry version`);
       value.version = "1";

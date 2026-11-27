@@ -33,7 +33,7 @@
 //! hitboxes are.
 
 use crate::{
-    Bounds, FocusId, PaintIndex, Pixels, Point, PrepaintStateIndex, Window,
+    Bounds, FocusId, PaintIndex, Pixels, Point, PrepaintStateIndex, Window, point,
     window::a11y::{A11y, A11yActionListener, A11yNodeBuilder, A11ySubtreeBuilder},
 };
 use accesskit::{Action, NodeId};
@@ -668,4 +668,53 @@ impl CapturedAt {
             .strftime("%Y-%m-%dT%H:%M:%S%.3f%:z")
             .to_string()
     }
+}
+
+/// Where a synthesized click on an accessibility node lands, if it can
+/// reach the node at all.
+///
+/// A node's bounds include its scroll offset but not the clipping of the
+/// scroll containers around it, so its centre can lie outside the window
+/// or under another element (a header above the scrolled list). When the
+/// node's element has its own hitbox, the click goes to the first point of
+/// its visible part (centre first, then a 3x3 grid) where hit testing
+/// reaches that hitbox; if there is none, nothing is clicked
+/// (gpui-kit#3658).
+pub(crate) fn click_position(window: &Window, node: accesskit::NodeId) -> Option<Point<Pixels>> {
+    let bounds = window.a11y.node_bounds.get(&node).copied()?;
+    let frame = &window.rendered_frame;
+    let Some(hitbox) = frame
+        .hitboxes
+        .iter()
+        .rev()
+        .find(|hitbox| hitbox.bounds == bounds)
+    else {
+        // Without a hitbox of its own the node has no target to check
+        // against: keep clicking its centre, but only inside the window.
+        let center = bounds.center();
+        let window = Bounds::new(Point::default(), window.viewport_size());
+        return window.contains(&center).then_some(center);
+    };
+    let visible = bounds.intersect(&hitbox.content_mask.bounds);
+    if visible.size.width <= Pixels::ZERO || visible.size.height <= Pixels::ZERO {
+        return None;
+    }
+    let fractions: [f32; 3] = [0.5, 1. / 6., 5. / 6.];
+    let candidates = std::iter::once((0.5_f32, 0.5_f32)).chain(
+        fractions
+            .iter()
+            .flat_map(|y| fractions.iter().map(move |x| (*x, *y)))
+            .skip(1),
+    );
+    candidates
+        .map(|(x, y)| {
+            point(
+                visible.origin.x + visible.size.width * x,
+                visible.origin.y + visible.size.height * y,
+            )
+        })
+        .find(|position| {
+            let hit_test = frame.hit_test(*position);
+            hit_test.ids[..hit_test.hover_hitbox_count].contains(&hitbox.id)
+        })
 }
