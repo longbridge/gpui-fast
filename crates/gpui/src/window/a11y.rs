@@ -373,32 +373,23 @@ impl<'a> A11ySubtreeBuilder<'a> {
 }
 
 pub(crate) struct A11yNodeBuilder {
-    ids_stack: SmallVec<[NodeId; 16]>,
+    pub(crate) ids_stack: SmallVec<[NodeId; 16]>,
     pub(crate) nodes_stack: SmallVec<[accesskit::Node; 16]>,
     /// This is the exact type required by accesskit, so we can't just make it a
     /// `HashMap<NodeId, Node>` to remove the need for `seen_ids`
     pub(crate) all_nodes: Vec<(NodeId, accesskit::Node)>,
-    seen_ids: FxHashSet<NodeId>,
+    pub(crate) seen_ids: FxHashSet<NodeId>,
     /// The node that GPUI considers focused. Note that this may be different to
     /// what is reported to accesskit - see [`Self::active_descendant`]
-    focus: Option<NodeId>,
+    pub(crate) focus: Option<NodeId>,
     /// If a node calls `.aria_active_descendant()`, AND an ancestor is focused,
     /// override it as the focused node. This supports the "active descendant"
     /// pattern, which allows a focused container to act as if a descendant is
     /// focused.
-    active_descendant: Option<NodeId>,
+    pub(crate) active_descendant: Option<NodeId>,
     #[cfg(debug_assertions)]
     pub(crate) node_info: FxHashMap<NodeId, debug::NodeDebugInfo>,
     pub(crate) fast: crate::fast::a11y::A11yLog,
-}
-
-/// See [`A11yNodeBuilder::checkpoint`].
-pub(crate) struct A11yCheckpoint {
-    all_nodes: usize,
-    depth: usize,
-    children: usize,
-    focus: Option<NodeId>,
-    active_descendant: Option<NodeId>,
 }
 
 impl A11yNodeBuilder {
@@ -486,49 +477,6 @@ impl A11yNodeBuilder {
             crate::fast::a11y::A11yLog::pop(&mut self.fast, self.all_nodes.len());
             self.all_nodes.push((id, node));
         }
-    }
-
-    /// Where the tree being built stands, so that [`Self::rollback`] can undo
-    /// the nodes pushed after it.
-    pub(crate) fn checkpoint(&self) -> A11yCheckpoint {
-        A11yCheckpoint {
-            all_nodes: self.all_nodes.len(),
-            depth: self.ids_stack.len(),
-            children: self
-                .nodes_stack
-                .last()
-                .map_or(0, |node| node.children().len()),
-            focus: self.focus,
-            active_descendant: self.active_descendant,
-        }
-    }
-
-    /// Undoes every node pushed since `checkpoint`, as
-    /// [`crate::Window::transact`] undoes the hitboxes of a prepaint that
-    /// failed. Without it, the nodes of an element prepainted again (a list
-    /// honoring an autoscroll request) would be pushed twice.
-    pub(crate) fn rollback(&mut self, checkpoint: A11yCheckpoint) {
-        let depth = checkpoint.depth.min(self.ids_stack.len());
-        for id in self.ids_stack.drain(depth..) {
-            self.seen_ids.remove(&id);
-            #[cfg(debug_assertions)]
-            self.node_info.remove(&id);
-        }
-        self.nodes_stack.truncate(depth);
-        let all_nodes = checkpoint.all_nodes.min(self.all_nodes.len());
-        for (id, _) in self.all_nodes.drain(all_nodes..) {
-            self.seen_ids.remove(&id);
-            #[cfg(debug_assertions)]
-            self.node_info.remove(&id);
-        }
-        if let Some(parent) = self.nodes_stack.last_mut()
-            && parent.children().len() > checkpoint.children
-        {
-            let children = parent.children()[..checkpoint.children].to_vec();
-            parent.set_children(children);
-        }
-        self.focus = checkpoint.focus;
-        self.active_descendant = checkpoint.active_descendant;
     }
 
     /// Push the root node to start a new frame.
