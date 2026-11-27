@@ -694,6 +694,7 @@ pub(crate) struct MacWindowState {
     transparent_titlebar: bool,
     previous_modifiers_changed_event: Option<PlatformInput>,
     keystroke_for_do_command: Option<Keystroke>,
+    composing_for_do_command: bool,
     do_command_handled: Option<bool>,
     external_files_dragged: bool,
     // Whether the next left-mouse click is also the focusing click.
@@ -1211,6 +1212,7 @@ impl MacWindow {
                     .is_none_or(|titlebar| titlebar.appears_transparent),
                 previous_modifiers_changed_event: None,
                 keystroke_for_do_command: None,
+                composing_for_do_command: false,
                 do_command_handled: None,
                 external_files_dragged: false,
                 first_mouse: false,
@@ -2997,6 +2999,7 @@ extern "C" fn handle_key_event(
                 {
                     let mut lock = window_state.as_ref().lock();
                     lock.keystroke_for_do_command = Some(key_down_event.keystroke.clone());
+                    lock.composing_for_do_command = is_composing;
                     lock.do_command_handled.take();
                     drop(lock);
                 }
@@ -3009,10 +3012,19 @@ extern "C" fn handle_key_event(
                         msg_send![input_context, handleEvent: native_event]
                     }
                 };
-                window_state.as_ref().lock().keystroke_for_do_command.take();
+                {
+                    let mut lock = window_state.as_ref().lock();
+                    lock.keystroke_for_do_command.take();
+                    lock.composing_for_do_command = false;
+                }
                 if let Some(handled) = window_state.as_ref().lock().do_command_handled.take() {
                     return handled.to_objc();
-                } else if handled == Bool::YES {
+                } else if handled == Bool::YES
+                    || crate::fast::marked_text::finishes_composition(
+                        &key_down_event.keystroke,
+                        is_composing,
+                    )
+                {
                     return Bool::YES;
                 }
 
@@ -3833,6 +3845,13 @@ extern "C" fn do_command_by_selector(this: &AnyObject, _: Sel, _: Sel) {
     let state = unsafe { get_window_state(this) };
     let mut lock = state.as_ref().lock();
     let keystroke = lock.keystroke_for_do_command.take();
+    let was_composing = std::mem::take(&mut lock.composing_for_do_command);
+    if keystroke.as_ref().is_some_and(|keystroke| {
+        crate::fast::marked_text::finishes_composition(keystroke, was_composing)
+    }) {
+        lock.do_command_handled = Some(true);
+        return;
+    }
     let mut event_callback = lock.event_callback.take();
     drop(lock);
 
