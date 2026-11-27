@@ -139,6 +139,12 @@ pub(crate) struct A11yLog {
 }
 
 impl A11yLog {
+    /// Forgets the ops logged after `index`, as the nodes they built are
+    /// rolled back (see [`crate::Window::transact`]).
+    pub(crate) fn truncate(log: &mut Self, index: usize) {
+        log.ops.truncate(index);
+    }
+
     #[inline]
     pub(crate) fn push(log: &mut Self, id: NodeId) {
         if log.recording {
