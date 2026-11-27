@@ -480,12 +480,6 @@ impl WindowsPlatform {
                             continue;
                         }
                         unsafe {
-                            // The window may be destroyed on the main thread while this
-                            // thread still holds its handle; skip it instead of calling
-                            // RedrawWindow on an invalid HWND.
-                            if !IsWindow(Some(hwnd.as_raw())).as_bool() {
-                                continue;
-                            }
                             if let Some(signal_at) = signal_at {
                                 if IsWindowVisible(hwnd.as_raw()).as_bool()
                                     && !IsIconic(hwnd.as_raw()).as_bool()
