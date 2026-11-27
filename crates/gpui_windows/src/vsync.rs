@@ -38,6 +38,10 @@ impl VSyncProvider {
         Self { interval, f }
     }
 
+    pub(crate) fn interval(&self) -> Duration {
+        self.interval
+    }
+
     pub(crate) fn wait_for_vsync(&self) -> FrameRequestSource {
         let vsync_start = Instant::now();
         let wait_succeeded = (self.f)();

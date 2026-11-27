@@ -129,6 +129,26 @@ pub(crate) fn take_request(hwnd: HWND, request: &FrameRequest) -> bool {
     request.take()
 }
 
+/// Waits for the VSync that paces the next frame.
+///
+/// A worker woken from idle draws at once: DWM has nothing queued for the window, so the
+/// Present lands at the next composition anyway, while `DwmFlush` after an idle period tends
+/// to return early and fall back to sleeping a full interval. Frames that follow closely stay
+/// on VSync, so continuous animation cannot spin.
+pub(crate) fn wait_for_frame(
+    vsync: &crate::vsync::VSyncProvider,
+    last_frame: &mut Option<Instant>,
+) -> gpui::FrameRequestSource {
+    let idle = last_frame.is_none_or(|at| at.elapsed() > vsync.interval() * 2);
+    let source = if idle {
+        gpui::FrameRequestSource::LocalSchedule
+    } else {
+        vsync.wait_for_vsync()
+    };
+    *last_frame = Some(Instant::now());
+    source
+}
+
 pub(crate) fn stop_vsync(stop: Arc<AtomicBool>, coordinator: &DrawCoordinator) {
     // Joining here would deadlock a worker sending a synchronous window message.
     stop.store(true, Ordering::Release);

@@ -447,8 +447,12 @@ impl WindowsPlatform {
                     fast_frame_wake,
                     &directx_device.device,
                 );
+                let mut last_frame = None;
                 while crate::fast::frame_schedule::Worker::wait(&fast_worker, &stop) {
-                    let signal_source = vsync_provider.wait_for_vsync();
+                    let signal_source = crate::fast::frame_schedule::wait_for_frame(
+                        &vsync_provider,
+                        &mut last_frame,
+                    );
                     let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
                     if stop.load(Ordering::Acquire) {
                         break;
