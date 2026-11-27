@@ -2997,6 +2997,7 @@ extern "C" fn handle_key_event(
                 {
                     let mut lock = window_state.as_ref().lock();
                     lock.keystroke_for_do_command = Some(key_down_event.keystroke.clone());
+                    crate::fast::marked_text::begin_key(is_composing);
                     lock.do_command_handled.take();
                     drop(lock);
                 }
@@ -3833,6 +3834,9 @@ extern "C" fn do_command_by_selector(this: &AnyObject, _: Sel, _: Sel) {
     let state = unsafe { get_window_state(this) };
     let mut lock = state.as_ref().lock();
     let keystroke = lock.keystroke_for_do_command.take();
+    if crate::fast::marked_text::finishes(keystroke.as_ref(), &mut lock.do_command_handled) {
+        return;
+    }
     let mut event_callback = lock.event_callback.take();
     drop(lock);
 
