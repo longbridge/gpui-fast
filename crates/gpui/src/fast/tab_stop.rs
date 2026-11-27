@@ -87,8 +87,11 @@ impl PartialOrd for TabStopNode {
 
 impl TabStopIndex {
     /// Replays `history` the way upstream's eager insertions built the map:
-    /// the last insertion of a focus id wins its lookup, while every
-    /// insertion keeps its place in the order.
+    /// the last insertion of a focus id wins its lookup. Unlike upstream, it
+    /// also wins the order: a handle is one tab stop, so its earlier
+    /// insertions are dropped. Upstream kept them, and traversal from the
+    /// last insertion found an earlier one and returned the same handle
+    /// again, trapping Shift-Tab on it (gpui-kit#3612).
     fn build(history: &[TabStopOperation]) -> Self {
         let mut path = TabStopPath::default();
         let mut index = Self::default();
@@ -111,6 +114,13 @@ impl TabStopIndex {
                 }
             }
         }
+        let by_id = &index.by_id;
+        index.order.retain(|node| {
+            history[node.node_insertion_index]
+                .focus_handle()
+                .and_then(|handle| by_id.get(&handle.id))
+                .is_some_and(|last| last.node_insertion_index == node.node_insertion_index)
+        });
         index.order.sort_unstable();
         index
     }
@@ -247,8 +257,7 @@ mod tests {
     }
 
     /// Replaying a frame's history gives the order inserting it did, and a
-    /// handle inserted twice is found at its last insertion, as upstream's
-    /// eagerly kept lookup found it.
+    /// handle inserted twice is one tab stop, at its last insertion.
     #[test]
     fn replay_and_repeated_handles_match_inserting() {
         let focus_map = Arc::new(RwLock::new(FocusMap::default()));
@@ -262,23 +271,42 @@ mod tests {
         painted.end_group();
         painted.insert(&c);
         painted.insert(&a);
-        // Tab order: a (first insertion), c, a (last insertion), then the
-        // group holding b.
+        // Tab order: c, a (its last insertion), then the group holding b.
 
         let mut replayed = TabStopMap::default();
         replayed.replay(&painted.insertion_history);
         for map in [&painted, &replayed] {
             assert_eq!(map.tab_stop_count(), 3);
-            assert_eq!(map.next(None), Some(a.clone()));
-            assert_eq!(
-                map.next(Some(&a.id)),
-                Some(b.clone()),
-                "a is found at its last insertion"
-            );
+            assert_eq!(map.next(None), Some(c.clone()));
+            assert_eq!(map.next(Some(&c.id)), Some(a.clone()));
+            assert_eq!(map.next(Some(&a.id)), Some(b.clone()));
+            assert_eq!(map.next(Some(&b.id)), Some(c.clone()), "b is last");
+            assert_eq!(map.prev(Some(&b.id)), Some(a.clone()));
             assert_eq!(map.prev(Some(&a.id)), Some(c.clone()));
-            assert_eq!(map.next(Some(&b.id)), Some(a.clone()), "b is last");
-            assert_eq!(map.prev(Some(&c.id)), Some(a.clone()));
+            assert_eq!(map.prev(Some(&c.id)), Some(b.clone()));
         }
+    }
+
+    /// An outer wrapper and the inner control it describes tracking the
+    /// same handle make one tab stop: Shift-Tab from it moves on to the
+    /// control before it instead of landing on it again (gpui-kit#3612).
+    #[test]
+    fn a_handle_registered_twice_is_one_tab_stop() {
+        let focus_map = Arc::new(RwLock::new(FocusMap::default()));
+        let before = FocusHandle::new(&focus_map).tab_stop(true);
+        let shared = FocusHandle::new(&focus_map).tab_stop(true);
+        let after = FocusHandle::new(&focus_map).tab_stop(true);
+        let mut map = TabStopMap::default();
+        map.insert(&before);
+        map.insert(&shared);
+        map.insert(&shared);
+        map.insert(&after);
+
+        assert_eq!(map.tab_stop_count(), 3);
+        assert_eq!(map.next(Some(&before.id)), Some(shared.clone()));
+        assert_eq!(map.next(Some(&shared.id)), Some(after.clone()));
+        assert_eq!(map.prev(Some(&after.id)), Some(shared.clone()));
+        assert_eq!(map.prev(Some(&shared.id)), Some(before.clone()));
     }
 
     #[test]
