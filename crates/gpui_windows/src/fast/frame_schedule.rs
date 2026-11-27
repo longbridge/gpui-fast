@@ -21,6 +21,7 @@ use windows::Win32::{
         DirectManipulation::{DIRECTMANIPULATION_INERTIA, DIRECTMANIPULATION_RUNNING},
         Gdi::ValidateRect,
     },
+    UI::WindowsAndMessaging::IsWindow,
 };
 
 /// How long a touchpad contact keeps Direct Manipulation updating before its gesture starts.
@@ -124,9 +125,9 @@ pub(crate) fn frame_wake(coordinator: &DrawCoordinator) -> Arc<FrameWake> {
 pub(crate) fn take_request(hwnd: HWND, request: &FrameRequest) -> bool {
     #[cfg(test)]
     crate::fast::native_tests::before_frame_request(hwnd);
-    #[cfg(not(test))]
-    let _ = hwnd;
-    request.take()
+    // The main thread may destroy a window while the VSync thread still holds its handle;
+    // skip it instead of letting the caller call RedrawWindow on an invalid HWND.
+    request.take() && unsafe { IsWindow(Some(hwnd)) }.as_bool()
 }
 
 pub(crate) fn stop_vsync(stop: Arc<AtomicBool>, coordinator: &DrawCoordinator) {
