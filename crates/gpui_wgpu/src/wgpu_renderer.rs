@@ -398,10 +398,12 @@ impl WgpuRenderer {
             wgpu::TextureFormat::Bgra8Unorm,
             wgpu::TextureFormat::Rgba8Unorm,
         ];
-        let surface_format = preferred_formats
-            .iter()
-            .find(|f| surface_caps.formats.contains(f))
-            .copied()
+        let surface_format = crate::fast::surface_format::preferred_canvas(&surface_caps.formats)
+            .or_else(|| {
+                preferred_formats
+                    .into_iter()
+                    .find(|f| surface_caps.formats.contains(f))
+            })
             .or_else(|| {
                 surface_caps
                     .formats
