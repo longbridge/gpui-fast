@@ -7665,8 +7665,7 @@ impl Window {
         // Fall back to built-in action handling.
         match request.action {
             accesskit::Action::Click => {
-                if let Some(bounds) = self.a11y.node_bounds.get(&request.target_node).copied() {
-                    let center = bounds.center();
+                if let Some(center) = crate::fast::a11y::click_position(self, request.target_node) {
                     let mouse_down = PlatformInput::MouseDown(crate::MouseDownEvent {
                         button: MouseButton::Left,
                         position: center,
