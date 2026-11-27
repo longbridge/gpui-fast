@@ -82,6 +82,14 @@ test("release dependencies replace wgpu's Git revision with its registry release
   });
 });
 
+test("release dependencies require wgpu as a caret requirement, like gpui-pre", () => {
+  // An exact pin conflicts with gpui-pre's `^30.0.1` once a lockfile holds a newer patch.
+  expect(config.wgpu_version).not.toStartWith("=");
+  const workspace = { dependencies: { wgpu: { git: "https://github.com/gfx-rs/wgpu", rev: "cddb2f5" } } };
+  expect(dependency("wgpu", { workspace: true }, workspace, { ...config, wgpu_version: "=30.0.1" }, "0.1.5"))
+    .toEqual({ version: "30.0.1" });
+});
+
 test("gpui_wgpu is adapted to the registry wgpu, and unknown queue setup is refused", () => {
   const descriptor = "wgpu::DeviceDescriptor {\n    label: None,\n    default_queue: wgpu::QueueDescriptor::default(),\n}\n";
   expect(adaptToReleasedWgpu(descriptor)).toBe("wgpu::DeviceDescriptor {\n    label: None,\n}\n");
