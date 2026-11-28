@@ -146,7 +146,7 @@ mod tests {
     use std::cell::OnceCell;
     use std::process::Command;
     use std::rc::Rc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
     use windows::Win32::Foundation::{
         COLORREF, DV_E_FORMATETC, E_NOTIMPL, HWND, POINT, S_FALSE, S_OK, SIZE,
     };
@@ -160,8 +160,8 @@ mod tests {
     };
     use windows::Win32::UI::{
         Shell::{
-            BHID_DataObject, CLSID_DragDropHelper, IDragSourceHelper, IDropTargetHelper,
-            IShellItem, SHCreateItemFromParsingName, SHDRAGIMAGE,
+            BHID_DataObject, CLSID_DragDropHelper, IDragSourceHelper, IShellItem,
+            SHCreateItemFromParsingName, SHDRAGIMAGE,
         },
         WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WINDOW_STYLE},
     };
@@ -386,6 +386,9 @@ mod tests {
     #[allow(clippy::disallowed_methods)]
     fn bench_drag_enter_latency() {
         if let Ok(mode) = std::env::var(BENCH_DRAG_CHILD_ENV) {
+            // `WindowsPlatform::new(false)` spawns the production background
+            // prewarm thread automatically. Do not spawn or join any extra
+            // prewarm thread here.
             let platform = WindowsPlatform::new(false).unwrap();
             let helper_win1 = new_cold_helper();
             let helper_win2 = helper_win1.clone();
@@ -398,16 +401,14 @@ mod tests {
                 "eager" => {
                     assert!(helper_win1.get_or_init().is_some());
                 }
-                "prewarmed" => {
-                    // Wait for a fresh background STA prewarm (mirroring normal usage
-                    // where the user initiates a drag after the ~13 ms warmup finishes).
-                    let handle = spawn_com_server_prewarm().unwrap();
-                    handle.join().unwrap();
+                "after_50ms" => {
+                    std::thread::sleep(Duration::from_millis(50));
                     assert!(helper_win1.get_initialized().is_none());
                 }
-                _ => {
+                "immediate_0ms" => {
                     assert!(helper_win1.get_initialized().is_none());
                 }
+                other => panic!("unknown mode: {other}"),
             }
 
             // 1. First DragEnter on window 1
@@ -475,18 +476,25 @@ mod tests {
         let mut eager_1 = Vec::with_capacity(runs);
         let mut eager_2 = Vec::with_capacity(runs);
         let mut eager_w2 = Vec::with_capacity(runs);
-        let mut prewarm_1 = Vec::with_capacity(runs);
-        let mut prewarm_2 = Vec::with_capacity(runs);
-        let mut prewarm_w2 = Vec::with_capacity(runs);
+        let mut imm_1 = Vec::with_capacity(runs);
+        let mut imm_2 = Vec::with_capacity(runs);
+        let mut imm_w2 = Vec::with_capacity(runs);
+        let mut steady_1 = Vec::with_capacity(runs);
+        let mut steady_2 = Vec::with_capacity(runs);
+        let mut steady_w2 = Vec::with_capacity(runs);
         for _ in 0..runs {
             let (e1, e2, ew2) = run_once("eager");
             eager_1.push(e1);
             eager_2.push(e2);
             eager_w2.push(ew2);
-            let (p1, p2, pw2) = run_once("prewarmed");
-            prewarm_1.push(p1);
-            prewarm_2.push(p2);
-            prewarm_w2.push(pw2);
+            let (i1, i2, iw2) = run_once("immediate_0ms");
+            imm_1.push(i1);
+            imm_2.push(i2);
+            imm_w2.push(iw2);
+            let (s1, s2, sw2) = run_once("after_50ms");
+            steady_1.push(s1);
+            steady_2.push(s2);
+            steady_w2.push(sw2);
         }
 
         let print_stats = |label: &str, values: &mut [f64]| {
@@ -499,90 +507,65 @@ mod tests {
                 values[values.len() - 1]
             );
         };
-        print_stats("eager     1st DragEnter (win1)", &mut eager_1);
-        print_stats("prewarmed 1st DragEnter (win1)", &mut prewarm_1);
-        print_stats("eager     2nd DragEnter (win1)", &mut eager_2);
-        print_stats("prewarmed 2nd DragEnter (win1)", &mut prewarm_2);
-        print_stats("eager     1st DragEnter (win2)", &mut eager_w2);
-        print_stats("prewarmed 1st DragEnter (win2)", &mut prewarm_w2);
+        print_stats("eager         1st DragEnter (win1)", &mut eager_1);
+        print_stats("immediate_0ms 1st DragEnter (win1)", &mut imm_1);
+        print_stats("after_50ms    1st DragEnter (win1)", &mut steady_1);
+        print_stats("eager         2nd DragEnter (win1)", &mut eager_2);
+        print_stats("immediate_0ms 2nd DragEnter (win1)", &mut imm_2);
+        print_stats("after_50ms    2nd DragEnter (win1)", &mut steady_2);
+        print_stats("eager         1st DragEnter (win2)", &mut eager_w2);
+        print_stats("immediate_0ms 1st DragEnter (win2)", &mut imm_w2);
+        print_stats("after_50ms    1st DragEnter (win2)", &mut steady_w2);
     }
 
     #[test]
     #[ignore = "manual multi-process startup benchmark"]
     #[allow(clippy::disallowed_methods)]
     fn bench_windows_platform_startup() {
-        if let Ok(mode) = std::env::var(BENCH_CHILD_ENV) {
+        if std::env::var_os(BENCH_CHILD_ENV).is_some() {
             let start = Instant::now();
             let platform = WindowsPlatform::new(false).unwrap();
-            let co_create_ms = if mode == "eager" {
-                let t = Instant::now();
-                let _helper: IDropTargetHelper = unsafe {
-                    CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER).unwrap()
-                };
-                t.elapsed().as_secs_f64() * 1000.0
-            } else {
-                0.0
-            };
             let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-            println!("RESULT_MS={elapsed_ms:.3},{co_create_ms:.3}");
+            println!("RESULT_MS={elapsed_ms:.3}");
             drop(platform);
             return;
         }
 
         let exe = std::env::current_exe().unwrap();
         let runs = 10;
-        let run_once = |mode: &str| -> (f64, f64) {
-            let output = Command::new(&exe)
-                .args([
-                    "--exact",
-                    "fast::drop_target_helper::tests::bench_windows_platform_startup",
-                    "--ignored",
-                    "--nocapture",
-                ])
-                .env(BENCH_CHILD_ENV, mode)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "child failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let line = stdout
-                .lines()
-                .find_map(|line| line.strip_prefix("RESULT_MS="))
-                .expect("missing RESULT_MS line");
-            let (total, co_create) = line.split_once(',').expect("expected total,co_create");
-            (total.parse().unwrap(), co_create.parse().unwrap())
-        };
+        let mut samples: Vec<f64> = (0..runs)
+            .map(|_| {
+                let output = Command::new(&exe)
+                    .args([
+                        "--exact",
+                        "fast::drop_target_helper::tests::bench_windows_platform_startup",
+                        "--ignored",
+                        "--nocapture",
+                    ])
+                    .env(BENCH_CHILD_ENV, "1")
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "child failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                stdout
+                    .lines()
+                    .find_map(|line| line.strip_prefix("RESULT_MS="))
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .expect("missing RESULT_MS line")
+            })
+            .collect();
 
-        let mut eager = Vec::with_capacity(runs);
-        let mut co_create = Vec::with_capacity(runs);
-        let mut lazy = Vec::with_capacity(runs);
-        for _ in 0..runs {
-            let (e, c) = run_once("eager");
-            eager.push(e);
-            co_create.push(c);
-            lazy.push(run_once("lazy").0);
-        }
-        let summarize = |values: &mut [f64]| {
-            values.sort_by(f64::total_cmp);
-            let avg = values.iter().sum::<f64>() / values.len() as f64;
-            let median = (values[values.len() / 2 - 1] + values[values.len() / 2]) / 2.0;
-            (avg, median, values[0], values[values.len() - 1])
-        };
-        let (e_avg, e_med, e_min, e_max) = summarize(&mut eager);
-        let (l_avg, l_med, l_min, l_max) = summarize(&mut lazy);
-        let (c_avg, c_med, c_min, c_max) = summarize(&mut co_create);
+        samples.sort_by(f64::total_cmp);
+        let avg = samples.iter().sum::<f64>() / samples.len() as f64;
+        let median = (samples[samples.len() / 2 - 1] + samples[samples.len() / 2]) / 2.0;
         println!(
-            "WindowsPlatform::new(false) eager      ({runs} procs): avg={e_avg:.2} ms median={e_med:.2} ms min={e_min:.2} ms max={e_max:.2} ms"
+            "WindowsPlatform::new(false) ({runs} procs): avg={avg:.2} ms median={median:.2} ms min={:.2} ms max={:.2} ms",
+            samples[0],
+            samples[samples.len() - 1]
         );
-        println!(
-            "WindowsPlatform::new(false) prewarmed  ({runs} procs): avg={l_avg:.2} ms median={l_med:.2} ms min={l_min:.2} ms max={l_max:.2} ms"
-        );
-        println!(
-            "CoCreateInstance(DragDropHelper)       ({runs} procs): avg={c_avg:.2} ms median={c_med:.2} ms min={c_min:.2} ms max={c_max:.2} ms"
-        );
-        println!("End-to-end delta: {:.2} ms", e_avg - l_avg);
     }
 }
