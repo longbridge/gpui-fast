@@ -222,6 +222,62 @@ pub(crate) fn begin_frame(a11y: &mut A11y) {
     }
 }
 
+/// Where the accessibility tree being built stands, so that [`rollback`] can
+/// undo the nodes pushed after it.
+pub(crate) struct A11yCheckpoint {
+    all_nodes: usize,
+    depth: usize,
+    children: usize,
+    focus: Option<NodeId>,
+    active_descendant: Option<NodeId>,
+}
+
+/// Takes a checkpoint of the tree being built, before [`crate::Window::transact`]
+/// runs a prepaint that may fail.
+pub(crate) fn checkpoint(window: &Window) -> A11yCheckpoint {
+    let nodes = &window.a11y.nodes;
+    A11yCheckpoint {
+        all_nodes: nodes.all_nodes.len(),
+        depth: nodes.ids_stack.len(),
+        children: nodes
+            .nodes_stack
+            .last()
+            .map_or(0, |node| node.children().len()),
+        focus: nodes.focus,
+        active_descendant: nodes.active_descendant,
+    }
+}
+
+/// Undoes every node pushed since `checkpoint` and forgets the ops logged
+/// after `ops_index`, as [`crate::Window::transact`] undoes the hitboxes of a
+/// prepaint that failed. Without it, the nodes of an element prepainted again
+/// (a list honoring an autoscroll request) would be pushed twice.
+pub(crate) fn rollback(window: &mut Window, checkpoint: A11yCheckpoint, ops_index: usize) {
+    let nodes = &mut window.a11y.nodes;
+    let depth = checkpoint.depth.min(nodes.ids_stack.len());
+    for id in nodes.ids_stack.drain(depth..) {
+        nodes.seen_ids.remove(&id);
+        #[cfg(debug_assertions)]
+        nodes.node_info.remove(&id);
+    }
+    nodes.nodes_stack.truncate(depth);
+    let all_nodes = checkpoint.all_nodes.min(nodes.all_nodes.len());
+    for (id, _) in nodes.all_nodes.drain(all_nodes..) {
+        nodes.seen_ids.remove(&id);
+        #[cfg(debug_assertions)]
+        nodes.node_info.remove(&id);
+    }
+    if let Some(parent) = nodes.nodes_stack.last_mut()
+        && parent.children().len() > checkpoint.children
+    {
+        let children = parent.children()[..checkpoint.children].to_vec();
+        parent.set_children(children);
+    }
+    nodes.focus = checkpoint.focus;
+    nodes.active_descendant = checkpoint.active_descendant;
+    nodes.fast.ops.truncate(ops_index);
+}
+
 /// Where the frame being drawn stands in its log, for a stretch of its
 /// prepaint to know where its part of the log lies.
 #[inline]

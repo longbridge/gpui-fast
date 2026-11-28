@@ -4722,8 +4722,10 @@ impl Window {
     pub fn transact<T, U>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, U>) -> Result<T, U> {
         self.invalidator.debug_assert_prepaint();
         let index = self.prepaint_index();
+        let a11y = crate::fast::a11y::checkpoint(self);
         let result = f(self);
         if result.is_err() {
+            crate::fast::a11y::rollback(self, a11y, index.fast_a11y_index);
             self.next_frame.hitboxes.truncate(index.hitboxes_index);
             self.next_frame
                 .tooltip_requests

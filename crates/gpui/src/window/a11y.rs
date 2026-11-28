@@ -373,20 +373,20 @@ impl<'a> A11ySubtreeBuilder<'a> {
 }
 
 pub(crate) struct A11yNodeBuilder {
-    ids_stack: SmallVec<[NodeId; 16]>,
+    pub(crate) ids_stack: SmallVec<[NodeId; 16]>,
     pub(crate) nodes_stack: SmallVec<[accesskit::Node; 16]>,
     /// This is the exact type required by accesskit, so we can't just make it a
     /// `HashMap<NodeId, Node>` to remove the need for `seen_ids`
     pub(crate) all_nodes: Vec<(NodeId, accesskit::Node)>,
-    seen_ids: FxHashSet<NodeId>,
+    pub(crate) seen_ids: FxHashSet<NodeId>,
     /// The node that GPUI considers focused. Note that this may be different to
     /// what is reported to accesskit - see [`Self::active_descendant`]
-    focus: Option<NodeId>,
+    pub(crate) focus: Option<NodeId>,
     /// If a node calls `.aria_active_descendant()`, AND an ancestor is focused,
     /// override it as the focused node. This supports the "active descendant"
     /// pattern, which allows a focused container to act as if a descendant is
     /// focused.
-    active_descendant: Option<NodeId>,
+    pub(crate) active_descendant: Option<NodeId>,
     #[cfg(debug_assertions)]
     pub(crate) node_info: FxHashMap<NodeId, debug::NodeDebugInfo>,
     pub(crate) fast: crate::fast::a11y::A11yLog,

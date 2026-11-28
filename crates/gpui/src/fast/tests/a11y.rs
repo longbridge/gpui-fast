@@ -620,6 +620,73 @@ fn a11y_captured_at_formats_in_its_time_zone() {
     );
 }
 
+struct TallRow {
+    state: crate::ListState,
+}
+
+impl Render for TallRow {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        crate::list(self.state.clone(), |_, _, _| {
+            div()
+                .id("row")
+                .role(Role::ListItem)
+                .flex()
+                .flex_col()
+                .child(div().id("button").role(Role::Button).h(px(20.)))
+                .child(
+                    // Asks the list to show the row's bottom, below the
+                    // viewport, as `reveal_range` on a text deep in the row
+                    // does: the list scrolls and prepaints the row again.
+                    crate::canvas(
+                        |bounds, window, _| {
+                            window.request_autoscroll(crate::Bounds::from_corners(
+                                crate::point(bounds.left(), bounds.bottom() - px(10.)),
+                                bounds.bottom_right(),
+                            ));
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .h(px(480.))
+                    .w_full(),
+                )
+                .into_any()
+        })
+        .w_full()
+        .h(px(100.))
+    }
+}
+
+/// A list prepainting a row again to honor its autoscroll request rolls
+/// back the accessibility nodes of the attempt it discards, as it rolls
+/// back its hitboxes, so the row's nodes are not pushed twice.
+#[crate::test]
+fn an_autoscroll_retry_does_not_push_a_row_s_nodes_twice(cx: &mut TestAppContext) {
+    let state = crate::ListState::new(1, crate::ListAlignment::Top, px(0.));
+    let window = cx.add_window({
+        let state = state.clone();
+        move |_, _| TallRow { state }
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.set_a11y_active_for_tests(true);
+        // The window's first frame scrolled before accessibility was on.
+        state.scroll_to(crate::ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
+        window.refresh();
+        window.draw(cx).clear(cx);
+        let (_, entries) = a11y_snapshot(window);
+        // The window, the list's row and its button, each once.
+        let buttons = entries
+            .iter()
+            .filter(|entry| entry.node.contains("Button"))
+            .count();
+        assert_eq!(buttons, 1, "{entries:#?}");
+    })
+    .unwrap();
+    assert!(state.logical_scroll_top().offset_in_item > px(0.));
+}
+
 /// A header above a scrolled list of buttons, recording which one a click
 /// reached.
 struct ScrolledUnderHeader {
