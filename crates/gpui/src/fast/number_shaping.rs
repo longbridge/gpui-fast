@@ -25,9 +25,9 @@ use crate::{
 use collections::FxHashMap;
 
 /// The characters numbers are put together from. Letters other than the
-/// units `K`, `M`, `B` and `T`, and anything a font might shape in context,
-/// like `:` or `x` between digits, are left to the platform.
-const CHARACTERS: &[u8] = b"0123456789.,+-%$KMBT";
+/// units `K`, `M`, `G`, `B` and `T`, and anything a font might shape in
+/// context, like `:` or `x` between digits, are left to the platform.
+const CHARACTERS: &[u8] = b"0123456789.,+-%$KMGBT";
 
 /// The longest line put together here; longer lines are rarely numbers.
 const MAX_LEN: usize = 64;

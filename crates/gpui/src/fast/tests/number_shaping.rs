@@ -39,6 +39,7 @@ impl Shaper {
             ('7', '4') => -0.75,
             ('1', '1') => -0.5,
             ('T', '.') => -1.25,
+            ('G', 'B') => -0.25,
             _ => 0.,
         }
     }
@@ -185,10 +186,11 @@ fn numbers_are_put_together_as_the_platform_shapes_them() {
     let mut shaping = NumberShaping::default();
     let size = px(13.);
     let numbers: Vec<String> = (0..CHECKED_FIRST as u64 + 40)
-        .map(|n| match n % 4 {
+        .map(|n| match n % 5 {
             0 => format!("{:.2}", 7400.0 + n as f64 * 1.11),
             1 => format!("{:+.2}%", n as f64 * 0.7 - 11.0),
             2 => format!("{:.2}T", 1.0 + n as f64),
+            3 => format!("{:.2}GB", 12.0 + n as f64 * 0.25),
             _ => format!("${}", 11_747 + n),
         })
         .collect();
@@ -199,14 +201,16 @@ fn numbers_are_put_together_as_the_platform_shapes_them() {
         assert_shaped_alike(&ours, &theirs, text);
     }
 
-    let before = shaper.lines();
-    let ours = shaping.shape(&shaper, "7411.47", size, &run("7411.47"));
-    assert_eq!(shaper.lines(), before, "a checked font needs no platform");
-    assert_shaped_alike(
-        &ours.unwrap(),
-        &shaper.layout_line("7411.47", size, &run("7411.47")),
-        "7411.47",
-    );
+    for text in ["7411.47", "12.50GB", "1.5G"] {
+        let before = shaper.lines();
+        let ours = shaping.shape(&shaper, text, size, &run(text));
+        assert_eq!(shaper.lines(), before, "a checked font needs no platform");
+        assert_shaped_alike(
+            &ours.unwrap(),
+            &shaper.layout_line(text, size, &run(text)),
+            text,
+        );
+    }
 }
 
 /// A pair the platform shapes as one glyph is never put together.
