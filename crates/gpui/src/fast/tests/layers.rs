@@ -2920,6 +2920,61 @@ mod policies {
         }
     }
 
+    /// An animated image asks for no animation frame (see
+    /// `fast::animated_image`): the content holding it stays eligible, is
+    /// composited while the image shows one frame, and is painted again, with
+    /// the image's next frame, in the frame drawn when that one is due.
+    #[crate::test]
+    fn an_animated_image_inside_the_content_keeps_it_eligible(cx: &mut TestAppContext) {
+        use super::super::animated_image::{FRAME_DELAY, gif, run_ready};
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let handle = page(cx, false);
+        let window = handle.into();
+        with_window(cx, window, |window, _| window.activate_window());
+        run_ready(cx);
+        let image = gif(FRAME_DELAY);
+        with_extra(cx, handle, move || {
+            crate::img(image.clone())
+                .id("gif")
+                .size(px(30.))
+                .into_any_element()
+        });
+        promote(cx, window);
+        assert_eq!(scroll(cx, window, -5.), Some(Decision::Composite));
+        let first = layer_sprites(cx, window);
+        assert_eq!(first.len(), 1, "the image is painted into the layer");
+
+        // The frame the image's wake-up draws.
+        frame_after(cx, window, |cx| {
+            cx.executor().advance_clock(FRAME_DELAY);
+            run_ready(cx);
+        });
+        assert_eq!(decision(cx, window), Some(Decision::Repaint));
+        let next = layer_sprites(cx, window);
+        assert_eq!(next.len(), 1);
+        assert_ne!(next, first, "the layer holds the image's next frame");
+        assert_eq!(scroll(cx, window, -5.), Some(Decision::Composite));
+        assert_eq!(layer_sprites(cx, window), next);
+    }
+
+    fn layer_sprites(cx: &mut TestAppContext, window: AnyWindowHandle) -> Vec<String> {
+        let id = scroller_id(cx, window);
+        with_window(cx, window, |window, _| {
+            let record = window.fast_layers.layers[&id]
+                .record
+                .as_ref()
+                .expect("the layer was painted");
+            let scene = record.content.scene().expect("the layer has one scene");
+            scene
+                .polychrome_sprites
+                .iter()
+                .map(|sprite| format!("{:?}", sprite.bounds.size))
+                .collect()
+        })
+    }
+
     #[crate::test]
     fn a_focused_input_inside_makes_it_ineligible(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {

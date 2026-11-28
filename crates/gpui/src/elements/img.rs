@@ -250,6 +250,7 @@ struct ImgState {
     frame_index: usize,
     last_frame_time: Option<Instant>,
     started_loading: Option<(Instant, Task<()>)>,
+    fast_next_frame: crate::fast::animated_image::NextFrame,
 }
 
 /// The image layout state between frames
@@ -288,6 +289,7 @@ impl Element for Img {
                     frame_index: 0,
                     last_frame_time: None,
                     started_loading: None,
+                    fast_next_frame: crate::fast::animated_image::NextFrame::default(),
                 })
             });
 
@@ -316,7 +318,7 @@ impl Element for Img {
                                 state.frame_index = state.frame_index.min(max_frame_index);
                                 if frame_count > 1 && !cx.reduce_motion() {
                                     if window.is_window_active() {
-                                        let current_time = Instant::now();
+                                        let current_time = crate::fast::animated_image::now(cx);
                                         if let Some(last_frame_time) = state.last_frame_time {
                                             let elapsed = current_time - last_frame_time;
                                             let frame_duration =
@@ -380,7 +382,14 @@ impl Element for Img {
                                 && window.is_window_active()
                                 && !cx.reduce_motion()
                             {
-                                window.request_animation_frame();
+                                crate::fast::animated_image::request_next_frame(
+                                    state.as_mut().map(|state| {
+                                        (&mut state.fast_next_frame, state.last_frame_time)
+                                    }),
+                                    data.delay(frame_index),
+                                    window,
+                                    cx,
+                                );
                             }
                         }
                         Some(_err) => {

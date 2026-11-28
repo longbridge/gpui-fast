@@ -3732,6 +3732,7 @@ dependencies = [
  "gpui_platform",
  "gpui_wgpu",
  "gtk",
+ "image",
  "lb-wry",
  "libc",
  "log",

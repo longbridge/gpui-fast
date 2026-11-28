@@ -30,6 +30,10 @@ name = "views_frames"
 required-features = ["fast"]
 
 [[example]]
+name = "animated_image"
+required-features = ["fast"]
+
+[[example]]
 name = "native_webview"
 required-features = ["fast"]
 
@@ -69,6 +73,7 @@ smol.workspace = true
 # its own wgpu device drawing into a native surface on Linux.
 [dev-dependencies]
 anyhow.workspace = true
+image.workspace = true
 log.workspace = true
 raw-window-handle.workspace = true
 
