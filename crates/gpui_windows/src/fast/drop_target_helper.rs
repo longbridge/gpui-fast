@@ -1,14 +1,20 @@
-//! Lazily initializes the Shell `CLSID_DragDropHelper` COM object on first drag.
+//! Lazily initializes the Shell `CLSID_DragDropHelper` COM object on first drag,
+//! while prewarming its in-process COM server off the UI thread during startup.
 //!
 //! Upstream instantiates `CLSID_DragDropHelper` synchronously inside
-//! `WindowsPlatform::new()`, loading the Shell drag-and-drop COM server during
-//! process startup even when an application never receives an external drag.
+//! `WindowsPlatform::new()`, paying ~10-13 ms on every GUI startup to activate
+//! the Shell drag-and-drop COM server (`shell32.dll`, `ThreadingModel =
+//! Apartment`) even when an application never receives an external drag.
 //!
-//! `LazyDropTargetHelper` shares one `OnceCell<Option<IDropTargetHelper>>`
-//! across all windows on the OLE STA UI thread and only calls
-//! `CoCreateInstance` on the first `IDropTarget::DragEnter`. If activation
-//! fails, the error is logged once and drag-preview calls become no-ops without
-//! disrupting file drop handling.
+//! Pure lazy initialization moves that ~10-12 ms into the first `DragEnter`
+//! callback on the UI thread, which exceeds a 120 Hz frame budget (8.33 ms).
+//! Instead, `LazyDropTargetHelper::new()` spawns a short-lived background
+//! thread with its own temporary STA (`COINIT_APARTMENTTHREADED`) that creates
+//! and immediately drops a throwaway `CLSID_DragDropHelper` instance before
+//! calling `CoUninitialize()`. No COM pointer crosses thread or apartment
+//! boundaries, while process-global DLLs and COM class factory caches are
+//! warmed off the UI thread. On the first `DragEnter`, the UI thread creates
+//! its own STA `IDropTargetHelper` in ~0.14 ms (matching eager baseline).
 
 use std::{cell::OnceCell, rc::Rc};
 
@@ -16,7 +22,10 @@ use gpui_util::ResultExt;
 use windows::Win32::{
     Foundation::{HWND, POINT},
     System::{
-        Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IDataObject},
+        Com::{
+            CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+            CoUninitialize, IDataObject,
+        },
         Ole::DROPEFFECT,
     },
     UI::Shell::{CLSID_DragDropHelper, IDropTargetHelper},
@@ -27,6 +36,7 @@ pub(crate) struct LazyDropTargetHelper(Rc<OnceCell<Option<IDropTargetHelper>>>);
 
 impl LazyDropTargetHelper {
     pub(crate) fn new() -> Self {
+        spawn_com_server_prewarm();
         Self(Rc::new(OnceCell::new()))
     }
 
@@ -51,6 +61,30 @@ impl LazyDropTargetHelper {
     fn get_initialized(&self) -> Option<&IDropTargetHelper> {
         self.0.get().and_then(Option::as_ref)
     }
+}
+
+/// Warms `CLSID_DragDropHelper`'s in-process COM server on a dedicated
+/// short-lived STA thread so neither `WindowsPlatform::new()` nor the first
+/// UI-thread `DragEnter` pays the one-time ~10-13 ms activation cost.
+///
+/// Using a dedicated thread rather than the shared `BackgroundExecutor` pool
+/// avoids apartment-mode conflicts (`RPC_E_CHANGED_MODE`) with worker threads
+/// that may already be initialized as MTA.
+fn spawn_com_server_prewarm() -> Option<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("gpui-dragdrop-prewarm".into())
+        .spawn(|| {
+            let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            if initialized.is_ok() {
+                let helper: windows::core::Result<IDropTargetHelper> =
+                    unsafe { CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER) };
+                std::mem::drop(helper);
+                unsafe {
+                    CoUninitialize();
+                }
+            }
+        })
+        .ok()
 }
 
 pub(crate) fn drag_enter(
@@ -106,11 +140,17 @@ pub(crate) fn drop(
 mod tests {
     use crate::fast::drop_target_helper::{
         LazyDropTargetHelper, drag_enter, drag_leave, drag_over, drop as drag_drop,
+        spawn_com_server_prewarm,
     };
     use crate::platform::WindowsPlatform;
+    use std::cell::OnceCell;
     use std::process::Command;
+    use std::rc::Rc;
     use std::time::Instant;
-    use windows::Win32::Foundation::{DV_E_FORMATETC, E_NOTIMPL, HWND, POINT, S_FALSE, S_OK};
+    use windows::Win32::Foundation::{
+        COLORREF, DV_E_FORMATETC, E_NOTIMPL, HWND, POINT, S_FALSE, S_OK, SIZE,
+    };
+    use windows::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
     use windows::Win32::System::{
         Com::{
             CLSCTX_INPROC_SERVER, CoCreateInstance, FORMATETC, IAdviseSink, IDataObject,
@@ -119,15 +159,22 @@ mod tests {
         Ole::{DROPEFFECT_COPY, OleInitialize, OleUninitialize},
     };
     use windows::Win32::UI::{
-        Shell::{CLSID_DragDropHelper, IDropTargetHelper},
+        Shell::{
+            BHID_DataObject, CLSID_DragDropHelper, IDragSourceHelper, IDropTargetHelper,
+            IShellItem, SHCreateItemFromParsingName, SHDRAGIMAGE,
+        },
         WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WINDOW_STYLE},
     };
-    use windows::core::{BOOL, HRESULT, Ref, Result, implement, w};
+    use windows::core::{BOOL, HRESULT, HSTRING, Ref, Result, implement, w};
 
     const BENCH_CHILD_ENV: &str = "GPUI_BENCH_DRAGDROP_CHILD";
     const BENCH_DRAG_CHILD_ENV: &str = "GPUI_BENCH_DRAG_ENTER_CHILD";
 
-    /// Minimal COM `IDataObject` for testing and benchmarking `IDropTargetHelper`
+    fn new_cold_helper() -> LazyDropTargetHelper {
+        LazyDropTargetHelper(Rc::new(OnceCell::new()))
+    }
+
+    /// Minimal COM `IDataObject` for timing `IDropTargetHelper::DragEnter`
     /// without pre-loading `shell32.dll` via `SHCreateItemFromParsingName`.
     #[implement(IDataObject)]
     struct MinimalDataObject;
@@ -230,7 +277,7 @@ mod tests {
     #[test]
     fn lazy_drop_target_helper_initializes_on_demand_and_shares_instance() {
         unsafe { OleInitialize(None).unwrap() };
-        let helper = LazyDropTargetHelper::new();
+        let helper = new_cold_helper();
         let cloned = helper.clone();
 
         assert!(helper.get_initialized().is_none());
@@ -248,11 +295,38 @@ mod tests {
     #[test]
     fn drag_lifecycle_across_two_windows_and_repeated_drags() {
         unsafe { OleInitialize(None).unwrap() };
-        let helper_win1 = LazyDropTargetHelper::new();
+        let prewarm = spawn_com_server_prewarm().unwrap();
+        prewarm.join().unwrap();
+
+        let helper_win1 = new_cold_helper();
         let helper_win2 = helper_win1.clone();
         let win1 = TestHwnd::new();
         let win2 = TestHwnd::new();
-        let data_object: IDataObject = MinimalDataObject.into();
+        let exe_path = HSTRING::from(std::env::current_exe().unwrap().as_os_str());
+        let shell_item: IShellItem =
+            unsafe { SHCreateItemFromParsingName(&exe_path, None) }.unwrap();
+        let data_object: IDataObject =
+            unsafe { shell_item.BindToHandler(None, &BHID_DataObject) }.unwrap();
+        // Attach a real Shell drag image (`DragImageBits` / `DragContext`), matching
+        // what Explorer sets on the `IDataObject` before calling `DoDragDrop`.
+        let source_helper: IDragSourceHelper =
+            unsafe { CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER) }.unwrap();
+        let bitmap = unsafe { CreateBitmap(16, 16, 1, 32, None) };
+        assert!(!bitmap.is_invalid());
+        let mut drag_image = SHDRAGIMAGE {
+            sizeDragImage: SIZE { cx: 16, cy: 16 },
+            ptOffset: POINT { x: 8, y: 8 },
+            hbmpDragImage: bitmap,
+            crColorKey: COLORREF(0),
+        };
+        if let Err(error) =
+            unsafe { source_helper.InitializeFromBitmap(&mut drag_image, &data_object) }
+        {
+            unsafe {
+                let _ = DeleteObject(bitmap.into());
+            }
+            panic!("IDragSourceHelper::InitializeFromBitmap failed: {error}");
+        }
         let pt = POINT { x: 20, y: 20 };
 
         // Calling over/leave before any DragEnter stays uninitialized and is a safe no-op.
@@ -261,24 +335,45 @@ mod tests {
         assert!(helper_win1.get_initialized().is_none());
         assert!(helper_win2.get_initialized().is_none());
 
-        // First drag on window 1: Enter -> Over -> Leave.
-        drag_enter(&helper_win1, win1.0, &data_object, &pt, DROPEFFECT_COPY);
-        assert!(helper_win1.get_initialized().is_some());
+        // First drag on window 1: Enter -> Over -> Leave; assert COM methods succeed.
+        let com_helper = helper_win1.get_or_init().expect("CLSID_DragDropHelper");
         assert!(helper_win2.get_initialized().is_some());
-        drag_over(&helper_win1, &pt, DROPEFFECT_COPY);
-        drag_leave(&helper_win1);
+        unsafe {
+            com_helper
+                .DragEnter(win1.0, &data_object, &pt, DROPEFFECT_COPY)
+                .unwrap();
+            com_helper.DragOver(&pt, DROPEFFECT_COPY).unwrap();
+            com_helper.DragLeave().unwrap();
+        }
 
         // Repeated drag on window 1: Enter -> Over -> Drop.
-        drag_enter(&helper_win1, win1.0, &data_object, &pt, DROPEFFECT_COPY);
-        drag_over(&helper_win1, &pt, DROPEFFECT_COPY);
-        drag_drop(&helper_win1, &data_object, &pt, DROPEFFECT_COPY);
+        unsafe {
+            com_helper
+                .DragEnter(win1.0, &data_object, &pt, DROPEFFECT_COPY)
+                .unwrap();
+            com_helper.DragOver(&pt, DROPEFFECT_COPY).unwrap();
+            com_helper.Drop(&data_object, &pt, DROPEFFECT_COPY).unwrap();
+        }
 
         // Drag on second window sharing the same LazyDropTargetHelper: Enter -> Over -> Drop.
+        let com_helper_win2 = helper_win2.get_initialized().expect("shared helper");
+        unsafe {
+            com_helper_win2
+                .DragEnter(win2.0, &data_object, &pt, DROPEFFECT_COPY)
+                .unwrap();
+            com_helper_win2.DragOver(&pt, DROPEFFECT_COPY).unwrap();
+            com_helper_win2
+                .Drop(&data_object, &pt, DROPEFFECT_COPY)
+                .unwrap();
+        }
+
+        // Also exercise the forwarding wrappers end-to-end.
         drag_enter(&helper_win2, win2.0, &data_object, &pt, DROPEFFECT_COPY);
         drag_over(&helper_win2, &pt, DROPEFFECT_COPY);
         drag_drop(&helper_win2, &data_object, &pt, DROPEFFECT_COPY);
 
         drop(data_object);
+        drop(shell_item);
         drop(win2);
         drop(win1);
         drop(helper_win2);
@@ -292,17 +387,27 @@ mod tests {
     fn bench_drag_enter_latency() {
         if let Ok(mode) = std::env::var(BENCH_DRAG_CHILD_ENV) {
             let platform = WindowsPlatform::new(false).unwrap();
-            let helper_win1 = LazyDropTargetHelper::new();
+            let helper_win1 = new_cold_helper();
             let helper_win2 = helper_win1.clone();
             let win1 = TestHwnd::new();
             let win2 = TestHwnd::new();
             let data_object: IDataObject = MinimalDataObject.into();
             let pt = POINT { x: 20, y: 20 };
 
-            if mode == "eager" {
-                assert!(helper_win1.get_or_init().is_some());
-            } else {
-                assert!(helper_win1.get_initialized().is_none());
+            match mode.as_str() {
+                "eager" => {
+                    assert!(helper_win1.get_or_init().is_some());
+                }
+                "prewarmed" => {
+                    // Wait for a fresh background STA prewarm (mirroring normal usage
+                    // where the user initiates a drag after the ~13 ms warmup finishes).
+                    let handle = spawn_com_server_prewarm().unwrap();
+                    handle.join().unwrap();
+                    assert!(helper_win1.get_initialized().is_none());
+                }
+                _ => {
+                    assert!(helper_win1.get_initialized().is_none());
+                }
             }
 
             // 1. First DragEnter on window 1
@@ -370,18 +475,18 @@ mod tests {
         let mut eager_1 = Vec::with_capacity(runs);
         let mut eager_2 = Vec::with_capacity(runs);
         let mut eager_w2 = Vec::with_capacity(runs);
-        let mut lazy_1 = Vec::with_capacity(runs);
-        let mut lazy_2 = Vec::with_capacity(runs);
-        let mut lazy_w2 = Vec::with_capacity(runs);
+        let mut prewarm_1 = Vec::with_capacity(runs);
+        let mut prewarm_2 = Vec::with_capacity(runs);
+        let mut prewarm_w2 = Vec::with_capacity(runs);
         for _ in 0..runs {
             let (e1, e2, ew2) = run_once("eager");
             eager_1.push(e1);
             eager_2.push(e2);
             eager_w2.push(ew2);
-            let (l1, l2, lw2) = run_once("lazy");
-            lazy_1.push(l1);
-            lazy_2.push(l2);
-            lazy_w2.push(lw2);
+            let (p1, p2, pw2) = run_once("prewarmed");
+            prewarm_1.push(p1);
+            prewarm_2.push(p2);
+            prewarm_w2.push(pw2);
         }
 
         let print_stats = |label: &str, values: &mut [f64]| {
@@ -389,17 +494,17 @@ mod tests {
             let avg = values.iter().sum::<f64>() / values.len() as f64;
             let median = (values[values.len() / 2 - 1] + values[values.len() / 2]) / 2.0;
             println!(
-                "{label:<36} ({runs} procs): avg={avg:6.3} ms median={median:6.3} ms min={:6.3} ms max={:6.3} ms",
+                "{label:<40} ({runs} procs): avg={avg:6.3} ms median={median:6.3} ms min={:6.3} ms max={:6.3} ms",
                 values[0],
                 values[values.len() - 1]
             );
         };
-        print_stats("eager 1st DragEnter (win1)", &mut eager_1);
-        print_stats("lazy  1st DragEnter (win1)", &mut lazy_1);
-        print_stats("eager 2nd DragEnter (win1)", &mut eager_2);
-        print_stats("lazy  2nd DragEnter (win1)", &mut lazy_2);
-        print_stats("eager 1st DragEnter (win2)", &mut eager_w2);
-        print_stats("lazy  1st DragEnter (win2)", &mut lazy_w2);
+        print_stats("eager     1st DragEnter (win1)", &mut eager_1);
+        print_stats("prewarmed 1st DragEnter (win1)", &mut prewarm_1);
+        print_stats("eager     2nd DragEnter (win1)", &mut eager_2);
+        print_stats("prewarmed 2nd DragEnter (win1)", &mut prewarm_2);
+        print_stats("eager     1st DragEnter (win2)", &mut eager_w2);
+        print_stats("prewarmed 1st DragEnter (win2)", &mut prewarm_w2);
     }
 
     #[test]
@@ -470,13 +575,13 @@ mod tests {
         let (l_avg, l_med, l_min, l_max) = summarize(&mut lazy);
         let (c_avg, c_med, c_min, c_max) = summarize(&mut co_create);
         println!(
-            "WindowsPlatform::new(false) eager  ({runs} procs): avg={e_avg:.2} ms median={e_med:.2} ms min={e_min:.2} ms max={e_max:.2} ms"
+            "WindowsPlatform::new(false) eager      ({runs} procs): avg={e_avg:.2} ms median={e_med:.2} ms min={e_min:.2} ms max={e_max:.2} ms"
         );
         println!(
-            "WindowsPlatform::new(false) lazy   ({runs} procs): avg={l_avg:.2} ms median={l_med:.2} ms min={l_min:.2} ms max={l_max:.2} ms"
+            "WindowsPlatform::new(false) prewarmed  ({runs} procs): avg={l_avg:.2} ms median={l_med:.2} ms min={l_min:.2} ms max={l_max:.2} ms"
         );
         println!(
-            "CoCreateInstance(DragDropHelper)   ({runs} procs): avg={c_avg:.2} ms median={c_med:.2} ms min={c_min:.2} ms max={c_max:.2} ms"
+            "CoCreateInstance(DragDropHelper)       ({runs} procs): avg={c_avg:.2} ms median={c_med:.2} ms min={c_min:.2} ms max={c_max:.2} ms"
         );
         println!("End-to-end delta: {:.2} ms", e_avg - l_avg);
     }
