@@ -16,6 +16,7 @@ pub(crate) mod device_recovery;
 pub(crate) mod device_wake;
 pub(crate) mod draw_state;
 pub(crate) mod dynamic_textures;
+pub(crate) mod font_collection;
 pub(crate) mod font_fallback;
 pub(crate) mod frame;
 pub(crate) mod frame_schedule;
