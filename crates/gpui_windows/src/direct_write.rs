@@ -93,13 +93,8 @@ impl DirectWriteTextSystem {
             system_subpixel_rendering,
         };
 
-        let system_font_collection = unsafe {
-            let mut result = None;
-            components
-                .factory
-                .GetSystemFontCollection(false, &mut result, true)?;
-            result.context("Failed to get system font collection")?
-        };
+        let system_font_collection =
+            crate::fast::font_collection::system_font_collection(&components.factory)?;
         let custom_font_set = unsafe { components.builder.CreateFontSet()? };
         let custom_font_collection = unsafe {
             components
