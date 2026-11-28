@@ -97,7 +97,7 @@ pub struct WindowsWindowState {
 pub(crate) struct WindowsWindowInner {
     hwnd: HWND,
     pub(crate) dialog_owner: Rc<crate::dialog::DialogOwner>,
-    drop_target_helper: IDropTargetHelper,
+    drop_target_helper: crate::fast::drop_target_helper::LazyDropTargetHelper,
     pub(crate) state: WindowsWindowState,
     system_settings: WindowsSystemSettings,
     pub(crate) handle: AnyWindowHandle,
@@ -428,7 +428,7 @@ struct WindowCreateContext {
     executor: ForegroundExecutor,
     current_cursor: Option<HCURSOR>,
     cursor_visible: Arc<AtomicBool>,
-    drop_target_helper: IDropTargetHelper,
+    drop_target_helper: crate::fast::drop_target_helper::LazyDropTargetHelper,
     validation_number: usize,
     main_receiver: PriorityQueueReceiver<RunnableVariant>,
     platform_window_handle: HWND,
@@ -1240,10 +1240,13 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
             } else {
                 *pdweffect = DROPEFFECT_NONE;
             }
-            self.0
-                .drop_target_helper
-                .DragEnter(self.0.hwnd, idata_obj, &cursor_position, *pdweffect)
-                .log_err();
+            crate::fast::drop_target_helper::drag_enter(
+                &self.0.drop_target_helper,
+                self.0.hwnd,
+                idata_obj,
+                &cursor_position,
+                *pdweffect,
+            );
         }
         Ok(())
     }
@@ -1257,10 +1260,11 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         let mut cursor_position = POINT { x: pt.x, y: pt.y };
         unsafe {
             *pdweffect = DROPEFFECT_COPY;
-            self.0
-                .drop_target_helper
-                .DragOver(&cursor_position, *pdweffect)
-                .log_err();
+            crate::fast::drop_target_helper::drag_over(
+                &self.0.drop_target_helper,
+                &cursor_position,
+                *pdweffect,
+            );
             ScreenToClient(self.0.hwnd, &mut cursor_position)
                 .ok()
                 .log_err();
@@ -1279,9 +1283,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
     }
 
     fn DragLeave(&self) -> windows::core::Result<()> {
-        unsafe {
-            self.0.drop_target_helper.DragLeave().log_err();
-        }
+        crate::fast::drop_target_helper::drag_leave(&self.0.drop_target_helper);
         let input = PlatformInput::FileDrop(FileDropEvent::Exited);
         self.handle_drag_drop(input);
 
@@ -1299,10 +1301,12 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         let mut cursor_position = POINT { x: pt.x, y: pt.y };
         unsafe {
             *pdweffect = DROPEFFECT_COPY;
-            self.0
-                .drop_target_helper
-                .Drop(idata_obj, &cursor_position, *pdweffect)
-                .log_err();
+            crate::fast::drop_target_helper::drop(
+                &self.0.drop_target_helper,
+                idata_obj,
+                &cursor_position,
+                *pdweffect,
+            );
             ScreenToClient(self.0.hwnd, &mut cursor_position)
                 .ok()
                 .log_err();

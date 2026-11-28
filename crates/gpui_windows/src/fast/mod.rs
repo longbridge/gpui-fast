@@ -15,6 +15,7 @@ pub(crate) mod composition_scene;
 pub(crate) mod device_recovery;
 pub(crate) mod device_wake;
 pub(crate) mod draw_state;
+pub(crate) mod drop_target_helper;
 pub(crate) mod dynamic_textures;
 pub(crate) mod font_fallback;
 pub(crate) mod frame;
